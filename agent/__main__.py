@@ -1,4 +1,4 @@
-"""Configuration check and a deliberately small connection smoke test."""
+"""CLI for the Qwen client."""
 
 import argparse
 import json

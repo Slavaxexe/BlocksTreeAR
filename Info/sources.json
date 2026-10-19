@@ -1,0 +1,89 @@
+{
+  "retrieved_date": "2026-10-19",
+  "root_folder": "https://drive.google.com/drive/folders/1eUjfuovujgEoUbtotU9uRGWLo-RacY3T",
+  "files": [
+    {
+      "path": "data/regression/train.csv",
+      "url": "https://drive.google.com/file/d/13FFSUKNgi-5Y9wxjknjAeSN6CwW4Hezg/view",
+      "size_bytes": 43416931,
+      "sha256": "096dac951cf44fade5417ddd0465c41beee3009663dbea34e8d464a4d3c7f775"
+    },
+    {
+      "path": "data/regression/test.csv",
+      "url": "https://drive.google.com/file/d/1QJrnlKHpTuMuGLozrP_HNb3a8PQcfo3A/view",
+      "size_bytes": 18346633,
+      "sha256": "a7c64db92a07e1a5b1e7f637bdd434da7a5e98a1676c854ec6a645c9e5827095"
+    },
+    {
+      "path": "data/regression/sample_submission.csv",
+      "url": "https://drive.google.com/file/d/1EnK_wuXAbhznCZn61DFrA0mXQVbQaXOp/view",
+      "size_bytes": 222554,
+      "sha256": "0016b18d58c47bbbe842556b4957ba215b3ad50121c9923260537d936a09eae1"
+    },
+    {
+      "path": "data/regression/data_dictionary.csv",
+      "url": "https://drive.google.com/file/d/11KgxLjtTzDBInClx_2bTGs1dLGMo1VXS/view",
+      "size_bytes": 7408,
+      "sha256": "ffd7a8574fa4b203c43915e26a53e4072637c0dce8f1e6e7bcf93374a89a26a3"
+    },
+    {
+      "path": "data/regression/task.md",
+      "url": "https://drive.google.com/file/d/1KHIW5Toc6D4Si8XXAo16PMBNJdLtbacA/view",
+      "size_bytes": 11089,
+      "sha256": "33f743ead4840336856cb9db8e25867f44512231beebff927326e8580e14d9d0"
+    },
+    {
+      "path": "data/classification/train.csv",
+      "url": "https://drive.google.com/file/d/1rzceF6sa83Bqoe3HSfL90s1LYjRSWoUv/view",
+      "size_bytes": 16567584,
+      "sha256": "171a8915070b7575b729a32f70a45d1ad7b6f43c65b4ce12a0a68af30d5cb4e0"
+    },
+    {
+      "path": "data/classification/test.csv",
+      "url": "https://drive.google.com/file/d/1MagJAodMc1IrCOP_cqS2kHDaJh-br7Hz/view",
+      "size_bytes": 7556373,
+      "sha256": "b825449603931b5f05a8855e3d92b57775221c93ed4730ac6b4c75b9ea608862"
+    },
+    {
+      "path": "data/classification/sample_submission.csv",
+      "url": "https://drive.google.com/file/d/1lwWumLZdv7XDkxxCk6tqhu4VtFbmqB4l/view",
+      "size_bytes": 565229,
+      "sha256": "4d23642fcff01e49b0ef5a9f018b2381c12fad97282fa586285ad49b01e9623e"
+    },
+    {
+      "path": "data/classification/data_dictionary.csv",
+      "url": "https://drive.google.com/file/d/1jQEwly8fLipVk6f8iM0poVwPD1lAo1X8/view",
+      "size_bytes": 3532,
+      "sha256": "13d2651c5fe02b7fc30f0e7290af45606aad5de76c2f7b69217abc270dbbcef4"
+    },
+    {
+      "path": "data/classification/task.md",
+      "url": "https://drive.google.com/file/d/1GNzZXQ3rGezpy_vAItzTml82GhIbEKrZ/view",
+      "size_bytes": 4699,
+      "sha256": "eebb55ebb8deb8257a2c012330ecc015e8d3a0bc3619c40da6c2a6ab200709bf"
+    },
+    {
+      "path": "baseline/baseline.py",
+      "url": "https://drive.google.com/file/d/17zkL_M4hepUf0AwyZZKSZ6Y3yRPixFjV/view",
+      "size_bytes": 3917,
+      "sha256": "ecf66e8d7c054624eeca710c13e2b82c1ac22a03314db8a45ff1778fa16e372d"
+    },
+    {
+      "path": "baseline/requirements.txt",
+      "url": "https://drive.google.com/file/d/1qmh2gFibCFfwbAKe6d6FCudv-zzjbnCY/view",
+      "size_bytes": 686,
+      "sha256": "ac27e467b9c5c6b8b6ca2a042a67e2beeb7d08e4d12d3852408909d2d5a07b0e"
+    },
+    {
+      "path": "baseline/requirements_data.txt",
+      "url": "https://drive.google.com/file/d/1M4-df5jF4Zfni5R9_cmnTWQ1913ZlQLb/view",
+      "size_bytes": 748,
+      "sha256": "9173b0388532fbd2a709e4f4b3029e3b9ccab685fce43a85261ffa1ba95efbe6"
+    }
+  ],
+  "assignment": {
+    "path": "Info/assignment.pdf",
+    "size_bytes": 7373706,
+    "sha256": "ed782a34f5bd8893f7175b997ca040cf89bbde63b1e56795ae73defa39c646b3"
+  }
+}

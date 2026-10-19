@@ -1,6 +1,6 @@
 # Интерфейс исходного baseline
 
-Источник: неизменённый `vendor/baseline.py`. Это описание прочитанного кода;
+Источник: неизменённый `baseline/baseline.py`. Это описание прочитанного кода;
 сам агент локально не запускался и API не вызывался.
 
 ## Запуск
@@ -8,8 +8,8 @@
 Текущий baseline принимает путь к Markdown-файлу первым позиционным аргументом:
 
 ```text
-python vendor/baseline.py data/raw/regression/task.local.md
-python vendor/baseline.py data/raw/classification/task.local.md
+python baseline/baseline.py data/regression/task.local.md
+python baseline/baseline.py data/classification/task.local.md
 ```
 
 Если аргумент не передан, используется `task.md` в текущем каталоге.
