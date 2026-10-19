@@ -16,11 +16,11 @@ AlfaHakaton/
 ├── viewer.py                Один скрипт: схема приложения, HTML-дерево JSON, localhost / экспорт
 ├── alfa_agent/
 │   ├── __init__.py          Объявление пакета
-│   ├── __main__.py          Старые команды check-config / ping / ask для проверки API
+│   ├── __main__.py          Команды check-config / ping / ask и отдельный этап extract
 │   ├── config.py            Настройки из env / .env; проверка значений, скрытие ключа
 │   ├── qwen.py              Один текстовый запрос к API; используется командами ping / ask
-│   ├── contracts.py         Pydantic-схемы задачи, гипотез, нод, сравнений и отчёта
-│   ├── agents.py            Асинхронные Qwen extractor / baker, проверка JSON, один repair
+│   ├── contracts.py         Pydantic-схемы извлечённых фактов, ML-ноды, сравнения и отчёты
+│   ├── agents.py            Extractor с цитатами, отдельная сверка extract_task; также черновой baker
 │   ├── data.py              Разбор поддерживаемого task.md, CSV, профиль, split, проверка submission
 │   ├── runner.py            Диспетчер: baseline, baker, worker, лимиты, публикация лучшего результата
 │   ├── worker.py            Отдельный процесс: pipeline, fit, метрика, refit, предсказания
@@ -28,12 +28,14 @@ AlfaHakaton/
 │   └── storage.py           Hash, чтение контрактов, атомарная запись файлов
 ├── tests/
 │   ├── test_qwen.py         API-клиент, конфигурация, отсутствие ключа в диагностике
+│   ├── test_extraction.py   Этап 1: реальные условия → HTTP-имитация → цитаты / схемы / CSV
 │   ├── test_pipeline.py     Контракты, ML-цикл, асинхронность, validation и таймауты
 │   └── test_viewer.py       Чтение меняющихся JSON, повреждённые записи, безопасный HTML
 ├── schemas/                 Экспорт JSON Schema из contracts.py; не отдельная реализация схем
 ├── data/raw/
 │   ├── regression/          Публичная регрессия: CSV, task.md, адаптированный task.local.md
 │   └── classification/      Публичная классификация: те же типы исходных файлов
+├── artifacts/extraction/    Факты problem / data / metric / output, extraction.json, task.json, report.json
 ├── outputs/                 Генерируемые артефакты; исключены из git
 │   ├── monitor.html         Автономный снимок просмотрщика, создаётся viewer.py --export
 │   └── <задача>/<run-id>/
@@ -65,6 +67,10 @@ AlfaHakaton/
 JSON внутри выбранного каталога; CSV и настройки API ему не нужны.
 
 ## Связи
+
+Текущий этап: `python -m alfa_agent extract` → четыре sourced-контракта → сверка
+с CSV → `ready/failed`; обучение не вызывается. Спецификация: [docs/EXTRACTION_STAGE.md](docs/EXTRACTION_STAGE.md).
+Ниже — сохранённый черновик следующих этапов, который пока не дорабатываем.
 
 - `solution.py` → `runner.run()` → `data.py` + общие контракты / split.
 - Сначала `worker.py` выполняет Dummy baseline и появляется первый submission.

@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 NodeID = Annotated[str, Field(pattern=r"^node_[0-9]{3}$")]
@@ -48,6 +48,81 @@ class Task(Contract):
             raise ValueError("Unsupported task/metric combination")
         if self.problem.target_column == self.data.id_column:
             raise ValueError("Target cannot be the ID")
+        return self
+
+
+class Sourced(Contract):
+    evidence: dict[str, list[str]] = Field(description="Exact task quotes keyed by each nonempty field name")
+
+    @model_validator(mode="after")
+    def check_evidence(self, info: ValidationInfo):
+        values = self.model_dump(exclude={"evidence"})
+        populated = {key for key, value in values.items() if value is not None and value != [] and value != ""}
+        if set(self.evidence) != populated:
+            raise ValueError("Every nonempty field needs evidence; unknown fields cannot have evidence")
+        source = (info.context or {}).get("source")
+        if source is None:
+            return self
+        normalize = lambda text: " ".join(text.split())
+        literal = {"target_column", "id_column", "train_file", "test_file", "sample_submission_file",
+                   "dictionary_file", "submission_file", "target_unit", "class_labels", "columns", "warnings"}
+        for field, quotes in self.evidence.items():
+            if not quotes or len(quotes) > 8 or any(not quote.strip() or len(quote) > 1800
+                                                  or normalize(quote) not in normalize(source) for quote in quotes):
+                raise ValueError(f"{field}: evidence needs real task quotes, each up to 1800 characters")
+            if field in literal:
+                items = values[field] if isinstance(values[field], list) else [values[field]]
+                if any(not any(normalize(str(item)) in normalize(quote) for quote in quotes) for item in items):
+                    raise ValueError(f"{field}: extracted values must occur in their evidence")
+        return self
+
+
+class ProblemFacts(Problem, Sourced):
+    target_unit: str | None = None
+    class_labels: list[str] = Field(default_factory=list, max_length=100)
+    warnings: list[str] = Field(default_factory=list, max_length=8, description="Verbatim task caveats, not recommendations")
+
+
+class DataFacts(DataFiles, Sourced):
+    dictionary_file: str | None = None
+    encoding: str | None = None
+    delimiter: str | None = Field(default=None, min_length=1, max_length=1)
+    decimal: str | None = Field(default=None, min_length=1, max_length=1)
+
+
+class MetricFacts(Metric, Sourced):
+    secondary_metrics: list[Literal["accuracy", "weighted_f1"]] = Field(default_factory=list)
+
+
+class OutputFacts(Sourced):
+    submission_file: str = Field(min_length=1)
+    columns: list[str] = Field(min_length=2, max_length=2)
+    prediction_type: Literal["number", "label"]
+    preserve_test_order: bool
+    unique_ids: bool
+
+
+class Extraction(Contract):
+    schema_version: Literal[1] = 1
+    problem: ProblemFacts
+    data: DataFacts
+    metric: MetricFacts
+    output: OutputFacts
+
+    def core_task(self) -> Task:
+        return Task(**{key: schema.model_validate(getattr(self, key).model_dump(include=set(schema.model_fields)))
+                       for key, schema in (("problem", Problem), ("data", DataFiles), ("metric", Metric))})
+
+    @model_validator(mode="after")
+    def coherent(self):
+        task = self.core_task()
+        if self.output.columns != [task.data.id_column, task.problem.target_column]:
+            raise ValueError("Output columns must match the task ID and target in order")
+        expected = "number" if task.problem.task_type == "regression" else "label"
+        if self.output.prediction_type != expected:
+            raise ValueError("Prediction type contradicts the task")
+        if expected == "number" and self.problem.class_labels:
+            raise ValueError("Regression cannot have classification labels")
         return self
 
 
@@ -189,6 +264,15 @@ class LLMCall(Contract):
     completion_tokens: int = 0
 
 
+class ExtractionReport(Contract):
+    schema_version: Literal[1] = 1
+    status: Literal["ready", "failed"]
+    task_sha256: SHA256
+    checks: list[str]
+    errors: list[str]
+    llm_calls: list[LLMCall]
+
+
 class RunReport(Contract):
     schema_version: Literal[1] = 1
     mode: Literal["qwen", "offline"]
@@ -201,4 +285,4 @@ class RunReport(Contract):
 
 
 SCHEMAS = (Problem, DataFiles, Metric, Task, Profile, Validation, Hypothesis,
-           Start, Finish, Delta, Best, LLMCall, RunReport)
+           Start, Finish, Delta, Best, LLMCall, RunReport, Extraction, ExtractionReport)

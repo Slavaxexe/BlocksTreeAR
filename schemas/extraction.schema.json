@@ -1,0 +1,301 @@
+{
+  "$defs": {
+    "DataFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Exact task quotes keyed by each nonempty field name",
+          "title": "Evidence",
+          "type": "object"
+        },
+        "train_file": {
+          "minLength": 1,
+          "title": "Train File",
+          "type": "string"
+        },
+        "test_file": {
+          "minLength": 1,
+          "title": "Test File",
+          "type": "string"
+        },
+        "sample_submission_file": {
+          "minLength": 1,
+          "title": "Sample Submission File",
+          "type": "string"
+        },
+        "id_column": {
+          "minLength": 1,
+          "title": "Id Column",
+          "type": "string"
+        },
+        "dictionary_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dictionary File"
+        },
+        "encoding": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Encoding"
+        },
+        "delimiter": {
+          "anyOf": [
+            {
+              "maxLength": 1,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delimiter"
+        },
+        "decimal": {
+          "anyOf": [
+            {
+              "maxLength": 1,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decimal"
+        }
+      },
+      "required": [
+        "evidence",
+        "train_file",
+        "test_file",
+        "sample_submission_file",
+        "id_column"
+      ],
+      "title": "DataFacts",
+      "type": "object"
+    },
+    "MetricFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Exact task quotes keyed by each nonempty field name",
+          "title": "Evidence",
+          "type": "object"
+        },
+        "name": {
+          "enum": [
+            "rmse",
+            "macro_f1"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "minimize",
+            "maximize"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "secondary_metrics": {
+          "items": {
+            "enum": [
+              "accuracy",
+              "weighted_f1"
+            ],
+            "type": "string"
+          },
+          "title": "Secondary Metrics",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence",
+        "name",
+        "direction"
+      ],
+      "title": "MetricFacts",
+      "type": "object"
+    },
+    "OutputFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Exact task quotes keyed by each nonempty field name",
+          "title": "Evidence",
+          "type": "object"
+        },
+        "submission_file": {
+          "minLength": 1,
+          "title": "Submission File",
+          "type": "string"
+        },
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Columns",
+          "type": "array"
+        },
+        "prediction_type": {
+          "enum": [
+            "number",
+            "label"
+          ],
+          "title": "Prediction Type",
+          "type": "string"
+        },
+        "preserve_test_order": {
+          "title": "Preserve Test Order",
+          "type": "boolean"
+        },
+        "unique_ids": {
+          "title": "Unique Ids",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "evidence",
+        "submission_file",
+        "columns",
+        "prediction_type",
+        "preserve_test_order",
+        "unique_ids"
+      ],
+      "title": "OutputFacts",
+      "type": "object"
+    },
+    "ProblemFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Exact task quotes keyed by each nonempty field name",
+          "title": "Evidence",
+          "type": "object"
+        },
+        "task_type": {
+          "enum": [
+            "regression",
+            "classification"
+          ],
+          "title": "Task Type",
+          "type": "string"
+        },
+        "target_column": {
+          "minLength": 1,
+          "title": "Target Column",
+          "type": "string"
+        },
+        "target_unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Unit"
+        },
+        "class_labels": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Class Labels",
+          "type": "array"
+        },
+        "warnings": {
+          "description": "Verbatim task caveats, not recommendations",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence",
+        "task_type",
+        "target_column"
+      ],
+      "title": "ProblemFacts",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "problem": {
+      "$ref": "#/$defs/ProblemFacts"
+    },
+    "data": {
+      "$ref": "#/$defs/DataFacts"
+    },
+    "metric": {
+      "$ref": "#/$defs/MetricFacts"
+    },
+    "output": {
+      "$ref": "#/$defs/OutputFacts"
+    }
+  },
+  "required": [
+    "problem",
+    "data",
+    "metric",
+    "output"
+  ],
+  "title": "Extraction",
+  "type": "object"
+}

@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "LLMCall": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "attempt": {
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "invalid_json",
+            "api_error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "prompt_tokens": {
+          "default": 0,
+          "title": "Prompt Tokens",
+          "type": "integer"
+        },
+        "completion_tokens": {
+          "default": 0,
+          "title": "Completion Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "attempt",
+        "status"
+      ],
+      "title": "LLMCall",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "task_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Task Sha256",
+      "type": "string"
+    },
+    "checks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Checks",
+      "type": "array"
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "llm_calls": {
+      "items": {
+        "$ref": "#/$defs/LLMCall"
+      },
+      "title": "Llm Calls",
+      "type": "array"
+    }
+  },
+  "required": [
+    "status",
+    "task_sha256",
+    "checks",
+    "errors",
+    "llm_calls"
+  ],
+  "title": "ExtractionReport",
+  "type": "object"
+}
