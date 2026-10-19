@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "strategy": {
+      "const": "holdout",
+      "default": "holdout",
+      "title": "Strategy",
+      "type": "string"
+    },
+    "seed": {
+      "default": 42,
+      "minimum": 0,
+      "title": "Seed",
+      "type": "integer"
+    },
+    "fraction": {
+      "default": 0.2,
+      "exclusiveMaximum": 1.0,
+      "exclusiveMinimum": 0.0,
+      "title": "Fraction",
+      "type": "number"
+    },
+    "stratified": {
+      "title": "Stratified",
+      "type": "boolean"
+    },
+    "split_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Split Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "stratified",
+    "split_sha256"
+  ],
+  "title": "Validation",
+  "type": "object"
+}

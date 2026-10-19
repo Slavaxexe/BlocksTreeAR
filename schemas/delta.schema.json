@@ -1,0 +1,180 @@
+{
+  "$defs": {
+    "Change": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "before": {
+          "title": "Before",
+          "type": "string"
+        },
+        "after": {
+          "title": "After",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "before",
+        "after"
+      ],
+      "title": "Change",
+      "type": "object"
+    },
+    "Comparison": {
+      "additionalProperties": false,
+      "properties": {
+        "reference_id": {
+          "pattern": "^node_[0-9]{3}$",
+          "title": "Reference Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "pattern": "^node_[0-9]{3}$",
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "metric_delta": {
+          "title": "Metric Delta",
+          "type": "number"
+        },
+        "improvement": {
+          "title": "Improvement",
+          "type": "number"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/Change"
+          },
+          "title": "Changes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "reference_id",
+        "candidate_id",
+        "metric_delta",
+        "improvement",
+        "changes"
+      ],
+      "title": "Comparison",
+      "type": "object"
+    },
+    "Metric": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "rmse",
+            "macro_f1"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "minimize",
+            "maximize"
+          ],
+          "title": "Direction",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "direction"
+      ],
+      "title": "Metric",
+      "type": "object"
+    },
+    "Score": {
+      "additionalProperties": false,
+      "properties": {
+        "node_id": {
+          "pattern": "^node_[0-9]{3}$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        },
+        "family": {
+          "title": "Family",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "value",
+        "family"
+      ],
+      "title": "Score",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "latest_node_id": {
+      "pattern": "^node_[0-9]{3}$",
+      "title": "Latest Node Id",
+      "type": "string"
+    },
+    "best_node_id": {
+      "anyOf": [
+        {
+          "pattern": "^node_[0-9]{3}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Best Node Id"
+    },
+    "metric": {
+      "$ref": "#/$defs/Metric"
+    },
+    "leaderboard": {
+      "items": {
+        "$ref": "#/$defs/Score"
+      },
+      "title": "Leaderboard",
+      "type": "array"
+    },
+    "comparisons": {
+      "items": {
+        "$ref": "#/$defs/Comparison"
+      },
+      "title": "Comparisons",
+      "type": "array"
+    },
+    "failed_node_ids": {
+      "items": {
+        "pattern": "^node_[0-9]{3}$",
+        "type": "string"
+      },
+      "title": "Failed Node Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "latest_node_id",
+    "best_node_id",
+    "metric",
+    "leaderboard",
+    "comparisons",
+    "failed_node_ids"
+  ],
+  "title": "Delta",
+  "type": "object"
+}

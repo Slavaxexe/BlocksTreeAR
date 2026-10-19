@@ -1,0 +1,162 @@
+{
+  "$defs": {
+    "Best": {
+      "additionalProperties": false,
+      "properties": {
+        "node_id": {
+          "pattern": "^node_[0-9]{3}$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "metric": {
+          "$ref": "#/$defs/Metric"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        },
+        "submission_file": {
+          "title": "Submission File",
+          "type": "string"
+        },
+        "split_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Split Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "metric",
+        "value",
+        "submission_file",
+        "split_sha256"
+      ],
+      "title": "Best",
+      "type": "object"
+    },
+    "LLMCall": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "attempt": {
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "invalid_json",
+            "api_error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "prompt_tokens": {
+          "default": 0,
+          "title": "Prompt Tokens",
+          "type": "integer"
+        },
+        "completion_tokens": {
+          "default": 0,
+          "title": "Completion Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "attempt",
+        "status"
+      ],
+      "title": "LLMCall",
+      "type": "object"
+    },
+    "Metric": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "rmse",
+            "macro_f1"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "minimize",
+            "maximize"
+          ],
+          "title": "Direction",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "direction"
+      ],
+      "title": "Metric",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "mode": {
+      "enum": [
+        "qwen",
+        "offline"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "stop_reason": {
+      "title": "Stop Reason",
+      "type": "string"
+    },
+    "best": {
+      "$ref": "#/$defs/Best"
+    },
+    "experiments": {
+      "title": "Experiments",
+      "type": "integer"
+    },
+    "elapsed_seconds": {
+      "title": "Elapsed Seconds",
+      "type": "number"
+    },
+    "llm_calls": {
+      "items": {
+        "$ref": "#/$defs/LLMCall"
+      },
+      "title": "Llm Calls",
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "mode",
+    "stop_reason",
+    "best",
+    "experiments",
+    "elapsed_seconds",
+    "llm_calls",
+    "warnings"
+  ],
+  "title": "RunReport",
+  "type": "object"
+}

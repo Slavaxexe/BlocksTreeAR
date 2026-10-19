@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "Metric": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "rmse",
+            "macro_f1"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "minimize",
+            "maximize"
+          ],
+          "title": "Direction",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "direction"
+      ],
+      "title": "Metric",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "node_id": {
+      "pattern": "^node_[0-9]{3}$",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "failed",
+        "timeout"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "metric": {
+      "$ref": "#/$defs/Metric"
+    },
+    "value": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Value"
+    },
+    "duration_seconds": {
+      "minimum": 0.0,
+      "title": "Duration Seconds",
+      "type": "number"
+    },
+    "split_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Split Sha256",
+      "type": "string"
+    },
+    "pipeline_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Pipeline Sha256",
+      "type": "string"
+    },
+    "submission_file": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Submission File"
+    },
+    "validation_rows": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Validation Rows",
+      "type": "integer"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "maxLength": 1200,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    }
+  },
+  "required": [
+    "node_id",
+    "status",
+    "metric",
+    "duration_seconds",
+    "split_sha256",
+    "pipeline_sha256"
+  ],
+  "title": "Finish",
+  "type": "object"
+}

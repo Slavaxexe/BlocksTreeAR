@@ -14,4 +14,7 @@ logs/
 # Generated model artifacts
 artifacts/
 outputs/
+data/**/submission.csv
 *.zip
+.playwright-cli/
+output/playwright/

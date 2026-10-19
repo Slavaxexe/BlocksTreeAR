@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "enum": [
+        "rmse",
+        "macro_f1"
+      ],
+      "title": "Name",
+      "type": "string"
+    },
+    "direction": {
+      "enum": [
+        "minimize",
+        "maximize"
+      ],
+      "title": "Direction",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "direction"
+  ],
+  "title": "Metric",
+  "type": "object"
+}

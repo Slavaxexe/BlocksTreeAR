@@ -19,8 +19,8 @@ class Settings:
     api_key: str = field(repr=False)
     base_url: str
     model: str
-    timeout_seconds: float = 60
-    max_tokens: int = 1024
+    timeout_seconds: float = 90
+    max_tokens: int = 2048
 
     @classmethod
     def from_env(
@@ -33,8 +33,8 @@ class Settings:
         values = dict(dotenv_values(path, encoding="utf-8", interpolate=False))
         values.update(os.environ if environ is None else environ)
         try:
-            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "60")
-            max_tokens = int(values.get("QWEN_MAX_TOKENS") or "1024")
+            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "90")
+            max_tokens = int(values.get("QWEN_MAX_TOKENS") or "2048")
         except (ValueError, TypeError):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS и QWEN_MAX_TOKENS должны быть числами.") from None
         return cls(
