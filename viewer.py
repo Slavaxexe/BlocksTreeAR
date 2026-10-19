@@ -1,4 +1,4 @@
-"""Read-only local viewer: python viewer.py [outputs|run-dir] [--export snapshot.html]."""
+"""Read-only local viewer: python viewer.py [JSON directories ...] [--export snapshot.html]."""
 
 import argparse
 from functools import partial
@@ -9,10 +9,19 @@ import time
 from urllib.parse import urlsplit
 
 
-def collect(root: Path) -> dict:
-    """Only known experiment JSON files are read; no CSV, .env or API access."""
-    root = root.resolve()
-    folders = [root] if (root / "task.json").is_file() else [p.parent for p in root.glob("**/task.json")]
+def collect(root: Path, *extra_roots: Path) -> dict:
+    """Read known JSON, including partial extractions; no CSV, .env or API access."""
+    roots, runs = (root, *extra_roots), []
+    anchors = ("task.json", "problem.json", "data.json", "metric.json", "output.json", "extraction.json", "report.json")
+    for root in roots:
+        root = root.resolve()
+        folders = [root] if any((root / name).is_file() for name in anchors) else sorted(
+            {p.parent for name in anchors for p in root.glob(f"**/{name}")})
+        runs.extend(collect_folders(root, folders, prefix=root.name + "/" if len(roots) > 1 else ""))
+    return {"runs": sorted(runs, key=lambda r: r["modified"], reverse=True), "captured": time.time()}
+
+
+def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
     runs = []
     for folder in folders:
         warnings, modified = [], []
@@ -31,24 +40,29 @@ def collect(root: Path) -> dict:
                 warnings.append(f"{path.relative_to(folder)}: JSON недоступен или некорректен")
                 return None
         task = read(folder / "task.json")
-        if task is None:
-            continue
         run = {key: read(folder / f"{key}.json") for key in ("profile", "validation", "best", "delta", "report")}
+        blocks = {key: read(folder / f"{key}.json") for key in ("problem", "data", "metric", "output")}
+        extraction = read(folder / "extraction.json")
+        is_extraction = extraction is not None or any(b is not None and "evidence" in b for b in blocks.values())
+        is_extraction |= "task_sha256" in (run["report"] or {}) and "status" in (run["report"] or {})
+        if task is None and not is_extraction:
+            continue
         nodes = []
         for directory in sorted((folder / "nodes").glob("node_*")):
             start = read(directory / "start.json")
             if start:
                 nodes.append({"id": directory.name, "start": start, "finish": read(directory / "finish.json"),
                               "delta": read(directory / "delta.json")})
-        run.update(id=folder.relative_to(root).as_posix() if folder != root else folder.name,
+        run.update(id=prefix + (folder.relative_to(root).as_posix() if folder != root else folder.name),
+                   directory=str(folder), kind="extraction" if is_extraction else "experiment", blocks=blocks, extraction=extraction,
                    task=task, nodes=nodes, warnings=warnings, modified=max(modified, default=0))
         runs.append(run)
-    return {"runs": sorted(runs, key=lambda r: r["modified"], reverse=True), "captured": time.time()}
+    return runs
 
 
 HTML = r'''<!doctype html>
 <html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Alfa · Схема и эксперименты</title><link rel="icon" href="data:,">
+<title>Alfa · Извлечение и эксперименты</title><link rel="icon" href="data:,">
 <style>
 :root{color-scheme:light dark;--bg:light-dark(#f6f7fa,#11141a);--paper:light-dark(#fff,#1a1f28);--ink:light-dark(#202638,#e2e7ef);--muted:light-dark(#647084,#a3aec0);--line:light-dark(#dce1eb,#353d4d);--purple:light-dark(#6947c4,#bea7ff);--purple-bg:light-dark(#f2edff,#2c2444);--teal:light-dark(#087c72,#75d7c1);--teal-bg:light-dark(#eaf7f2,#17362f);--red:light-dark(#b34343,#f4a2a2);--red-bg:light-dark(#fff0ef,#3d272a);--amber:light-dark(#95650b,#e5bf74)}
 
@@ -105,6 +119,10 @@ main{max-width:1400px;margin:auto;padding:0 32px 28px}
 .summary strong{display:block;color:var(--ink);font-size:16px;font-weight:600;margin-top:3px}
 .detail{border-left:1px solid var(--line);padding-left:20px;overflow-wrap:anywhere}
 .detail pre{background:var(--bg);border-radius:7px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;max-height:460px;overflow:auto}
+.facts{max-height:510px;overflow:auto;margin:16px 0}
+.facts p{margin:4px 0 8px}
+.facts summary{cursor:pointer;color:var(--muted)}
+blockquote{margin:8px 0;padding:0 10px;border-left:2px solid var(--line);color:var(--muted)}
 .json-tabs{display:flex;gap:6px;margin-top:20px}
 .json-tabs button{font-size:12px;padding:5px 10px}
 .comparison{padding:8px 0;border-bottom:1px solid var(--line);font-size:12px}
@@ -125,11 +143,11 @@ nav{flex-wrap:wrap}
 }
 
 </style>
-<header><div><h1>Как работает ML-агент</h1><small>Текущая реализация · JSON → эксперимент → измерение → следующая гипотеза</small></div><nav aria-label="Разделы"><button id="architecture-tab" aria-selected="true">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
-<div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск эксперимента"></select></label><span id="connection" role="status"></span></div>
+<header><div><h1>Как работает ML-агент</h1><small>Этап 1 · условие → факты с цитатами → проверенный JSON</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
+<div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel"><div class="legend"><span><i class="dot"></i>Детерминированный Python</span><span><i class="dot llm"></i>Вызов Qwen API</span><span><i class="dot cpu"></i>Локальное обучение на CPU</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" viewBox="0 0 1120 820" role="img" aria-label="Схема фактической работы приложения: baseline, проверка Qwen, гипотезы, два worker, сравнение и сохранение лучшего результата"></svg></div><p class="footnote">Baseline сохраняется до первого обращения к Qwen. Summarizer — обычный код. Worker исполняет только заранее написанные sklearn pipeline; текст модели не запускается как Python.</p></section>
-<section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><div class="legend"><span><i class="dot cpu"></i>Завершён</span><span><i class="dot error"></i>Ошибка / таймаут</span><span><i class="dot llm"></i>Лучший результат</span><span>Связь = parent_id · нажмите ноду для деталей</span></div><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Дерево происхождения ML-гипотез"></svg></div><aside id="detail" class="detail" aria-label="Детали эксперимента"></aside></div></div><p class="footnote">Показаны записанные JSON, а не скрытое состояние процесса. Нода без finish могла ещё выполняться или быть прервана. Сам запрос baker виден только после появления start.json; без report.json завершение запуска не подтверждено.</p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">Сохранённый черновик полного ML-цикла. Текущий отдельный этап с четырьмя extractor’ами показан во вкладке «Извлечение».</p><div class="legend"><span><i class="dot"></i>Детерминированный Python</span><span><i class="dot llm"></i>Вызов Qwen API</span><span><i class="dot cpu"></i>Локальное обучение на CPU</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" viewBox="0 0 1120 820" role="img" aria-label="Черновик полного ML-цикла: baseline, проверка Qwen, гипотезы, два worker, сравнение и сохранение лучшего результата"></svg></div><p class="footnote">Baseline сохраняется до первого обращения к Qwen. Summarizer — обычный код. Worker исполняет только заранее написанные sklearn pipeline; текст модели не запускается как Python.</p></section>
+<section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><p id="tree-legend" class="legend"></p><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Граф сохранённых JSON"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранного блока"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
 const $=id=>document.getElementById(id), NS='http://www.w3.org/2000/svg';
@@ -139,7 +157,9 @@ const fmt=n=>typeof n==='number'&&Number.isFinite(n)?n.toFixed(6):'—';
 const families={dummy:'Dummy baseline',extra_trees:'ExtraTrees',hist_gradient_boosting:'HistGradientBoosting'};
 const statuses={completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
 const stops={max_experiments:'Лимит экспериментов',time_budget:'Лимит времени',proposal_limit:'Лимит предложений',llm_unavailable_or_contract_conflict:'API / конфликт контракта',llm_unavailable_or_invalid_hypothesis:'API / невалидная гипотеза'};
-let state=JSON.parse($('initial-data').textContent), active=null, selected=null, jsonTab='start', signature='', live=__LIVE__;
+const roles={problem:'Задача',data:'Данные',metric:'Метрика',output:'Формат ответа'};
+const extractionStatus=r=>({ready:'Готово',failed:'Ошибка'}[r.report?.status]??'Нет итогового отчёта');
+let state=JSON.parse($('initial-data').textContent), active=null, selected=null, jsonTab='start', signature='', view='extraction', live=__LIVE__;
 function marker(canvas){const d=svg('defs'),m=svg('marker',{id:canvas.id+'-arrow',viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'});m.append(svg('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'var(--muted)'}));d.append(m);canvas.append(d)}
 function edge(canvas,d,feedback=false){canvas.append(svg('path',{d,class:'edge'+(feedback?' feedback':''),'marker-end':`url(#${canvas.id}-arrow)`}))}
 function box(canvas,x,y,w,h,title,lines=[],kind=''){
@@ -166,11 +186,11 @@ function architecture(){
  c.append(svg('text',{x:269,y:648,class:'caption'},'feedback для следующей гипотезы Qwen'));
 }
 function showTab(name) {
-  const tree = name === 'tree';
-  $('architecture-panel').hidden = tree; $('tree-panel').hidden = !tree; $('run-picker').hidden = !tree;
-  $('architecture-tab').setAttribute('aria-selected', !tree); $('tree-tab').setAttribute('aria-selected', tree);
-  location.hash = tree ? 'tree' : 'architecture';
-  if (tree) render();
+  view = name; const diagram = name === 'architecture';
+  $('architecture-panel').hidden = !diagram; $('tree-panel').hidden = diagram; $('run-picker').hidden = diagram;
+  for (const tab of ['extraction', 'architecture', 'tree']) $(tab+'-tab').setAttribute('aria-selected', tab === name);
+  location.hash = name;
+  if (!diagram) { selected = null; updatePicker(); render(); }
 }
 function modeOf(run) {
   if (run.report?.mode) return run.report.mode;
@@ -178,18 +198,25 @@ function modeOf(run) {
     : run.nodes.some(n => n.start.source === 'offline') ? 'offline' : 'режим не записан';
 }
 function updatePicker() {
-  const select = $('runs'); select.replaceChildren();
-  for (const r of state.runs) {
-    const label = `${r.id.includes('synthetic') ? 'Синтетика' : 'Данные'} · ${modeOf(r)} · ${r.id}`;
+  const select = $('runs'), runs = state.runs.filter(r => (r.kind === 'extraction') === (view === 'extraction')); select.replaceChildren();
+  for (const r of runs) {
+    const label = r.kind === 'extraction' ? `${extractionStatus(r)} · ${r.id}`
+      : `${r.id.includes('synthetic') ? 'Синтетика' : 'Данные'} · ${modeOf(r)} · ${r.id}`;
     const option = element('option', '', label); option.value = r.id; select.append(option);
   }
-  if (!state.runs.some(r => r.id === active)) active = (state.runs.find(r => !r.id.includes('synthetic')) ?? state.runs[0])?.id;
+  if (!runs.some(r => r.id === active)) active = (runs.find(r => !r.id.includes('synthetic')) ?? runs[0])?.id;
   select.value = active ?? '';
 }
 function render() {
   const r = state.runs.find(r => r.id === active);
   $('empty').hidden = !!r; $('experiment').hidden = !r;
-  if (!r) { $('empty').textContent = 'Запусков пока нет. Запустите solution.py; новые JSON появятся здесь автоматически.'; return; }
+  $('tree-legend').textContent = view === 'extraction' ? 'Четыре независимых запроса Qwen · зелёный = JSON сохранён · красный = ошибка · нажмите блок для деталей'
+    : 'Связь = parent_id · зелёный = завершён · красный = ошибка · фиолетовая рамка = лидер';
+  $('tree-note').textContent = view === 'extraction' ? (live ? 'Граф читает сохранённые файлы каждые 2 с. ' : 'Снимок сохранённых JSON. ')+ 'Цитаты — evidence из ответа Qwen. data.json описывает входные данные; преобразования признаков на этом этапе не выполняются. Отсутствие файла не подтверждает, что запрос ещё работает.'
+    : 'Показаны записанные JSON. Нода без finish могла выполняться или быть прервана. Без report.json завершение запуска не подтверждено.';
+  if (!r) { $('empty').textContent = view === 'extraction' ? 'Результатов извлечения пока нет. Запустите python -m alfa_agent extract; JSON появятся здесь автоматически.' : 'Экспериментов пока нет.'; return; }
+  if (r.kind === 'extraction') { drawExtraction(r); drawExtractionDetail(r); return; }
+  if (!['start', 'finish', 'delta'].includes(jsonTab)) jsonTab = 'start';
   if (!r.nodes.some(n => n.id === selected)) selected = r.nodes.find(n => n.id === r.best?.node_id)?.id ?? r.nodes[0]?.id;
   const mode = modeOf(r), metric = {rmse: 'RMSE ↓', macro_f1: 'Macro F1 ↑'}[r.task.metric?.name] ?? 'Не записана';
   const info = [
@@ -202,6 +229,79 @@ function render() {
     const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
   }
   drawTree(r); drawDetail(r);
+}
+function drawExtraction(r) {
+  if (!(selected in roles) && selected !== 'result') selected = Object.keys(roles).find(k => r.blocks[k]) ?? 'result';
+  const c = $('tree'), report = r.report, accepted = Object.values(r.blocks).filter(Boolean).length;
+  c.replaceChildren(); marker(c); c.setAttribute('viewBox', '0 0 735 540'); c.style.width = '735px'; c.style.height = '540px';
+  $('summary').replaceChildren();
+  for (const [label, value] of [['Этап извлечения', extractionStatus(r)], ['Сохранено блоков', accepted+'/4'],
+    ['Пройдено проверок', report?.checks?.length ?? '—'], ['Запросов к Qwen', report?.llm_calls?.length ?? '—']]) {
+    const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
+  }
+  const brief = {
+    problem: [r.blocks.problem?.task_type, r.blocks.problem?.target_column].filter(Boolean).join(' · '),
+    data: [r.blocks.data?.train_file, r.blocks.data?.test_file].filter(Boolean).join(' · '),
+    metric: r.blocks.metric ? r.blocks.metric.name + (r.blocks.metric.direction === 'minimize' ? ' ↓' : ' ↑') : '',
+    output: r.blocks.output?.columns?.join(', ')
+  };
+  function card(id, x, y, w, title, lines, status) {
+    const g = box(c, x, y, w, 110, title, lines);
+    g.setAttribute('class', `tree-node ${status} ${selected===id?'selected':''}`);
+    g.setAttribute('role', 'button'); g.setAttribute('tabindex', 0); g.setAttribute('data-node', id);
+    g.setAttribute('aria-label', id === 'result' ? 'Сверка и итоговый JSON' : id+'.json');
+    g.onclick = () => { selected = id; render(); };
+    g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } };
+  }
+  Object.keys(roles).forEach((key, i) => {
+    const y = 20+i*130, calls = report?.llm_calls?.filter(call => call.role === key) ?? [];
+    const saved = !!r.blocks[key], failed = !saved && calls.some(call => call.status !== 'completed');
+    const status = saved ? 'JSON сохранён'+(calls.length>1?' · исправлен':'') : failed ? 'Ошибка · JSON не сохранён' : 'JSON ещё нет';
+    edge(c, `M 167 270 H 185 V ${y+55} H 210`); edge(c, `M 460 ${y+55} H 480 V 270 H 500`);
+    card(key, 210, y, 250, roles[key], [(brief[key] ?? '').slice(0, 33), key+'.json', status], saved?'completed':failed?'failed':'pending');
+  });
+  box(c, 12, 215, 155, 110, 'Условие', ['Текст задания', 'SHA256 '+(report?.task_sha256?.slice(0, 10) ?? '—')]);
+  card('result', 500, 215, 215, 'Сверка со схемой и CSV', [extractionStatus(r), 'Проверок: '+(report?.checks?.length ?? '—'),
+    r.extraction ? 'extraction.json сохранён' : 'Итоговый JSON ещё нет'], report?.status==='failed'?'failed':r.extraction?'completed':'pending');
+}
+function drawExtractionDetail(r) {
+  const d = $('detail'), key = selected, report = r.report; d.replaceChildren();
+  d.append(element('h2', '', key === 'result' ? 'Сверка и сборка' : roles[key]+' · '+key+'.json'));
+  d.append(element('small', 'mono', r.directory+'/'+(key === 'result' ? 'extraction.json' : key+'.json')));
+  if (key === 'result') {
+    d.append(element('p', '', 'extraction.json объединяет четыре блока Qwen. task.json — сокращённый контракт, собранный кодом. report.json — проверки и попытки API.'));
+    for (const error of report?.errors ?? []) d.append(element('p', 'error-text', error));
+    if (report?.checks?.length) {
+      const list = element('ul', 'changes'); for (const check of report.checks) list.append(element('li', 'mono', check));
+      const checks = element('details'); checks.append(element('summary', '', 'Пройденные проверки: '+report.checks.length), list); d.append(checks);
+    }
+    if (!['extraction', 'task', 'report'].includes(jsonTab)) jsonTab = 'extraction';
+    const tabs = element('div', 'json-tabs');
+    for (const name of ['extraction', 'task', 'report']) {
+      const button = element('button', '', name+'.json'); button.setAttribute('aria-selected', name === jsonTab);
+      button.onclick = () => { jsonTab = name; drawExtractionDetail(r); }; tabs.append(button);
+    }
+    d.append(tabs, element('pre', '', r[jsonTab] ? JSON.stringify(r[jsonTab], null, 2) : jsonTab+'.json ещё не записан.'));
+  } else {
+    const block = r.blocks[key], facts = element('div', 'facts');
+    d.append(element('p', '', block ? 'Принятый ответ Qwen: поля, типы и цитаты прошли проверку.' : 'Файл не сохранён. Принятого ответа этого extractor’а пока нет.'));
+    for (const [field, value] of Object.entries(block ?? {}).filter(([field]) => field !== 'evidence')) {
+      const row = element('div', 'comparison'); row.append(element('b', 'mono', field),
+        element('p', '', value === null ? 'Не указано в условии (null)' : Array.isArray(value) ? JSON.stringify(value) : String(value)));
+      const quotes = block.evidence?.[field] ?? [];
+      if (quotes.length) {
+        const evidence = element('details'); evidence.append(element('summary', '', 'Цитаты из условия: '+quotes.length));
+        for (const quote of quotes) evidence.append(element('blockquote', '', quote)); row.append(evidence);
+      }
+      facts.append(row);
+    }
+    d.append(facts);
+    const calls = report?.llm_calls?.filter(call => call.role === key) ?? [];
+    for (const call of calls) d.append(element('small', '', `Попытка ${call.attempt}: ${call.status}. `));
+    const raw = element('details'); raw.append(element('summary', '', 'JSON · '+key+'.json'),
+      element('pre', '', block ? JSON.stringify(block, null, 2) : 'Файл ещё не записан.')); d.append(raw);
+  }
+  for (const warning of r.warnings) d.append(element('p', 'error-text', warning));
 }
 function drawTree(r) {
   const c = $('tree'); c.replaceChildren(); marker(c);
@@ -284,8 +384,9 @@ async function refresh() {
   } catch (error) { $('connection').textContent = 'Нет связи с локальным viewer. Показан последний снимок.'; }
   setTimeout(refresh, 2000);
 }
-$('architecture-tab').onclick=()=>showTab('architecture');$('tree-tab').onclick=()=>showTab('tree');$('runs').onchange=()=>{active=$('runs').value;selected=null;render()};
-architecture();updatePicker();showTab(location.hash==='#tree'?'tree':'architecture');$('connection').textContent='Снимок · '+new Date(state.captured*1000).toLocaleString('ru-RU');if(live)refresh();
+for (const tab of ['extraction','architecture','tree']) $(tab+'-tab').onclick=()=>showTab(tab);
+$('runs').onchange=()=>{active=$('runs').value;selected=null;render()};
+architecture();showTab(['#tree','#architecture'].includes(location.hash)?location.hash.slice(1):'extraction');$('connection').textContent='Снимок · '+new Date(state.captured*1000).toLocaleString('ru-RU');if(live)refresh();
 </script></html>'''
 
 
@@ -296,8 +397,8 @@ def page(data: dict, live: bool = False) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def __init__(self, *args, root: Path, **kwargs):
-        self.root = root
+    def __init__(self, *args, roots: list[Path], **kwargs):
+        self.roots = roots
         super().__init__(*args, **kwargs)
 
     def do_GET(self):
@@ -305,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
         if route not in ("/", "/data.json"):
             self.send_error(404)
             return
-        data = collect(self.root)
+        data = collect(*self.roots)
         content = page(data, live=True) if route == "/" else json.dumps(data, ensure_ascii=False, allow_nan=False).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8" if route == "/" else "application/json; charset=utf-8")
@@ -320,17 +421,17 @@ class Handler(BaseHTTPRequestHandler):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", nargs="?", type=Path, default=Path("outputs"))
+    parser.add_argument("roots", nargs="*", type=Path, default=[Path("outputs"), Path("artifacts/extraction")])
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--export", type=Path, help="Write a self-contained snapshot instead of starting the server")
     args = parser.parse_args(argv)
     if args.export:
         args.export.parent.mkdir(parents=True, exist_ok=True)
-        args.export.write_bytes(page(collect(args.root)))
+        args.export.write_bytes(page(collect(*args.roots)))
         print(args.export.resolve())
         return
-    with ThreadingHTTPServer(("127.0.0.1", args.port), partial(Handler, root=args.root.resolve())) as server:
-        print(f"Viewer: http://127.0.0.1:{server.server_port} · root: {args.root.resolve()}", flush=True)
+    with ThreadingHTTPServer(("127.0.0.1", args.port), partial(Handler, roots=args.roots)) as server:
+        print(f"Viewer: http://127.0.0.1:{server.server_port} · roots: {', '.join(str(p.resolve()) for p in args.roots)}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

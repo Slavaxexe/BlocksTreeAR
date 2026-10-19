@@ -13,7 +13,7 @@
 ```text
 AlfaHakaton/
 ├── solution.py              CLI ML-агента: задача, режим, бюджет, число экспериментов
-├── viewer.py                Один скрипт: схема приложения, HTML-дерево JSON, localhost / экспорт
+├── viewer.py                Один скрипт: граф extractor’ов с фактами / цитатами, ML-дерево, localhost / экспорт
 ├── alfa_agent/
 │   ├── __init__.py          Объявление пакета
 │   ├── __main__.py          Команды check-config / ping / ask и отдельный этап extract
@@ -30,12 +30,17 @@ AlfaHakaton/
 │   ├── test_qwen.py         API-клиент, конфигурация, отсутствие ключа в диагностике
 │   ├── test_extraction.py   Этап 1: реальные условия → HTTP-имитация → цитаты / схемы / CSV
 │   ├── test_pipeline.py     Контракты, ML-цикл, асинхронность, validation и таймауты
-│   └── test_viewer.py       Чтение меняющихся JSON, повреждённые записи, безопасный HTML
+│   └── test_viewer.py       Чтение JSON, частичные / ошибочные extraction, несколько корней, безопасный HTML
 ├── schemas/                 Экспорт JSON Schema из contracts.py; не отдельная реализация схем
 ├── data/raw/
 │   ├── regression/          Публичная регрессия: CSV, task.md, адаптированный task.local.md
 │   └── classification/      Публичная классификация: те же типы исходных файлов
-├── artifacts/extraction/    Факты problem / data / metric / output, extraction.json, task.json, report.json
+├── artifacts/extraction/    Генерируемые ответы Qwen с цитатами; исключены из git
+│   └── <запуск>/
+│       ├── problem.json, data.json, metric.json, output.json Проверенные ответы отдельных extractor’ов
+│       ├── extraction.json  Все четыре блока после сверки с CSV
+│       ├── task.json        Сокращённый контракт для следующих этапов
+│       └── report.json      ready / failed, проверки, ошибки, попытки API
 ├── outputs/                 Генерируемые артефакты; исключены из git
 │   ├── monitor.html         Автономный снимок просмотрщика, создаётся viewer.py --export
 │   └── <задача>/<run-id>/
@@ -64,7 +69,10 @@ AlfaHakaton/
 
 В `data/raw/<задача>/submission.csv` также публикуется текущий лучший ответ.
 Это генерируемый файл, он исключён из git. `viewer.py` читает только известные
-JSON внутри выбранного каталога; CSV и настройки API ему не нужны.
+JSON внутри выбранных каталогов; по умолчанию это `outputs` и `artifacts/extraction`.
+CSV и настройки API ему не нужны. Вкладка «Извлечение» показывает каждый блок
+с полями, цитатами и JSON, а также итоговую сборку. Неполный запуск виден уже
+после первого сохранённого блока; отсутствие отчёта не считается успехом.
 
 ## Связи
 

@@ -61,6 +61,46 @@ class ViewerTests(unittest.TestCase):
         self.assertIsNone(snapshot['runs'][0]['nodes'][0]['finish'])
         self.assertNotIn('outside-file', json.dumps(snapshot))
 
+    def test_partial_extraction_is_visible_before_task_or_report_exists(self):
+        extraction = self.root / 'extraction' / 'run-1'
+        extraction.mkdir(parents=True)
+        facts = {'train_file': 'train.csv', 'evidence': {'train_file': ['Файл train.csv']}}
+        self.write(extraction / 'data.json', facts)
+        run = collect(extraction)['runs'][0]
+        self.assertEqual(run['kind'], 'extraction')
+        self.assertEqual(run['blocks']['data'], facts)
+        self.assertIsNone(run['task'])
+        self.assertIsNone(run['extraction'])
+        self.assertIsNone(run['report'])
+        self.write(extraction / 'metric.json', {'name': 'rmse', 'evidence': {'name': ['RMSE']}})
+        updated = collect(self.root)['runs']
+        self.assertEqual(len(updated), 2)
+        self.assertEqual(next(r for r in updated if r['kind'] == 'extraction')['blocks']['metric']['name'], 'rmse')
+
+    def test_failed_extraction_report_is_visible_without_any_accepted_block(self):
+        extraction = self.root / 'failed'
+        extraction.mkdir()
+        report = {'status': 'failed', 'task_sha256': 'hash', 'checks': [],
+                  'errors': ['timeout'], 'llm_calls': [{'role': 'problem', 'status': 'api_error'}]}
+        self.write(extraction / 'report.json', report)
+        run = collect(extraction)['runs'][0]
+        self.assertEqual(run['kind'], 'extraction')
+        self.assertEqual(run['report'], report)
+        self.assertTrue(all(value is None for value in run['blocks'].values()))
+
+    def test_multiple_roots_keep_extraction_and_experiments_distinct(self):
+        extraction = self.root / 'extraction'
+        extraction.mkdir()
+        facts = {'target_column': 'value', 'evidence': {'target_column': ['value']}}
+        self.write(extraction / 'problem.json', facts)
+        self.write(extraction / 'extraction.json', {'schema_version': 1, 'problem': facts})
+        self.write(extraction / 'task.json', {'problem': {'target_column': 'value'}})
+        runs = collect(self.root / 'regression', extraction)['runs']
+        self.assertEqual({r['id'] for r in runs}, {'regression/run-1', 'extraction/extraction'})
+        extracted = next(r for r in runs if r['kind'] == 'extraction')
+        self.assertEqual(extracted['extraction']['problem'], facts)
+        self.assertEqual(extracted['task']['problem']['target_column'], 'value')
+
 
 if __name__ == '__main__':
     unittest.main()
