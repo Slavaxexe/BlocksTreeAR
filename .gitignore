@@ -1,0 +1,17 @@
+# Local caches and temporary output
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+tmp/
+
+# Local logs
+logs/
+*.log
+
+# Generated model artifacts
+artifacts/
+outputs/
+*.zip
