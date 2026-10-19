@@ -1,0 +1,17 @@
+{
+  "verified_date": "2026-10-19",
+  "endpoint": "https://inference.airi.net/v1/chat/completions",
+  "model": "Qwen/Qwen3.8-27B",
+  "status": "passed",
+  "request_count": 1,
+  "answer": "Готов",
+  "usage": {
+    "prompt_tokens": 81,
+    "completion_tokens": 48,
+    "total_tokens": 129,
+    "reasoning_tokens": 43
+  },
+  "offline_tests_passed": 10,
+  "credentials_included": false,
+  "scope": "Text chat completion only; training, tool calls and submissions not tested."
+}
