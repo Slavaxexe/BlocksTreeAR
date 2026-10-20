@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-NodeID = Annotated[str, Field(pattern=r"^node_[0-9]{3}$")]
+NodeID = Annotated[str, Field(pattern=r"^node_[0-9]{3,}$")]
 INITIAL_STATE = frozenset({'fit', 'validation', 'test', 'preparation', 'auxiliary'})
 
 
@@ -145,10 +145,10 @@ class Preparation(Contract):
 
 
 class Pipeline(Contract):
-    data: dict[str, Any]
-    preprocessing: dict[str, Any]
-    model: dict[str, Any]
-    training: dict[str, Any]
+    data: dict[str, Any] = Field(description='JSON object of data settings; never a string or list')
+    preprocessing: dict[str, Any] = Field(description='JSON object of preprocessing settings; never a string or list')
+    model: dict[str, Any] = Field(description='JSON object with estimator name and parameters; never a string or list')
+    training: dict[str, Any] = Field(description='JSON object of training settings; never a string or list')
 
 
 class Hypothesis(Contract):
@@ -268,7 +268,7 @@ class Start(Contract):
     assembly: Assembly
     implementation: str = 'experiment.py'
     outputs: dict[str, str]
-    timeout_seconds: float = Field(gt=0)
+    timeout_seconds: float | None = Field(default=None, gt=0)
 
 
 class Finish(Contract):
@@ -362,8 +362,8 @@ class RunReport(Contract):
     queued_nodes: list[NodeID] = Field(default_factory=list)
     analyzing_nodes: list[NodeID] = Field(default_factory=list)
     planning: bool = False
-    max_parallel_nodes: int = 3
-    max_parallel_agents: int = 8
+    max_parallel_nodes: int = 4
+    max_parallel_agents: int = 16
     active_agents: list[dict[str, Any]] = Field(default_factory=list)
     node_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
 

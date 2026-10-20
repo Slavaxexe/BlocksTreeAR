@@ -10,7 +10,7 @@
         "node_id": {
           "anyOf": [
             {
-              "pattern": "^node_[0-9]{3}$",
+              "pattern": "^node_[0-9]{3,}$",
               "type": "string"
             },
             {
@@ -154,7 +154,7 @@
     "best_node": {
       "anyOf": [
         {
-          "pattern": "^node_[0-9]{3}$",
+          "pattern": "^node_[0-9]{3,}$",
           "type": "string"
         },
         {
@@ -178,7 +178,7 @@
     },
     "running_nodes": {
       "items": {
-        "pattern": "^node_[0-9]{3}$",
+        "pattern": "^node_[0-9]{3,}$",
         "type": "string"
       },
       "title": "Running Nodes",
@@ -186,7 +186,7 @@
     },
     "queued_nodes": {
       "items": {
-        "pattern": "^node_[0-9]{3}$",
+        "pattern": "^node_[0-9]{3,}$",
         "type": "string"
       },
       "title": "Queued Nodes",
@@ -194,7 +194,7 @@
     },
     "analyzing_nodes": {
       "items": {
-        "pattern": "^node_[0-9]{3}$",
+        "pattern": "^node_[0-9]{3,}$",
         "type": "string"
       },
       "title": "Analyzing Nodes",
@@ -206,12 +206,12 @@
       "type": "boolean"
     },
     "max_parallel_nodes": {
-      "default": 3,
+      "default": 4,
       "title": "Max Parallel Nodes",
       "type": "integer"
     },
     "max_parallel_agents": {
-      "default": 8,
+      "default": 16,
       "title": "Max Parallel Agents",
       "type": "integer"
     },

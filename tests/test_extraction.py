@@ -1,6 +1,7 @@
 """Stage one extracts source-backed facts without opening datasets."""
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -14,8 +15,8 @@ from pydantic import ValidationError
 
 from agent.agents import JSONAgents, extract_task
 from agent.config import Settings
-from agent.contracts import DataFacts, Extraction, ProblemFacts
-from agent.storage import load
+from agent.contracts import DataFacts, Extraction, ProblemFacts, Program
+from agent.storage import load, save
 
 ROOT = Path(__file__).resolve().parents[1]
 CLASSES = ['Normal', 'Generic', 'Exploits', 'Fuzzers', 'DoS', 'Reconnaissance', 'Analysis', 'Backdoor', 'Shellcode', 'Worms']
@@ -60,6 +61,105 @@ def expected(name):
 
 
 class ExtractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_network_retry_does_not_consume_json_repair(self):
+        _, text, facts = expected('regression')
+        settings = Settings('fake', 'https://qwen.example/v1', 'model')
+        seen = []
+        def handler(request):
+            seen.append(json.loads(request.content))
+            if len(seen) == 1:
+                raise httpx.ReadTimeout('temporary', request=request)
+            content = {'error': 'wrong schema'} if len(seen) == 2 else facts['data']
+            return httpx.Response(200, json={
+                'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'finish_reason': 'stop',
+                             'message': {'role': 'assistant', 'content': json.dumps(content)}}]})
+        def client(**kwargs):
+            return AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url,
+                max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        agents = JSONAgents(settings, time.monotonic() + 5)
+        with patch('agent.agents.AsyncOpenAI', side_effect=client):
+            result = await agents.ask(DataFacts, text, 'data', source=text)
+        self.assertEqual(result.train_file, 'train.csv')
+        self.assertEqual([call.status for call in agents.calls], ['api_error', 'invalid_json', 'completed'])
+        self.assertEqual(agents.budget['requests'], 3)
+
+    async def test_code_requests_validate_json_without_provider_json_grammar(self):
+        settings = Settings('fake', 'https://qwen.example/v1', 'model')
+        seen = []
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            self.assertNotIn('response_format', body)
+            self.assertFalse(body['enable_thinking'])
+            self.assertEqual(body['reasoning_effort'], 'low')
+            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False, 'reasoning_effort': 'low'})
+            content = {'unexpected': 'reasoning'} if len(seen) == 1 else {'code': 'def run(state): return {}'}
+            return httpx.Response(200, json={
+                'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'finish_reason': 'stop',
+                             'message': {'role': 'assistant', 'content': json.dumps(content)}}]})
+        def client(**kwargs):
+            return AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url,
+                max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        agents = JSONAgents(settings, time.monotonic() + 5)
+        with patch('agent.agents.AsyncOpenAI', side_effect=client):
+            result = await agents.ask(Program, 'Write a block.', 'implementer', code=True)
+        self.assertIn('def run', result.code)
+        self.assertEqual([call.status for call in agents.calls], ['invalid_json', 'completed'])
+
+    async def test_reuses_only_matching_source_validated_roles(self):
+        _, text, facts = expected('regression')
+        for invalid in (False, True):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                previous = root / 'previous'
+                save(previous / 'report.json', {'task_sha256': hashlib.sha256(text.encode()).hexdigest()})
+                for role, value in facts.items():
+                    save(previous / 'extraction' / f'{role}.json', value)
+                if invalid:
+                    value = {**facts['output'], 'evidence': {'submission_file': ['invented quote']}}
+                    save(previous / 'extraction/output.json', value)
+                # A different task hash must never supply facts, even when JSON validates.
+                save(root / 'zzz-other/report.json', {'task_sha256': 'different'})
+                save(root / 'zzz-other/extraction/output.json', facts['output'])
+                agents = JSONAgents(Settings('fake', 'https://qwen.example/v1', 'model'), time.monotonic() + 5)
+                async def ask(schema, prompt, role, *, source):
+                    self.assertTrue(invalid)
+                    self.assertEqual(role, 'output')
+                    return schema.model_validate(facts[role], context={'source': source})
+                with patch.object(agents, 'ask', side_effect=ask) as mocked:
+                    result = await agents.extract(text, root / 'current/extraction')
+                self.assertEqual(mocked.call_count, int(invalid))
+                self.assertEqual(result.output.submission_file, 'submission.csv')
+                self.assertTrue((root / 'current/extraction/problem.json').is_file())
+
+    async def test_empty_truncated_response_regenerates_with_more_tokens(self):
+        _, text, facts = expected('regression')
+        settings = Settings('fake', 'https://qwen.example/v1', 'model', 5, 6144)
+        seen = []
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            retry = len(seen) == 2
+            return httpx.Response(200, json={
+                'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'finish_reason': 'stop' if retry else 'length',
+                             'message': {'role': 'assistant',
+                                         'content': json.dumps(facts['data']) if retry else None}}]})
+        def client(**kwargs):
+            return AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url,
+                max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        agents = JSONAgents(settings, time.monotonic() + 5)
+        with patch('agent.agents.AsyncOpenAI', side_effect=client):
+            result = await agents.ask(DataFacts, text, 'data', source=text)
+        self.assertEqual(result.train_file, 'train.csv')
+        self.assertEqual(seen[1]['max_tokens'], settings.max_tokens * 2)
+        self.assertEqual(seen[1]['messages'][1]['content'], text)
+        self.assertFalse(any(m['role'] == 'assistant' for m in seen[1]['messages']))
+        self.assertIn('original task', seen[1]['messages'][-1]['content'])
+        self.assertEqual([call.status for call in agents.calls], ['invalid_json', 'completed'])
+
     async def test_two_public_tasks_through_http_and_source_checks_without_reading_data(self):
         for name in ('regression', 'classification'):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
@@ -71,7 +171,7 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
                     title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
                     role = {'ProblemFacts': 'problem', 'DataFacts': 'data', 'MetricFacts': 'metric', 'OutputFacts': 'output'}[title]
                     seen.append(role)
-                    self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
+                    self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False, 'reasoning_effort': 'low'})
                     self.assertEqual(json.loads(body['messages'][-1]['content'].rsplit('\n', 1)[1]), {'task_text': text})
                     return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
                         'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': json.dumps(facts[role])}}]})

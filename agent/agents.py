@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 import traceback
@@ -48,12 +49,12 @@ class PlannedBatch:
 
 
 class JSONAgents:
-    def __init__(self, settings: Settings, deadline: float, max_calls: int = 20, *, shared=None,
-                 node_id=None, block=None, parallel_agents=8):
+    def __init__(self, settings: Settings, deadline: float, max_calls: int = 0, *, shared=None,
+                 node_id=None, block=None, parallel_agents=16):
         settings.validate()
-        self.settings, self.deadline, self.max_calls = settings, deadline, max_calls
+        self.settings, self.deadline, self.max_calls = settings, deadline, max_calls or math.inf
         self.calls: list[LLMCall] = shared.calls if shared is not None else []
-        self.budget = shared.budget if shared is not None else {'requests': 0, 'limit': max_calls}
+        self.budget = shared.budget if shared is not None else {'requests': 0, 'limit': max_calls or math.inf}
         self.requests = 0
         self.node_id = node_id
         self.block = block
@@ -88,7 +89,8 @@ class JSONAgents:
         # Waiting for another agent must consume the run deadline, not its HTTP timeout or call budget.
         self.log('agent_queued', role=role)
         try:
-            await asyncio.wait_for(self.slots.acquire(), max(0., self.deadline - time.monotonic()))
+            await asyncio.wait_for(self.slots.acquire(),
+                                  None if math.isinf(self.deadline) else max(0., self.deadline - time.monotonic()))
         except TimeoutError:
             raise QwenError('Исчерпан лимит времени в очереди обращений к Qwen.') from None
         token = object()
@@ -118,8 +120,13 @@ class JSONAgents:
             )},
             {"role": "user", "content": prompt},
         ]
-        json_mode = True
-        for attempt in (1, 2):
+        # Some compatible reasoning backends produce JSON-shaped reasoning instead
+        # of the requested program under json_object grammar constraints.
+        json_mode = not code
+        max_tokens = self.settings.max_tokens
+        invalid_responses = 0
+        network_retries = 0
+        for attempt in (1, 2, 3):
             remaining = self.deadline - time.monotonic()
             if remaining <= 0 or self.remaining_calls <= 0:
                 raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
@@ -127,21 +134,27 @@ class JSONAgents:
             self.budget['requests'] += 1
             request_id = self.budget['requests']
             started = time.monotonic()
-            timeout = min(180 if role == 'baker' else self.settings.timeout_seconds, remaining)
+            timeout = min(self.settings.timeout_seconds or math.inf, remaining)
+            timeout = None if math.isinf(timeout) else timeout
             self.record(Path('llm') / f'{request_id:04d}.request.json', {
                 'role': role, 'node_id': self.node_id, 'block': self.block, 'attempt': attempt,
                 'model': self.settings.model, 'messages': messages, 'json_mode': json_mode,
-                'timeout_seconds': timeout})
+                'timeout_seconds': timeout, 'max_tokens': max_tokens})
             self.log('api_started', role=role, request_id=request_id, attempt=attempt)
             try:
                 async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
                                        max_retries=0, timeout=timeout) as client:
-                    kwargs = {"response_format": {"type": "json_object"},
-                              "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}} if json_mode else {}
+                    kwargs = {"extra_body": {
+                        "enable_thinking": False, "reasoning_effort": "low",
+                        "chat_template_kwargs": {"enable_thinking": False, "reasoning_effort": "low"}}}
+                    if json_mode:
+                        kwargs['response_format'] = {"type": "json_object"}
+                    if max_tokens is not None:
+                        kwargs['max_tokens'] = max_tokens
                     async with asyncio.timeout(timeout):
                         response = await client.chat.completions.create(
                             model=self.settings.model, messages=messages, temperature=0,
-                            max_tokens=self.settings.max_tokens, **kwargs)
+                            **kwargs)
             except asyncio.CancelledError:
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, block=self.block, attempt=attempt,
                                           status='api_error', error='cancelled'))
@@ -156,33 +169,53 @@ class JSONAgents:
                 self.record(Path('llm') / f'{request_id:04d}.response.json', {'status': 'api_error', 'error': suffix})
                 self.log('api_failed', role=role, request_id=request_id, error=suffix,
                          duration_seconds=time.monotonic() - started)
-                if status == 400 and json_mode and attempt == 1:
+                if status == 400 and json_mode and network_retries == 0 and attempt < 3:
+                    network_retries += 1
                     json_mode = False
                     continue
-                if attempt == 1 and (status is None or status >= 500):
+                if network_retries == 0 and attempt < 3 and (status is None or status >= 500):
+                    network_retries += 1
                     continue
                 if status is None or status >= 500:
-                    raise QwenTemporaryError(f'Qwen: {suffix}; тело ответа сервера скрыто.') from None
-                raise QwenError(f"Qwen: {suffix}; тело ответа сервера скрыто.") from None
+                    raise QwenTemporaryError(f'Qwen: роль {role}: {suffix}; тело ответа сервера скрыто.') from None
+                raise QwenError(f"Qwen: роль {role}: {suffix}; тело ответа сервера скрыто.") from None
             content = response.choices[0].message.content if response.choices else None
+            finish_reason = response.choices[0].finish_reason if response.choices else None
             usage = response.usage
             stats = dict(role=role, node_id=self.node_id, block=self.block, attempt=attempt, prompt_tokens=usage.prompt_tokens if usage else 0,
                          completion_tokens=usage.completion_tokens if usage else 0)
-            self.record(Path('llm') / f'{request_id:04d}.response.json', {'content': content, **stats})
+            self.record(Path('llm') / f'{request_id:04d}.response.json', {
+                'content': content, 'finish_reason': finish_reason,
+                'usage': usage.model_dump() if usage else None, **stats})
             try:
+                if finish_reason == 'length':
+                    raise ValueError('Token limit reached')
                 json.dumps(json.loads(content or ''), allow_nan=False)
                 result = schema.model_validate_json(content or "", context={"source": source, **(validation or {})})
             except (ValidationError, ValueError) as error:
+                invalid_responses += 1
                 details = ([{"loc": e["loc"], "type": e["type"], "reason": e["msg"]} for e in error.errors()][:8]
-                           if isinstance(error, ValidationError) else [{'reason': 'Invalid JSON or non-finite number'}])
+                           if isinstance(error, ValidationError) else [{'reason': (
+                               'Response reached max_tokens before completion' if finish_reason == 'length'
+                               else 'Empty response' if not content else 'Invalid JSON or non-finite number')}])
                 reason = json.dumps(details, ensure_ascii=False)
                 self.calls.append(LLMCall(status="invalid_json", error=reason, **stats))
                 self.log('api_invalid_json', role=role, request_id=request_id, errors=details,
                          duration_seconds=time.monotonic() - started)
-                if attempt == 2:
+                if invalid_responses == 2 or attempt == 3:
                     raise QwenError(f"Qwen: роль {role} дважды нарушила JSON-контракт. {reason}") from None
-                messages += [{"role": "assistant", "content": (content or "")[:20000]},
-                             {"role": "user", "content": "Correct this JSON. Validation errors: " + json.dumps(details)}]
+                if not content or finish_reason == 'length':
+                    # An empty/truncated answer is not a JSON document that can be repaired.
+                    # Regenerate from the original task, leaving room for provider reasoning.
+                    if finish_reason == 'length' and max_tokens is not None:
+                        max_tokens *= 2
+                    messages.append({"role": "user", "content": (
+                        "The previous response was empty or truncated. Generate the complete JSON anew "
+                        "from the original task above. Keep reasoning brief and values concise; use the "
+                        "shortest sufficient exact quotes for evidence. Return the schema object only.")})
+                else:
+                    messages += [{"role": "assistant", "content": content[:20000]},
+                                 {"role": "user", "content": "Correct this JSON. Validation errors: " + json.dumps(details)}]
             else:
                 self.calls.append(LLMCall(status="completed", **stats))
                 self.log('api_completed', request_id=request_id, duration_seconds=time.monotonic() - started, **stats)
@@ -190,6 +223,34 @@ class JSONAgents:
         raise QwenError("Qwen не вернул валидный контракт.")
 
     async def extract(self, text: str, output: Path) -> Extraction:
+        task_hash = hashlib.sha256(text.encode()).hexdigest()
+        # Reuse only source-validated facts from sibling runs of this exact task.
+        # No models, splits, predictions or data profiles are reused here.
+        cached = {}
+        run_directory = output.parent
+        if run_directory.parent.is_dir():
+            for previous in sorted(run_directory.parent.iterdir(), reverse=True):
+                if previous == run_directory or not previous.is_dir():
+                    continue
+                try:
+                    report = json.loads((previous / 'report.json').read_text(encoding='utf-8'))
+                    if report.get('task_sha256') != task_hash:
+                        continue
+                    for role, schema in (('problem', ProblemFacts), ('data', DataFacts),
+                                         ('metric', MetricFacts), ('output', OutputFacts)):
+                        if role in cached:
+                            continue
+                        try:
+                            result = schema.model_validate_json(
+                                (previous / 'extraction' / f'{role}.json').read_text(encoding='utf-8'),
+                                context={'source': text})
+                        except (OSError, ValueError):
+                            continue
+                        cached[role] = (result, previous)
+                except (OSError, ValueError, AttributeError):
+                    continue
+                if len(cached) == 4:
+                    break
         roles = [
             ("problem", ProblemFacts, "Extract task type, target(s), units, labels and explicit caveats. "
              "Use target_column for a single target; target_columns only for multiple targets."),
@@ -203,10 +264,16 @@ class JSONAgents:
              "ordering requirements. Do not assume CSV, two columns or label-only classification output."),
         ]
         async def one(role, schema, question):
+            if role in cached:
+                result, previous = cached[role]
+                save(output / f'{role}.json', result)
+                self.log('extraction_reused', role=role, source_run=str(previous), task_sha256=task_hash)
+                return result
             prompt = (question + "\nFor EVERY populated field provide evidence[field]: a list of EXACT quotes "
                       "from task_text. Omit evidence for null/empty fields. Preserve literal identifiers. "
                       "Evidence values must be flat lists of strings, even for files/formats mapping fields. "
                       "If unstated, leave null or an empty collection; do not invent missing facts. "
+                      "Use the shortest sufficient quotes. Keep reasoning brief. "
                       "Do not choose a model, preprocessing or validation split.\n"
                       + json.dumps({"task_text": text}, ensure_ascii=False))
             result = await self.ask(schema, prompt, role, source=text)
@@ -322,7 +389,7 @@ class JSONAgents:
     async def propose(self, context: dict, *, log_directory: Path | None = None):
         prompt_context = {key: value for key, value in context.items() if key != 'used'}
         prompt = (NODE_RULES + "Plan exactly count DISTINCT experiments in the requested purposes order. "
-            "The controller reserves two node slots for improve and one for explore by default. "
+            "Follow the requested purposes list: the controller reserves one slot for explore and the rest for improve. "
             "Improve must extend leader_id; explore should test a different algorithm or pipeline and may use "
             "another available parent. Use completed analyzer findings, scores/errors and pending plans. "
             "Each proposal is ONE coherent hypothesis implementation with an ORDERED assembly.blocks list and "
@@ -390,10 +457,12 @@ class JSONAgents:
 async def extract_task(task_path: Path, output: Path, settings: Settings, *, agents: JSONAgents | None = None):
     """Extraction does not read datasets or reject unsupported execution capabilities."""
     text = task_path.read_text(encoding="utf-8")
-    agents = agents or JSONAgents(settings, time.monotonic() + 2 * settings.timeout_seconds)
+    agents = agents or JSONAgents(settings,
+        time.monotonic() + 2 * settings.timeout_seconds if settings.timeout_seconds else math.inf, max_calls=0)
     output.mkdir(parents=True, exist_ok=False)
     agents.root.log_directory = output
-    agents.log('run_started', task=str(task_path), max_llm_calls=agents.budget['limit'])
+    agents.log('run_started', task=str(task_path),
+               max_llm_calls=None if math.isinf(agents.budget['limit']) else agents.budget['limit'])
     report = RunReport(status="running", task_sha256=hashlib.sha256(text.encode()).hexdigest())
     save(output / "report.json", report)
     try:

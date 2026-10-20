@@ -20,12 +20,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--task", type=Path, default=Path("task.md"),
                         help="Markdown с условием; пути к данным отсчитываются от его каталога.")
     parser.add_argument("--output-dir", type=Path, help="Новый каталог запуска; существующий не перезаписывается.")
-    parser.add_argument("--time-budget", type=float, default=600)
-    parser.add_argument("--experiment-timeout", type=float, default=240)
-    parser.add_argument("--max-experiments", type=int, default=10, help="Всего нод, включая baseline.")
-    parser.add_argument("--parallel", type=int, default=3, help="Одновременных нод: по умолчанию 2 improve и 1 explore.")
-    parser.add_argument("--parallel-agents", type=int, default=8, help="Одновременных обращений к Qwen для всех ролей.")
-    parser.add_argument("--max-llm-calls", type=int, default=80, help="Лимит всех запросов Qwen, включая повторы.")
+    parser.add_argument("--time-budget", type=float, default=0, help="Секунды на запуск; 0 — без ограничения.")
+    parser.add_argument("--experiment-timeout", type=float, default=0, help="Секунды на процесс; 0 — без ограничения.")
+    parser.add_argument("--max-experiments", type=int, default=0, help="Всего нод, включая baseline; 0 — без ограничения.")
+    parser.add_argument("--max-code-attempts", type=int, default=0, help="Версий кода блока; 0 — без ограничения.")
+    parser.add_argument("--parallel", type=int, default=4, help="Одновременных нод: по умолчанию 3 improve и 1 explore.")
+    parser.add_argument("--parallel-agents", type=int, default=16, help="Одновременных обращений к Qwen для всех ролей.")
+    parser.add_argument("--max-llm-calls", type=int, default=0, help="Всего запросов Qwen; 0 — без ограничения.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
     args = parser.parse_args(argv)
     if args.command == "ask" and not args.prompt:
@@ -46,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout,
                     output_dir=output, max_experiments=args.max_experiments if args.command == "search" else 1,
-                    parallel=args.parallel, parallel_agents=args.parallel_agents, max_llm_calls=args.max_llm_calls)
+                    parallel=args.parallel, parallel_agents=args.parallel_agents, max_llm_calls=args.max_llm_calls,
+                    max_code_attempts=args.max_code_attempts)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")
@@ -68,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
         output = json.dumps(payload, ensure_ascii=False, indent=2)
         print(output.replace(settings.api_key, "[REDACTED]"))
         return 0
+    except KeyboardInterrupt:
+        print('Остановлено пользователем. Уже сохранённые результаты остаются в artifacts/.', file=sys.stderr)
+        return 130
     except (ConfigurationError, QwenError, ValueError, OSError) as error:
         message = str(error)
         if settings and settings.api_key:

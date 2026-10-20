@@ -67,7 +67,7 @@
     },
     "node_id": {
       "default": "node_000",
-      "pattern": "^node_[0-9]{3}$",
+      "pattern": "^node_[0-9]{3,}$",
       "title": "Node Id",
       "type": "string"
     },

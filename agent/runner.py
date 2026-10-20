@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version
+from itertools import count
 import json
 import math
 import os
@@ -26,17 +27,23 @@ from .storage import atomic_bytes, load, save
 
 @dataclass(frozen=True)
 class Options:
-    time_budget: float = 600
-    experiment_timeout: float = 240
+    time_budget: float = 0
+    experiment_timeout: float = 0
     output_dir: Path | None = None
-    max_experiments: int = 1
-    parallel: int = 3
-    parallel_agents: int = 8
-    max_llm_calls: int = 80
+    max_experiments: int = 0
+    parallel: int = 4
+    parallel_agents: int = 16
+    max_llm_calls: int = 0
+    max_code_attempts: int = 0
+
+
+def remaining_seconds(deadline):
+    """None is the JSON/asyncio representation of an absent deadline."""
+    return None if math.isinf(deadline) else max(0., deadline - time.monotonic())
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
-    remaining = min(timeout, deadline - time.monotonic())
+    remaining = min(timeout or math.inf, deadline - time.monotonic())
     if remaining <= 0:
         raise TimeoutError('Run time budget exhausted')
     env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
@@ -50,7 +57,7 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
         child = await asyncio.create_subprocess_exec(sys.executable, *arguments, cwd=cwd, env=env,
                                                      stdout=stream, stderr=asyncio.subprocess.STDOUT)
         try:
-            code = await asyncio.wait_for(child.wait(), remaining)
+            code = await asyncio.wait_for(child.wait(), None if math.isinf(remaining) else remaining)
         except (TimeoutError, asyncio.CancelledError) as error:
             if child.returncode is None:
                 child.kill()
@@ -107,6 +114,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
     started, start_hash = time.monotonic(), file_hash(node / 'start.json')
     target, stage, code_hash, notes = None, 'assembly', None, []
     attempts, clients, writers = {}, {}, []
+    code_limit = getattr(agents.root, 'max_code_attempts', 3)
     block_states = {b.name: {'stage': 'queued' if b.name in start.assembly.write_blocks else 'reused',
                              'attempt': 0} for b in start.assembly.blocks}
     context = {**shared, 'node_id': start.node_id, 'hypothesis': start.hypothesis.model_dump(),
@@ -120,9 +128,9 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
         spec = next(b for b in start.assembly.blocks if b.name == name)
         path = node / 'modules' / f'{name}.py'
         if name not in clients:
-            clients[name] = JSONAgents(agents.settings, deadline, 6, shared=agents,
+            clients[name] = JSONAgents(agents.settings, deadline, 3 * code_limit if code_limit else 0, shared=agents,
                                       node_id=start.node_id, block=name)
-        while attempts.get(name, 0) < 3:
+        while not code_limit or attempts.get(name, 0) < code_limit:
             attempt = attempts[name] = attempts.get(name, 0) + 1
             attempt_dir = node / 'attempts' / name / f'{attempt:02d}'
             request = {**context, 'target_block': spec.model_dump(),
@@ -154,13 +162,13 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 error, failed_stage = str(problem)[-5000:], 'implementation'
                 save(attempt_dir / 'error.json', {'stage': failed_stage, 'block': name, 'kind': 'code',
                      'error': error, 'traceback': traceback.format_exc()})
-                if attempt == 3 or time.monotonic() >= deadline:
+                if (code_limit and attempt >= code_limit) or time.monotonic() >= deadline:
                     raise BlockError(name, error) from problem
                 continue
             block_update(name, stage='ready')
             agents.log('block_code_saved', node_id=start.node_id, block=name, attempt=attempt)
             return
-        raise BlockError(name, 'Block exhausted its three code versions')
+        raise BlockError(name, 'Block exhausted its configured code versions')
 
     async def write_block(name, error=None, failed_stage=None):
         try:
@@ -212,7 +220,8 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 execution_update('running')
                 await process(['-m', 'agent.worker', '--check', str(node),
                                '--preparation', str(node.parent.parent / 'preparation.json')],
-                              node, log_dir / 'smoke.log', deadline, min(45, start.timeout_seconds))
+                              node, log_dir / 'smoke.log', deadline,
+                              min(45, start.timeout_seconds) if start.timeout_seconds else None)
                 execution_update('completed')
                 stage = 'execution'
                 checkpoint(stage=stage)
@@ -248,7 +257,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 if attempts.get(target, 0):
                     save(node / 'attempts' / target / f'{attempts[target]:02d}' / 'error.json', detail)
                 block_update(target, stage='failed')
-                if attempts.get(target, 0) >= 3 or time.monotonic() >= deadline:
+                if (code_limit and attempts.get(target, 0) >= code_limit) or time.monotonic() >= deadline:
                     raise
                 failed_stage, stage, code_hash = stage, 'implementation', None
                 checkpoint(stage=stage, block=target)
@@ -277,14 +286,17 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
 
 
 async def run(task_path: Path, options: Options, settings: Settings):
-    if not 0 < options.time_budget <= 10800 or not 0 < options.experiment_timeout <= 10800:
-        raise ValueError('Time budgets must be finite, positive and at most three hours')
-    if (not 1 <= options.max_experiments <= 1000 or options.parallel < 1
-            or options.parallel_agents < 1 or options.max_llm_calls < 1):
-        raise ValueError('Use 1..1000 experiments and positive parallel / LLM call limits')
+    if any(not math.isfinite(value) or value < 0 for value in (options.time_budget, options.experiment_timeout)):
+        raise ValueError('Time budgets must be finite and nonnegative; 0 means unlimited')
+    if (any(type(value) is not int or value < 0 for value in
+            (options.max_experiments, options.max_llm_calls, options.max_code_attempts))
+            or options.parallel < 1 or options.parallel_agents < 1):
+        raise ValueError('Use nonnegative limits (0 means unlimited) and positive parallelism')
     task_path = task_path.resolve()
-    deadline = time.monotonic() + options.time_budget
+    deadline = time.monotonic() + options.time_budget if options.time_budget else math.inf
+    experiment_limit = options.max_experiments or math.inf
     agents = JSONAgents(settings, deadline, max_calls=options.max_llm_calls, parallel_agents=options.parallel_agents)
+    agents.max_code_attempts = options.max_code_attempts
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     directory = (options.output_dir or Path('artifacts') / f'{task_path.parent.name}-{stamp}-{uuid4().hex[:6]}').resolve()
     report = await extract_task(task_path, directory, settings, agents=agents)
@@ -348,14 +360,14 @@ async def run(task_path: Path, options: Options, settings: Settings):
         for path in sorted((node / 'attempts').rglob('error.json')):
             error = json.loads(path.read_text(encoding='utf-8'))
             context['repair_attempts'].append({key: error.get(key) for key in ('block', 'stage', 'error')})
-        local = JSONAgents(settings, deadline, 2, shared=agents, node_id=row.node_id)
+        local = JSONAgents(settings, deadline, 3, shared=agents, node_id=row.node_id)
         return await local.analyze(context)
 
     async def plan(snapshot, *, baseline=False, log_directory=None):
         if planning_failures:
             agents.log('planning_retry_wait', consecutive_failures=planning_failures, delay_seconds=5)
             await asyncio.sleep(min(5., max(0., deadline - time.monotonic())))
-        snapshot = {**snapshot, 'remaining_seconds': max(0., deadline - time.monotonic())}
+        snapshot = {**snapshot, 'remaining_seconds': remaining_seconds(deadline)}
         if baseline:
             return await agents.plan_baseline(snapshot)
         return await agents.propose(snapshot, log_directory=log_directory)
@@ -366,7 +378,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         update(status='running', stage='preparation')
         context = {'task_text': task_path.read_text(encoding='utf-8'), 'task_directory': str(task_path.parent),
                    'extraction': requirements(extraction), 'inventory': inventory(task_path.parent)}
-        for attempt in range(3):
+        for attempt in count():
             draft = await agents.prepare(context)
             try:
                 check_code(draft.code, ('load_data', 'make_split', 'score', 'write_submission'))
@@ -383,10 +395,10 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 preparation = load(directory / 'preparation.json', Preparation)
                 break
             except (ValueError, OSError, TimeoutError) as error:
-                if attempt == 2:
+                if options.max_code_attempts and attempt + 1 >= options.max_code_attempts:
                     raise
                 context.update(previous_code=draft.code, execution_error=str(error)[-5000:])
-                update(warnings=report.warnings + [f'Preparation required code repair {attempt + 1}/2'])
+                update(warnings=report.warnings + [f'Preparation required code repair {attempt + 1}'])
         shared = {'requirements': requirements(extraction, prepared=True), 'preparation': preparation_view(preparation),
                   'execution_contract': execution_contract(preparation),
                   'installed_libraries': {name: version(name) for name in ('numpy', 'pandas', 'scipy', 'scikit-learn')}}
@@ -410,12 +422,12 @@ async def run(task_path: Path, options: Options, settings: Settings):
                        and n.analysis_status in {'completed', 'failed', 'skipped'}]
             can_plan = not starts or (parents and (revision > planned_revision or refill_planning))
             if (not expired and not planning_failed and planner is None and not waiting and can_plan
-                    and len(starts) < options.max_experiments and len(active) < options.parallel):
+                    and len(starts) < experiment_limit and len(active) < options.parallel):
                 if agents.remaining_calls < 2:
                     planning_failed, stop_reason = True, 'llm_limit'
                 elif not starts:
-                    snapshot = {**shared, 'remaining_seconds': max(0., deadline - time.monotonic()),
-                                'experiment_timeout_seconds': options.experiment_timeout}
+                    snapshot = {**shared, 'remaining_seconds': remaining_seconds(deadline),
+                                'experiment_timeout_seconds': options.experiment_timeout or None}
                     planner = asyncio.create_task(plan(snapshot, baseline=True))
                     planned_revision = revision
                 else:
@@ -429,7 +441,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     caps = {'improve': options.parallel - explore_slots, 'explore': explore_slots}
                     occupied = [s.purpose for s in list(active.values()) + list(waiting)]
                     purposes = [purpose for purpose, cap in caps.items() for _ in range(cap - occupied.count(purpose))]
-                    purposes = purposes[:min(options.max_experiments - len(starts), agents.remaining_calls - 1)]
+                    purposes = purposes[:min(len(purposes), experiment_limit - len(starts), agents.remaining_calls - 1)]
                     if single_plans and purposes:
                         # Keep the 2:1 balance even if a fast node finishes before the next plan arrives.
                         purpose = min(dict.fromkeys(purposes), key=lambda p:
@@ -445,8 +457,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                             'purposes': purposes, 'count': len(purposes),
                             'used': {plan_key(s): s.node_id for s in starts.values()},
                             'rejected_plans': planning_feedback,
-                            'remaining_seconds': max(0., deadline - time.monotonic()),
-                            'experiment_timeout_seconds': options.experiment_timeout}
+                            'remaining_seconds': remaining_seconds(deadline),
+                            'experiment_timeout_seconds': options.experiment_timeout or None}
                         planning_round += 1
                         planner = asyncio.create_task(plan(snapshot,
                             log_directory=directory / 'planning' / f'round_{planning_round:03d}'))
@@ -455,11 +467,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
             update(stage='search' if delta.nodes else 'baseline')
             tasks = [*active, *analyses, *([planner] if planner else [])]
             if not tasks:
-                if (not expired and len(starts) < options.max_experiments and not planning_failed
+                if (not expired and len(starts) < experiment_limit and not planning_failed
                         and stop_reason != 'planning_stalled'):
                     stop_reason = 'baseline_failed' if not parents else 'metric_unavailable'
                 break
-            done, _ = await asyncio.wait(tasks, timeout=None if expired else max(0., deadline - time.monotonic()),
+            done, _ = await asyncio.wait(tasks, timeout=None if expired else remaining_seconds(deadline),
                                          return_when=asyncio.FIRST_COMPLETED)
             for task in [t for t in done if t in active]:
                 start = active.pop(task)
@@ -522,7 +534,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                                 context={'task': str(task_path), 'task_sha256': report.task_sha256, 'source_hashes': hashes,
                                          'analysis_revision': planned_revision, 'installed_libraries': shared['installed_libraries']},
                                 outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
-                                timeout_seconds=float(options.experiment_timeout))
+                                timeout_seconds=float(options.experiment_timeout) if options.experiment_timeout else None)
                             node = directory / 'nodes' / start.node_id
                             node.mkdir(parents=True)
                             save(node / 'start.json', start)
@@ -560,6 +572,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
                checks=report.checks + completed_checks)
         agents.log('run_finished', status=report.status, stop_reason=stop_reason,
                    requests=agents.budget['requests'], experiments=len(starts), best_node=delta.best_node_id)
+    except asyncio.CancelledError:
+        update(status='ready' if delta and delta.best_node_id else 'partial' if published else 'failed',
+               stage='complete', stop_reason='user_interrupt')
+        agents.log('run_interrupted', best_node=delta.best_node_id if delta else None)
+        raise
     except Exception as error:
         agents.log('controller_failed', error_type=type(error).__name__, traceback=traceback.format_exc())
         update(status='ready' if delta and delta.best_node_id else 'partial' if published else 'failed',
