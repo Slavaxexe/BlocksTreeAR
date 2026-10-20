@@ -3,9 +3,29 @@
 import ast
 import hashlib
 import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pandas as pd
+
+# Distribution → import root from the organizer's requirements (also used by flat ZIP exports).
+LIBRARIES = {name: name for name in (
+    'numpy scipy pandas polars pyarrow joblib threadpoolctl catboost lightgbm xgboost statsmodels optuna torch '
+    'lightautoml flaml openai httpx tenacity langchain langgraph pydantic orjson jsonschema matplotlib seaborn '
+    'tqdm psutil cloudpickle setuptools').split()} | {
+    'scikit-learn': 'sklearn', 'imbalanced-learn': 'imblearn', 'category-encoders': 'category_encoders',
+    'feature-engine': 'feature_engine', 'autogluon.tabular': 'autogluon', 'langchain-openai': 'langchain_openai',
+    'python-dotenv': 'dotenv', 'PyYAML': 'yaml'}
+
+
+def library_context() -> dict:
+    installed = {}
+    for name in LIBRARIES:
+        try:
+            installed[name] = version(name)
+        except PackageNotFoundError:
+            pass
+    return {'allowed_libraries': LIBRARIES, 'installed_libraries': installed}
 
 
 def within(root: Path, relative: str) -> Path:
@@ -74,7 +94,8 @@ def check_code(code: str, functions: tuple[str, ...]):
     if not set(functions).issubset(names):
         raise ValueError('Missing required functions: ' + ', '.join(sorted(set(functions) - names)))
     allowed = {'math', 'statistics', 'collections', 'itertools', 'functools', 'pathlib', 'csv', 'json',
-               're', 'datetime', 'typing', 'io', 'zipfile', 'gzip', 'numpy', 'pandas', 'scipy', 'sklearn'}
+               're', 'datetime', 'typing', 'io', 'zipfile', 'gzip', 'random', 'copy', 'time', 'tempfile',
+               'warnings', 'contextlib', 'operator', 'dataclasses', 'enum', '__future__'} | set(LIBRARIES.values())
     for node in ast.walk(tree):
         imports = [a.name for a in node.names] if isinstance(node, ast.Import) else (
             [node.module or ''] if isinstance(node, ast.ImportFrom) else [])
@@ -83,7 +104,7 @@ def check_code(code: str, functions: tuple[str, ...]):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {'eval', 'exec', '__import__'}:
             raise ValueError('Dynamic code execution is not part of the generated interface')
     for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef)):
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef)):
             continue
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             continue
@@ -94,7 +115,7 @@ def check_code(code: str, functions: tuple[str, ...]):
                 raise ValueError(f'Line {node.lineno}: top-level assignments must be literal constants. '
                                  'Move computed values inside a function. Computations and comprehensions are allowed there.') from None
             continue
-        raise ValueError('Generated files must contain imports, functions and literal constants only')
+        raise ValueError('Generated files must contain imports, functions, classes and literal constants only')
 
 
 def module(path: Path, expected_hash: str):

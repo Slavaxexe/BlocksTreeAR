@@ -6,13 +6,31 @@
 
 ## Запуск
 
-Python 3.12, зависимости зафиксированы в `uv.lock`:
+Полное окружение Python 3.12 с библиотеками организаторов:
 
 ```bash
-uv sync --locked
-uv run --locked python solution.py data/raw/regression/task.local.md --key-stdin
-uv run --locked python solution.py data/raw/classification/task.local.md --key-stdin
+uv venv --python 3.12 .venv-platform
+uv pip install --python .venv-platform/bin/python -r vendor/requirements_data_folder.txt
+.venv-platform/bin/python solution.py data/raw/regression/task.local.md --key-stdin
+.venv-platform/bin/python solution.py data/raw/classification/task.local.md --key-stdin
 ```
+
+Все 37 прямых зависимостей разрешены, включая CatBoost, LightGBM, XGBoost,
+PyTorch, AutoGluon, LightAutoML и FLAML. `allowed_libraries` содержит соответствие
+пакетов импортам, `installed_libraries` — фактически установленные версии текущего
+интерпретатора. Оба списка передаются подготовке, Бейкеру и реализатору.
+Отсутствие пакета локально не считается запретом платформы. Импорт и обучение
+проверяются при исполнении; наличие версии само по себе не доказывает работоспособность.
+Нейросети могут определять классы; AutoML разрешены временные каталоги моделей и
+внутренние workers в пределах бюджета. Сеть и установка пакетов из решения запрещены.
+Для лёгкой разработки остаётся прежний `uv sync --locked` / `.venv` с базовым набором;
+`uv run --locked` использует именно его, поэтому полный запуск выполняйте явным Python выше.
+Проверено на macOS arm64 / Python 3.12.14: все 37 указанных версий установлены,
+импорты проходят; CatBoost / LightGBM / XGBoost, AutoGluon / LightAutoML / FLAML
+прошли короткие fit/predict, PyTorch — forward/backward. Окружение занимает около
+1,1 ГБ. Необязательные NLP extras LightAutoML отсутствуют в списке организаторов;
+табличное обучение работает без них. При таймауте останавливается вся группа
+процессов эксперимента, включая внутренние workers библиотек.
 
 Настройки из окружения / локального `.env` по образцу `.env.example`.
 `--key-stdin` запрашивает ключ скрыто; он не записывается в файлы. Ключ и endpoint

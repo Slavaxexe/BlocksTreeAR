@@ -20,7 +20,7 @@ import pandas as pd
 from alfa_agent.config import Settings
 from alfa_agent.agents import baker_context, implementation_context
 from alfa_agent.contracts import Delta, Finish, Hypotheses, Hypothesis, Metric, Preparation, RunReport, Start
-from alfa_agent.data import check_code, file_hash, profile
+from alfa_agent.data import LIBRARIES, check_code, file_hash, library_context, profile
 from alfa_agent.runner import Options, process, run, summarize
 from alfa_agent.storage import load
 from package_solution import build
@@ -126,6 +126,10 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 seen.append(title)
                 raise httpx.ConnectError('temporary disconnection', request=request)
             answer = answers[title]
+            if title in {'PreparationDraft', 'Hypothesis', 'Program'}:
+                payload = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
+                self.assertEqual(payload['allowed_libraries'], LIBRARIES)
+                self.assertIn('scikit-learn', payload['installed_libraries'])
             if title == 'Program':
                 saved = (run_directory / 'nodes/node_000/start.json').read_bytes()
                 saved_starts.append(saved)
@@ -408,6 +412,41 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(code=code[:30]), self.assertRaises(ValueError):
                 check_code(code, ('fit_predict',))
 
+    async def test_timeout_stops_library_child_processes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            child_code = "import time; from pathlib import Path; time.sleep(1); Path('orphan').touch()"
+            parent_code = (f'import subprocess, sys, time; subprocess.Popen([sys.executable, "-c", {child_code!r}]); '
+                           'print("spawned", flush=True); time.sleep(10)')
+            with self.assertRaises(TimeoutError):
+                await process(['-c', parent_code], root, root / 'timeout.log', time.monotonic() + 5, .5)
+            self.assertIn('spawned', (root / 'timeout.log').read_text())
+            await asyncio.sleep(1)
+            self.assertFalse((root / 'orphan').exists())
+
+    def test_organizer_libraries_and_custom_models_are_allowed(self):
+        requirements = Path('vendor/requirements_data_folder.txt').read_text().splitlines()
+        distributions = {line.split('==')[0].split('[')[0] for line in requirements if '==' in line}
+        self.assertEqual(set(LIBRARIES), distributions)
+        for root in LIBRARIES.values():
+            check_code(f'import {root}\n' + PROGRAM, ('fit_predict',))
+        check_code('from torch import nn\nclass Network(nn.Module):\n    def forward(self, x):\n        return x\n' +
+                   PROGRAM, ('fit_predict',))
+        with self.assertRaisesRegex(ValueError, 'Unsupported generated import'):
+            check_code('import unapproved_package\n' + PROGRAM, ('fit_predict',))
+
+    def test_missing_local_library_is_still_permitted(self):
+        from importlib.metadata import PackageNotFoundError
+        def installed(name):
+            if name == 'catboost':
+                raise PackageNotFoundError(name)
+            return '1.0'
+        with patch('alfa_agent.data.version', side_effect=installed):
+            context = library_context()
+        self.assertEqual(context['allowed_libraries']['catboost'], 'catboost')
+        self.assertNotIn('catboost', context['installed_libraries'])
+        self.assertIn('lightgbm', context['installed_libraries'])
+
 
 class TreeTests(unittest.IsolatedAsyncioTestCase):
     async def exercise(self, directory, *, blocked=False, stop_api=False, stop_time=False, max_nodes=4,
@@ -444,6 +483,8 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
             context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
             if title in {'Hypothesis', 'Hypotheses'}:
+                self.assertEqual(context['allowed_libraries'], LIBRARIES)
+                self.assertIn('scikit-learn', context['installed_libraries'])
                 self.assertEqual(context['runtime_contract']['rows'], {'fit': 32, 'validation': 8, 'test': 5})
                 index = len(list((root / 'nodes').glob('*/start.json')))
                 if index:

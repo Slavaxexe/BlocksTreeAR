@@ -4,11 +4,11 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from importlib.metadata import version
 import json
 import math
 import os
 from pathlib import Path
+import signal
 import sys
 import time
 from uuid import uuid4
@@ -17,7 +17,7 @@ from .agents import BAKER_ATTEMPTS, JSONAgents, extract_task
 from .config import Settings
 from .contracts import Change, Comparison, Delta, Extraction, Finish, NodeDelta, Preparation, Start
 from .qwen import QwenError
-from .data import check_code, file_hash, inventory, within
+from .data import check_code, file_hash, inventory, library_context, within
 from .storage import atomic_bytes, load, save
 
 ENTRY = "\nif __name__ == '__main__':\n    from alfa_agent.worker import main\n    main(fit_predict)\n"
@@ -42,12 +42,14 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
            'OMP_NUM_THREADS': '2', 'OPENBLAS_NUM_THREADS': '2', 'MKL_NUM_THREADS': '2'}
     with log.open('wb') as stream:
         child = await asyncio.create_subprocess_exec(sys.executable, *arguments, cwd=cwd, env=env,
-                                                     stdout=stream, stderr=asyncio.subprocess.STDOUT)
+                                                     stdout=stream, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         try:
             code = await asyncio.wait_for(child.wait(), remaining)
         except (TimeoutError, asyncio.CancelledError) as error:
-            if child.returncode is None:
-                child.kill()
+            try:  # AutoML/joblib may spawn workers; the timeout applies to their whole process group.
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             await child.wait()
             if isinstance(error, TimeoutError):
                 raise TimeoutError(f'Process exceeded its {remaining:.1f}s time limit') from None
@@ -184,7 +186,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
         extraction = load(directory / 'extraction.json', Extraction)
         update(status='running', stage='preparation')
         context = {'task_text': task_path.read_text(encoding='utf-8'),
-                   'extraction': extraction.model_dump(mode='json'), 'inventory': inventory(task_path.parent)}
+                   'extraction': extraction.model_dump(mode='json'), 'inventory': inventory(task_path.parent),
+                   **library_context()}
         for attempt in range(2):
             draft = await agents.prepare(context)
             try:
@@ -213,7 +216,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         update(stage='baseline', checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
         shared = {'task_text': task_path.read_text(encoding='utf-8'),
                   'extraction': extraction.model_dump(mode='json'), 'preparation': preparation.model_dump(mode='json'),
-                  'installed_libraries': {name: version(name) for name in ('numpy', 'pandas', 'scipy', 'scikit-learn')}}
+                  **library_context()}
         delta = Delta(preparation_sha256=file_hash(directory / 'preparation.json'), metric=preparation.metric)
         save(directory / 'delta.json', delta)
 
@@ -311,7 +314,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                                 context={'task': str(task_path), 'task_sha256': report.task_sha256, 'purpose': purpose,
                                     'delta_nodes': len(snapshot['delta']['nodes']), 'extraction': '../../extraction.json',
                                     'extraction_sha256': file_hash(directory / 'extraction.json'),
-                                    'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries']},
+                                    'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries'],
+                                    'allowed_libraries': shared['allowed_libraries']},
                                 outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
                                 timeout_seconds=float(options.experiment_timeout))
                             node = directory / 'nodes' / start.node_id

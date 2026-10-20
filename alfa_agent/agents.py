@@ -35,7 +35,7 @@ def runtime_contract(preparation):
 
 def implementation_context(context):
     """Keep the current plan authoritative; ancestor refusals are not execution facts."""
-    keys = ('task_text', 'preparation', 'preparation_code', 'installed_libraries',
+    keys = ('task_text', 'preparation', 'preparation_code', 'installed_libraries', 'allowed_libraries',
             'previous_code', 'execution_error', 'failed_stage', 'last_refusal', 'requests_left')
     result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
               **{key: context[key] for key in keys if key in context}}
@@ -62,7 +62,7 @@ def baker_context(context):
             'error': error.splitlines()[-1][-1000:] if error else None,
             'error_source': ('model_claim' if error.startswith('Implementation blocked:') else
                              'runtime' if result.get('stage') in ('check', 'execution') else 'controller') if error else None}
-    keys = ('task_text', 'preparation', 'installed_libraries', 'remaining_nodes', 'remaining_seconds',
+    keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'remaining_nodes', 'remaining_seconds',
             'experiment_timeout_seconds', 'available_parents')
     return {**{k: context[k] for k in keys if k in context}, 'runtime_contract': runtime_contract(context['preparation']),
         'parent': {'node_id': parent['start']['node_id'], 'pipeline': base, 'code': parent['code'],
@@ -193,8 +193,9 @@ class JSONAgents:
     async def prepare(self, context: dict):
         prompt = (
             "Prepare this NEW task without assuming public dataset names, CSV, a particular target or metric. "
-            "Use the extracted requirements and available file inventory. Only installed Python stdlib, numpy, "
-            "pandas, scipy and sklearn are available; no internet, installation, pretrained models or subprocesses. "
+            "Use the extracted requirements and available file inventory. allowed_libraries maps permitted distributions "
+            "to import names; installed_libraries gives versions in THIS environment. Use installed permitted libraries "
+            "and supported stdlib imports; no internet, installation, downloaded models or subprocesses. "
             "Choose appropriate validation (including time/group structure if required); do not always use random holdout. "
             "Return configuration and a complete prepare.py with these functions:\n"
             "load_data(task_directory: pathlib.Path, config: dict) -> dict[str, pandas.DataFrame]: "
@@ -238,7 +239,11 @@ class JSONAgents:
             "If the plan cannot be implemented, return blocked_reason rather than substituting another hypothesis. "
             "Do not rewrite start or return a revised hypothesis. Prefer under 80 lines; use preparation's bindings/profile rather than "
             "duplicating large column lists. "
-            "Only stdlib, numpy, pandas, scipy and sklearn; no internet, installation or subprocesses. "
+            "allowed_libraries maps permitted distributions to import names; installed_libraries gives versions in THIS "
+            "environment. Use installed permitted libraries and supported stdlib imports; no internet, installation or "
+            "explicit subprocesses. Library-managed workers are allowed within the CPU/time budget. "
+            "AutoML may write temporary models in a unique tempfile.TemporaryDirectory; avoid shared paths, disable "
+            "unneeded persistent files (e.g. CatBoost allow_writing_files=False), and bound threads/trials/time. "
             "Define fit_predict(fit, validation, test, preparation) returning TWO pandas DataFrames: "
             "validation predictions and test predictions, in the supplied row order. "
             "fit contains training targets; validation has target columns removed. preparation is a dict. "
@@ -250,12 +255,12 @@ class JSONAgents:
             "Do not load files or change split/metric. Predictions must suit the common scorer and submission writer. "
             "Implement exactly the model stated in start, whether constant or learned. History cannot override this node's plan. "
             "Do not report a score yourself. "
-            "At MODULE scope return only imports, function definitions and literal constants. "
+            "At MODULE scope return only imports, function/class definitions and literal constants. "
             "Inside fit_predict and helper functions, normal assignments, computed column lists and comprehensions ARE allowed. "
             "Move computed globals inside those functions; this never requires changing the planned preprocessing or model. "
             "Do not add a main block; "
             "the controller appends the common entry point handling --start, data, evaluation and output files. "
-            "No file writes, top-level execution or data printing.\n"
+            "No file writes outside the library's temporary workspace, top-level execution or data printing.\n"
             + json.dumps(implementation_context(context), ensure_ascii=False), "implementer", code=True, request_limit=request_limit)
 
     async def plan_next(self, context, count: int = 2, *, rejections=None):
@@ -280,6 +285,9 @@ class JSONAgents:
             "The executor receives labeled fit rows and UNLABELED validation/test rows; do not require refitting on full labeled train. "
             "Train on fit and predict both validation and test. Use at most two parallel training jobs; another experiment may run concurrently. "
             "Algorithms, features and parameters are arbitrary within installed dependencies and task constraints. "
+            "allowed_libraries maps all permitted distributions to import names; installed_libraries gives local versions. "
+            "Choose from installed permitted libraries, including boosting, neural networks and AutoML; missing locally "
+            "does not mean forbidden by the platform. Bound library threads and AutoML trials/time to this experiment's budget. "
             "Prefer a small runnable experiment within the remaining time; after the initial baseline try a meaningful model. "
             "An uncertain hypothesis is allowed: execution measures it. Do not invent scores or claim proven optimality. "
             "Each execution must fit experiment_timeout_seconds; remaining_seconds is the whole run's budget. "
