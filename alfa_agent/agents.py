@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 import time
 
@@ -92,7 +93,7 @@ class JSONAgents:
             )},
             {"role": "user", "content": prompt},
         ]
-        json_mode, invalid, feedback = True, 0, None
+        invalid, feedback = 0, None
         limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
         for attempt in range(1, attempts + 1):
             remaining = self.deadline - time.monotonic()
@@ -108,11 +109,10 @@ class JSONAgents:
             try:
                 async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
                                        max_retries=0, timeout=min(self.settings.timeout_seconds, remaining)) as client:
-                    kwargs = {"response_format": {"type": "json_object"},
-                              "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}} if json_mode else {}
                     response = await client.chat.completions.create(
                         model=self.settings.model, messages=messages, temperature=0,
-                        max_tokens=self.settings.max_tokens, **kwargs)
+                        max_tokens=self.settings.max_tokens, extra_body={"reasoning_effort": "none",
+                            "chat_template_kwargs": {"enable_thinking": False}})
             except asyncio.CancelledError:
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
                 raise
@@ -123,14 +123,15 @@ class JSONAgents:
                 if status is None and error.__cause__ is not None:
                     suffix += ' / ' + type(error.__cause__).__name__
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
-                if status == 400 and json_mode and attempt == 1:
-                    json_mode = False
-                    continue
                 if attempt < attempts and (status is None or status >= 500):
                     await asyncio.sleep(min(2 ** attempt, 4, max(0., self.deadline - time.monotonic())))
                     continue
                 raise QwenError(f"Qwen: {suffix}; тело ответа сервера скрыто.") from None
-            content = response.choices[0].message.content if response.choices else None
+            content = ((response.choices[0].message.content if response.choices else None) or '').strip()
+            # Remove only a complete outer Markdown fence; keep all JSON fields for strict validation.
+            fenced = re.fullmatch(r'```(?:json)?\s*\n(.*?)\n```', content, re.S)
+            if fenced:
+                content = fenced[1].strip()
             usage = response.usage
             stats = dict(role=role, node_id=self.node_id, attempt=attempt, prompt_tokens=usage.prompt_tokens if usage else 0,
                          completion_tokens=usage.completion_tokens if usage else 0)
@@ -175,6 +176,7 @@ class JSONAgents:
                       "from task_text. Omit evidence for null/empty fields. Preserve literal identifiers. "
                       "Evidence values must be flat lists of strings, even for files/formats mapping fields. "
                       "If unstated, leave null or an empty collection; do not invent missing facts. "
+                      "Use the shortest sufficient quotes. Keep reasoning brief. "
                       "Do not choose a model, preprocessing or validation split.\n"
                       + json.dumps({"task_text": text}, ensure_ascii=False))
             result = await self.ask(schema, prompt, role, source=text)

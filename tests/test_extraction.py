@@ -60,6 +60,30 @@ def expected(name):
 
 
 class ExtractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_proxy_markdown_wrapper_is_removed_but_unknown_fields_are_rejected(self):
+        _, text, facts = expected('regression')
+        for extra in (False, True):
+            value = {**facts['problem'], **({'unexpected': 'keep me invalid'} if extra else {})}
+            def handler(request):
+                body = json.loads(request.content)
+                self.assertNotIn('response_format', body)
+                self.assertEqual(body['reasoning_effort'], 'none')
+                return httpx.Response(200, json={'id': 'proxy', 'object': 'chat.completion', 'created': 0,
+                    'model': 'model', 'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {
+                        'role': 'assistant', 'reasoning_content': 'This is not the JSON to parse.',
+                        'content': '```json\n' + json.dumps(value) + '\n```'}}]})
+            def client(**kwargs):
+                return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+            agents = JSONAgents(Settings('fake', 'https://qwen.example/v1', 'model'), time.monotonic() + 5)
+            with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+                if extra:
+                    from alfa_agent.qwen import QwenError
+                    with self.assertRaises(QwenError):
+                        await agents.ask(ProblemFacts, text, 'problem', source=text, attempts=1)
+                else:
+                    result = await agents.ask(ProblemFacts, text, 'problem', source=text, attempts=1)
+                    self.assertEqual(result.target_column, 'site_eui')
+
     async def test_two_public_tasks_through_http_and_source_checks_without_reading_data(self):
         for name in ('regression', 'classification'):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
@@ -72,6 +96,8 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
                     role = {'ProblemFacts': 'problem', 'DataFacts': 'data', 'MetricFacts': 'metric', 'OutputFacts': 'output'}[title]
                     seen.append(role)
                     self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
+                    self.assertEqual(body['reasoning_effort'], 'none')
+                    self.assertNotIn('response_format', body)
                     self.assertEqual(json.loads(body['messages'][-1]['content'].rsplit('\n', 1)[1]), {'task_text': text})
                     return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
                         'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': json.dumps(facts[role])}}]})

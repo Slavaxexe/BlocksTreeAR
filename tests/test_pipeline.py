@@ -817,6 +817,17 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SubmissionTests(unittest.TestCase):
+    def test_platform_budgets_are_large_and_explicit_overrides_win(self):
+        from solution import main
+        with patch('solution.cli', return_value=0) as cli:
+            main(['task.md'])
+            arguments = cli.call_args.args[0]
+            for option, value in {'--time-budget': '10500', '--experiment-timeout': '1200', '--max-nodes': '100'}.items():
+                self.assertEqual(arguments[arguments.index(option) + 1], value)
+            main(['task.md', '--time-budget=300', '--experiment-timeout', '60', '--max-nodes', '1'])
+            self.assertEqual(cli.call_args.args[0], ['baseline', '--task', 'task.md', '--time-budget=300',
+                '--experiment-timeout', '60', '--max-nodes', '1'])
+
     def test_zip_contains_only_root_modules_and_original_requirements(self):
         with tempfile.TemporaryDirectory() as temporary:
             archive = build(Path(temporary) / 'submission.zip')
@@ -867,7 +878,7 @@ def handler(request):
         'choices':[{'index':0,'finish_reason':'stop','message':{'role':'assistant','content':json.dumps(answer)}}]})
 def client(**kwargs):
     return AsyncOpenAI(**kwargs,http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-sys.argv=['solution.py','task.md']
+sys.argv=['solution.py','task.md','--max-nodes','3']
 with patch('alfa_agents.AsyncOpenAI',side_effect=client):
     runpy.run_path('solution.py',run_name='__main__')
 '''
@@ -878,7 +889,7 @@ with patch('alfa_agents.AsyncOpenAI',side_effect=client):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             output = next((root / 'artifacts').iterdir())
             report = load(output / 'report.json', RunReport)
-            self.assertEqual((report.status, report.completed_nodes), ('ready', 10))
+            self.assertEqual((report.status, report.completed_nodes), ('ready', 3))
             self.assertIn('working_baseline', report.checks)
             self.assertEqual(load(output / 'delta.json', Delta).best_node_id, 'node_000')
             submission = pd.read_csv(root / 'result.tsv', sep='\t', dtype={'record': str})

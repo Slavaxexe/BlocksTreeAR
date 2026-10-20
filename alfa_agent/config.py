@@ -20,7 +20,7 @@ class Settings:
     base_url: str
     model: str
     timeout_seconds: float = 300
-    max_tokens: int = 6144
+    max_tokens: int = 32768
 
     @classmethod
     def from_env(
@@ -34,7 +34,7 @@ class Settings:
         values.update(os.environ if environ is None else environ)
         try:
             timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "300")
-            max_tokens = int(values.get("QWEN_MAX_TOKENS") or "6144")
+            max_tokens = int(values.get("QWEN_MAX_TOKENS") or "32768")
         except (ValueError, TypeError):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS и QWEN_MAX_TOKENS должны быть числами.") from None
         return cls(
