@@ -1,0 +1,208 @@
+"""A short idea queue and independent node planners; ready plans never wait for their batch."""
+
+import asyncio
+from collections import deque
+import time
+import traceback
+
+from .agents import JSONAgents, plan_key
+from .assembly import block_catalog
+from .context import catalog_view, idea_history_view
+from .contracts import Idea
+from .qwen import QwenTemporaryError
+from .storage import fingerprint, save
+
+
+class Search:
+    def __init__(self, agents, directory, options, shared, notify):
+        self.agents, self.directory, self.options = agents, directory, options
+        self.shared, self.notify = shared, notify
+        self.queue, self.records, self.planners = deque(), [], {}
+        self.baker, self.round, self.next_node = None, 0, 0
+        self.failures, self.misses, self.revision = 0, 0, 0
+        self.failed, self.stop_reason = False, 'max_experiments'
+        self.used_ideas, self.used_plans = {}, {}
+        self.parents, self.leader, self.catalog = [], None, {}
+        self.rows = []
+        explore = int(options.parallel > 1)
+        self.caps = {'improve': options.parallel - explore, 'explore': explore}
+
+    @property
+    def tasks(self):
+        return [*self.planners, *([self.baker] if self.baker else [])]
+
+    def report(self):
+        return {'planning': self.baker is not None,
+                'planning_nodes': [record['node_id'] for record in self.planners.values()],
+                'queued_ideas': [{'id': record['id'], **record['idea']} for record in self.queue]}
+
+    def save(self):
+        save(self.directory / 'ideas.json', {'ideas': self.records})
+
+    def fill(self, delta, running, revision):
+        self.rows = delta.nodes
+        if revision != self.revision:
+            self.misses, self.revision = 0, revision
+            if self.stop_reason == 'planning_stalled':
+                self.stop_reason = 'max_experiments'
+        rows = [row for row in delta.nodes if row.result.status == 'completed'
+                and row.analysis_status in {'completed', 'failed', 'skipped'}]
+        self.parents = [row.node_id for row in rows]
+        eligible = [row for row in rows if row.result.value is not None]
+        if eligible and delta.metric.direction:
+            choose = min if delta.metric.direction == 'minimize' else max
+            self.leader = choose(eligible, key=lambda row: row.result.value).node_id
+        else:
+            self.leader = self.parents[-1] if self.parents else None
+        self.catalog = block_catalog(self.directory, rows)
+
+        # A new leader invalidates queued improvements, but never interrupts work already started.
+        for record in list(self.queue):
+            if record['idea']['purpose'] == 'improve' and record['idea']['parent_id'] != self.leader:
+                record['status'] = 'superseded'
+                self.queue.remove(record)
+                self.agents.log('idea_superseded', idea_id=record['id'], leader_id=self.leader)
+                self.save()
+        self.dispatch(running)
+        self.request_ideas(delta)
+
+    def dispatch(self, running):
+        occupied = [start.purpose for start in running] + [record['idea']['purpose'] for record in self.planners.values()]
+        while (self.queue and len(occupied) < self.options.parallel
+               and self.next_node < self.options.max_experiments and self.agents.remaining_calls >= 2):
+            record = next((record for record in self.queue
+                if record['idea']['purpose'] == 'baseline'
+                or occupied.count(record['idea']['purpose']) < self.caps[record['idea']['purpose']]), None)
+            if record is None:
+                break
+            self.queue.remove(record)
+            idea = Idea.model_validate(record['idea'])
+            node_id = f'node_{self.next_node:03d}'
+            self.next_node += 1
+            record.update(status='planning', node_id=node_id)
+            parent = next((row for row in self.rows if row.node_id == idea.parent_id), None)
+            context = {**self.shared, 'idea': record['idea'],
+                'parent': idea_history_view(parent) if parent else None,
+                'module_catalog': catalog_view(self.catalog),
+                'pending': self.pending(), 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
+                'experiment_timeout_seconds': self.options.experiment_timeout}
+            save(self.directory / 'planning' / node_id / 'idea.json', record)
+            client = JSONAgents(self.agents.settings, self.agents.deadline, 2, shared=self.agents, node_id=node_id)
+            task = asyncio.create_task(client.plan_node(context, idea, self.catalog))
+            self.planners[task] = record
+            occupied.append(idea.purpose)
+            self.agents.log('node_planning_started', node_id=node_id, idea_id=record['id'])
+            self.save()
+
+    def pending(self):
+        return [{'id': record['id'], 'status': record['status'], 'node_id': record.get('node_id'),
+                 'error': record.get('error'), 'duplicate_of': record.get('duplicate_of'), **record['idea']}
+                for record in self.records]
+
+    def request_ideas(self, delta):
+        if self.baker or self.failed or self.misses >= 3:
+            return
+        if self.agents.remaining_calls < 2:
+            self.stop_reason = 'llm_limit'
+            return
+        room = self.options.max_experiments - self.next_node - len(self.queue)
+        if room <= 0:
+            return
+        if self.next_node == 0 and not self.queue:
+            purposes = ['baseline']
+        elif self.parents:
+            size = max(3, min(5, self.options.parallel + 2))
+            targets = {'improve': size - int(self.caps['explore'] > 0),
+                       'explore': int(self.caps['explore'] > 0)}
+            needed = {purpose: max(0, target - sum(r['idea']['purpose'] == purpose for r in self.queue))
+                      for purpose, target in targets.items()}
+            purposes = []
+            while any(needed.values()):
+                for purpose, cap in self.caps.items():
+                    count = min(needed[purpose], cap)
+                    purposes.extend([purpose] * count)
+                    needed[purpose] -= count
+        else:
+            return
+        purposes = purposes[:min(room, self.agents.remaining_calls - 1)]
+        if not purposes:
+            return
+        context = {**self.shared, 'purposes': purposes, 'leader_id': self.leader,
+            'available_parents': self.parents, 'experiments': [idea_history_view(row) for row in delta.nodes],
+            'module_catalog': {node: [{'name': block['name'], 'provides': block['provides']} for block in blocks]
+                               for node, blocks in catalog_view(self.catalog).items()},
+            'previous_ideas': self.pending(), 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
+            'experiment_timeout_seconds': self.options.experiment_timeout}
+        self.round += 1
+        save(self.directory / 'planning' / f'batch_{self.round:03d}' / 'request.json', context)
+        self.baker = asyncio.create_task(self.ask_ideas(context))
+
+    async def ask_ideas(self, context):
+        if self.failures:
+            self.agents.log('planning_retry_wait', consecutive_failures=self.failures, delay_seconds=5)
+            await asyncio.sleep(min(5., max(0., self.agents.deadline - time.monotonic())))
+        return await self.agents.propose_ideas({**context,
+            'remaining_seconds': max(0., self.agents.deadline - time.monotonic())})
+
+    def collect(self, done):
+        ready = []
+        if self.baker in done:
+            task, self.baker = self.baker, None
+            try:
+                ideas = task.result()
+                self.failures = 0
+                accepted = 0
+                for idea in ideas:
+                    key = fingerprint(idea.model_dump(exclude={'expected_effect'}))
+                    if key in self.used_ideas:
+                        self.agents.log('duplicate_idea', duplicate_of=self.used_ideas[key])
+                        continue
+                    record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(), 'status': 'queued'}
+                    self.records.append(record)
+                    self.queue.append(record)
+                    self.used_ideas[key] = record['id']
+                    accepted += 1
+                self.misses = 0 if accepted else self.misses + 1
+                if accepted:
+                    self.stop_reason = 'max_experiments'
+                elif self.misses >= 3:
+                    self.stop_reason = 'planning_stalled'
+                self.save()
+            except asyncio.CancelledError:
+                pass
+            except OSError:
+                raise
+            except Exception as error:
+                self.failures += 1
+                self.agents.log('idea_generation_failed', traceback=traceback.format_exc())
+                temporary = isinstance(error, QwenTemporaryError) and self.failures < 3
+                self.failed = not temporary
+                self.stop_reason = 'llm_error'
+                self.notify(f'Baker: {error}', fatal=not temporary)
+
+        for task in [task for task in done if task in self.planners]:
+            record = self.planners.pop(task)
+            node_id = record['node_id']
+            try:
+                proposal = task.result()
+                key = plan_key(proposal)
+                if key in self.used_plans:
+                    record.update(status='rejected', duplicate_of=self.used_plans[key])
+                    self.notify(f'{node_id}: duplicate plan matching {self.used_plans[key]}')
+                    continue
+                self.used_plans[key] = node_id
+                record['status'] = 'planned'
+                save(self.directory / 'planning' / node_id / 'proposal.json', proposal)
+                ready.append((node_id, proposal))
+            except OSError:
+                raise
+            except (Exception, asyncio.CancelledError) as error:
+                message = (str(error) or 'Planning cancelled').replace(self.agents.settings.api_key, '[REDACTED]')
+                record.update(status='failed', error=message[:2000])
+                self.agents.log('node_planning_failed', node_id=node_id, traceback=traceback.format_exc())
+                save(self.directory / 'planning' / node_id / 'error.json', {'error': message})
+                if not isinstance(error, asyncio.CancelledError):
+                    self.notify(f'{node_id} planner: {message}')
+            finally:
+                self.save()
+        return ready

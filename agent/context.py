@@ -58,6 +58,12 @@ def history_view(row):
             'analysis': row.analysis.model_dump() if row.analysis else None}
 
 
+def idea_history_view(row):
+    result = history_view(row)
+    result['assembly'] = [block.name for block in row.assembly.blocks]
+    return result
+
+
 def catalog_view(catalog):
     # Identical bytes have the same interface. Advertise each immutable version once.
     seen, result = set(), {}

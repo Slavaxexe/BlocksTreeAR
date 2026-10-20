@@ -192,6 +192,21 @@
       "title": "Queued Nodes",
       "type": "array"
     },
+    "planning_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3}$",
+        "type": "string"
+      },
+      "title": "Planning Nodes",
+      "type": "array"
+    },
+    "queued_ideas": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Queued Ideas",
+      "type": "array"
+    },
     "analyzing_nodes": {
       "items": {
         "pattern": "^node_[0-9]{3}$",

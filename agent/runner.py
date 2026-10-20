@@ -1,7 +1,6 @@
 """Module experiments: saved plans, bounded repairs, analysis and a rolling search queue."""
 
 import asyncio
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version
@@ -14,13 +13,14 @@ import time
 import traceback
 from uuid import uuid4
 
-from .agents import JSONAgents, extract_task, plan_key
+from .agents import JSONAgents, extract_task
 from .assembly import BlockError, assemble, block_catalog, initialize, sources
 from .config import Settings
-from .context import catalog_view, execution_contract, history_view, preparation_view, requirements
+from .context import execution_contract, history_view, preparation_view, requirements
 from .contracts import Delta, Extraction, Finish, NodeDelta, Preparation, Start
 from .data import check_code, file_hash, inventory, within
-from .qwen import QwenError, QwenTemporaryError
+from .qwen import QwenError
+from .search import Search
 from .storage import atomic_bytes, load, save
 
 
@@ -290,17 +290,15 @@ async def run(task_path: Path, options: Options, settings: Settings):
     report = await extract_task(task_path, directory, settings, agents=agents)
     if report.status == 'failed':
         return directory, report
-    active, analyses, starts, waiting, planner = {}, {}, {}, deque(), None
-    revision, planned_revision, published = 0, -1, None
-    delta, planning_failed, stop_reason = None, False, 'max_experiments'
-    planning_round, planning_misses, planning_feedback = 0, 0, []
-    planning_failures, single_plans, refill_planning = 0, False, False
+    active, analyses, starts = {}, {}, {}
+    revision, published, search = 0, None, None
+    delta, stop_reason = None, 'max_experiments'
 
     def update(**values):
         nonlocal report
         report = report.model_copy(update={**values, 'llm_calls': list(agents.calls),
-            'running_nodes': [s.node_id for s in active.values()], 'queued_nodes': [s.node_id for s in waiting],
-            'analyzing_nodes': list(analyses.values()), 'planning': planner is not None,
+            'running_nodes': [s.node_id for s in active.values()], 'queued_nodes': [],
+            'analyzing_nodes': list(analyses.values()), **(search.report() if search else {}),
             'max_parallel_nodes': options.parallel, 'max_parallel_agents': options.parallel_agents,
             'active_agents': list(agents.active.values()),
             'experiments': len(starts), 'best_node': delta.best_node_id if delta else None})
@@ -313,6 +311,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
             if warning not in report.warnings:
                 report = report.model_copy(update={'warnings': report.warnings + [warning]})
                 print(warning, file=sys.stderr)
+
+    def notify(message, *, fatal=False):
+        key = 'errors' if fatal else 'warnings'
+        message = message.replace(settings.api_key, '[REDACTED]')[-5000:]
+        update(**{key: getattr(report, key) + [message]})
 
     def checkpoint(node_id, **values):
         states = {**report.node_states, node_id: {**report.node_states.get(node_id, {}), **values}}
@@ -351,15 +354,6 @@ async def run(task_path: Path, options: Options, settings: Settings):
         local = JSONAgents(settings, deadline, 2, shared=agents, node_id=row.node_id)
         return await local.analyze(context)
 
-    async def plan(snapshot, *, baseline=False, log_directory=None):
-        if planning_failures:
-            agents.log('planning_retry_wait', consecutive_failures=planning_failures, delay_seconds=5)
-            await asyncio.sleep(min(5., max(0., deadline - time.monotonic())))
-        snapshot = {**snapshot, 'remaining_seconds': max(0., deadline - time.monotonic())}
-        if baseline:
-            return await agents.plan_baseline(snapshot)
-        return await agents.propose(snapshot, log_directory=log_directory)
-
     agents.on_activity = update
     try:
         extraction = load(directory / 'extraction.json', Extraction)
@@ -394,77 +388,29 @@ async def run(task_path: Path, options: Options, settings: Settings):
         save_delta()
         update(checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
 
+        search = Search(agents, directory, options, shared, notify)
         while True:
             expired = time.monotonic() >= deadline
             if expired:
                 stop_reason = 'time_budget'
-                for task in [*active, *analyses, *([planner] if planner else [])]:
+                for task in [*active, *analyses, *search.tasks]:
                     task.cancel()
-            while waiting and len(active) < options.parallel:
-                start = waiting.popleft()
-                task = asyncio.create_task(experiment(directory / 'nodes' / start.node_id, start,
-                    shared, agents, deadline, lambda node_id=start.node_id, **v: checkpoint(node_id, **v)))
-                active[task] = start
-
-            parents = [n.node_id for n in delta.nodes if n.result.status == 'completed'
-                       and n.analysis_status in {'completed', 'failed', 'skipped'}]
-            can_plan = not starts or (parents and (revision > planned_revision or refill_planning))
-            if (not expired and not planning_failed and planner is None and not waiting and can_plan
-                    and len(starts) < options.max_experiments and len(active) < options.parallel):
-                if agents.remaining_calls < 2:
-                    planning_failed, stop_reason = True, 'llm_limit'
-                elif not starts:
-                    snapshot = {**shared, 'remaining_seconds': max(0., deadline - time.monotonic()),
-                                'experiment_timeout_seconds': options.experiment_timeout}
-                    planner = asyncio.create_task(plan(snapshot, baseline=True))
-                    planned_revision = revision
-                else:
-                    eligible = [n for n in delta.nodes if n.node_id in parents and n.result.value is not None]
-                    if eligible and preparation.metric.direction:
-                        choose = min if preparation.metric.direction == 'minimize' else max
-                        leader = choose(eligible, key=lambda n: n.result.value).node_id
-                    else:
-                        leader = parents[-1]
-                    explore_slots = int(options.parallel > 1)
-                    caps = {'improve': options.parallel - explore_slots, 'explore': explore_slots}
-                    occupied = [s.purpose for s in list(active.values()) + list(waiting)]
-                    purposes = [purpose for purpose, cap in caps.items() for _ in range(cap - occupied.count(purpose))]
-                    purposes = purposes[:min(options.max_experiments - len(starts), agents.remaining_calls - 1)]
-                    if single_plans and purposes:
-                        # Keep the 2:1 balance even if a fast node finishes before the next plan arrives.
-                        purpose = min(dict.fromkeys(purposes), key=lambda p:
-                                      sum(s.purpose == p for s in starts.values()) / caps[p])
-                        purposes = [purpose]
-                    if purposes:
-                        catalog = catalog_view(block_catalog(directory, [n for n in delta.nodes if n.node_id in parents]))
-                        snapshot = {**shared, 'experiments': [history_view(n) for n in delta.nodes],
-                            'pending': [{'node_id': s.node_id, 'purpose': s.purpose, 'hypothesis': s.hypothesis.model_dump(),
-                                         'assembly': s.assembly.model_dump()} for s in starts.values()
-                                        if s.node_id not in {n.node_id for n in delta.nodes}],
-                            'leader_id': leader, 'available_parents': parents, 'module_catalog': catalog,
-                            'purposes': purposes, 'count': len(purposes),
-                            'used': {plan_key(s): s.node_id for s in starts.values()},
-                            'rejected_plans': planning_feedback,
-                            'remaining_seconds': max(0., deadline - time.monotonic()),
-                            'experiment_timeout_seconds': options.experiment_timeout}
-                        planning_round += 1
-                        planner = asyncio.create_task(plan(snapshot,
-                            log_directory=directory / 'planning' / f'round_{planning_round:03d}'))
-                        planned_revision = revision
-                        refill_planning = False
+            else:
+                search.fill(delta, list(active.values()), revision)
             update(stage='search' if delta.nodes else 'baseline')
-            tasks = [*active, *analyses, *([planner] if planner else [])]
+            tasks = [*active, *analyses, *search.tasks]
             if not tasks:
-                if (not expired and len(starts) < options.max_experiments and not planning_failed
-                        and stop_reason != 'planning_stalled'):
-                    stop_reason = 'baseline_failed' if not parents else 'metric_unavailable'
+                if not expired:
+                    stop_reason = search.stop_reason
+                    if not search.parents and stop_reason == 'max_experiments':
+                        stop_reason = 'baseline_failed'
                 break
             done, _ = await asyncio.wait(tasks, timeout=None if expired else max(0., deadline - time.monotonic()),
                                          return_when=asyncio.FIRST_COMPLETED)
-            for task in [t for t in done if t in active]:
+            for task in [task for task in done if task in active]:
                 start = active.pop(task)
                 record(start, task.result())
-                row = next(n for n in delta.nodes if n.node_id == start.node_id)
+                row = next(row for row in delta.nodes if row.node_id == start.node_id)
                 if not expired and agents.remaining_calls:
                     row = row.model_copy(update={'analysis_status': 'running'})
                     delta = delta.model_copy(update={'nodes': [row if n.node_id == row.node_id else n for n in delta.nodes]})
@@ -474,7 +420,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     delta = delta.model_copy(update={'nodes': [row if n.node_id == row.node_id else n for n in delta.nodes]})
                     revision += 1
                 save_delta()
-            for task in [t for t in done if t in analyses]:
+            for task in [task for task in done if task in analyses]:
                 node_id = analyses.pop(task)
                 try:
                     analysis = task.result()
@@ -488,69 +434,29 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     update(warnings=report.warnings + [f'{node_id} analysis: {str(error)[:1000]}'])
                 delta = delta.model_copy(update={'nodes': [n.model_copy(update=values) if n.node_id == node_id else n for n in delta.nodes]})
                 revision += 1
-                planning_misses = 0
                 save_delta()
-            if planner in done:
-                try:
-                    result = planner.result()
-                    planning_failures = 0
-                    proposals = [result] if not starts else result.proposals
-                    if starts:
-                        planning_feedback = result.rejected
-                        for rejection in result.rejected:
-                            update(warnings=report.warnings + [
-                                f"Baker skipped duplicate {rejection['purpose']} plan matching {rejection['duplicate_of']}"])
-                        if result.error:
-                            update(warnings=report.warnings + [f'Baker kept accepted plans after: {result.error}'])
-                        if proposals:
-                            planning_misses = 0
-                            stop_reason = 'max_experiments'
-                            refill_planning = single_plans
-                        else:
-                            # A stale/duplicate batch is retried against the latest results, not a fatal API error.
-                            planning_misses += 1
-                            planned_revision = revision - 1 if planning_misses < 3 else revision
-                            if planning_misses >= 3:
-                                stop_reason = 'planning_stalled'
-                    if time.monotonic() < deadline:
-                        for proposal in proposals:
-                            catalog = block_catalog(directory, delta.nodes)
-                            hashes = {b.name: next(item['sha256'] for item in catalog[b.source_node] if item['name'] == b.name)
-                                      for b in proposal.assembly.blocks if b.source_node is not None}
-                            start = Start(node_id=f'node_{len(starts):03d}', parent_id=proposal.parent_id, purpose=proposal.purpose,
-                                hypothesis=proposal.hypothesis, assembly=proposal.assembly, preparation_sha256=delta.preparation_sha256,
-                                context={'task': str(task_path), 'task_sha256': report.task_sha256, 'source_hashes': hashes,
-                                         'analysis_revision': planned_revision, 'installed_libraries': shared['installed_libraries']},
-                                outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
-                                timeout_seconds=float(options.experiment_timeout))
-                            node = directory / 'nodes' / start.node_id
-                            node.mkdir(parents=True)
-                            save(node / 'start.json', start)
-                            starts[start.node_id] = start
-                            waiting.append(start)
-                            checkpoint(start.node_id, stage='queued', blocks={
-                                b.name: {'stage': 'queued' if b.name in start.assembly.write_blocks else 'reused',
-                                         'attempt': 0} for b in start.assembly.blocks})
-                except (Exception, asyncio.CancelledError) as error:
-                    agents.log('planning_failed', error_type=type(error).__name__, traceback=traceback.format_exc())
-                    timed_out = time.monotonic() >= deadline
-                    calls_exhausted = agents.remaining_calls < 2
-                    if isinstance(error, QwenTemporaryError):
-                        planning_failures += 1
-                        single_plans = True
-                    if (isinstance(error, QwenTemporaryError) and planning_failures < 3
-                            and not timed_out and not calls_exhausted):
-                        planned_revision = revision - 1
-                        update(warnings=report.warnings + [
-                            f'Baker temporary failure {planning_failures}/3; retrying one plan without repeating preparation'])
-                        agents.log('planning_recovery', consecutive_failures=planning_failures, batch_size=1)
-                    else:
-                        planning_failed = True
-                        stop_reason = ('time_budget' if timed_out else 'llm_limit' if calls_exhausted
-                                       else 'llm_error' if isinstance(error, QwenError) else 'error')
-                    if planning_failed and not isinstance(error, asyncio.CancelledError):
-                        update(errors=report.errors + [str(error).replace(settings.api_key, '[REDACTED]')[-5000:]])
-                planner = None
+            for node_id, proposal in search.collect(done):
+                if time.monotonic() >= deadline:
+                    continue
+                catalog = block_catalog(directory, delta.nodes)
+                hashes = {block.name: next(item['sha256'] for item in catalog[block.source_node] if item['name'] == block.name)
+                          for block in proposal.assembly.blocks if block.source_node is not None}
+                start = Start(node_id=node_id, parent_id=proposal.parent_id, purpose=proposal.purpose,
+                    hypothesis=proposal.hypothesis, assembly=proposal.assembly,
+                    preparation_sha256=delta.preparation_sha256,
+                    context={'task': str(task_path), 'task_sha256': report.task_sha256, 'source_hashes': hashes,
+                             'analysis_revision': revision, 'installed_libraries': shared['installed_libraries']},
+                    outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
+                    timeout_seconds=float(options.experiment_timeout))
+                node = directory / 'nodes' / node_id
+                node.mkdir(parents=True)
+                save(node / 'start.json', start)
+                starts[node_id] = start
+                active[asyncio.create_task(experiment(node, start, shared, agents, deadline,
+                    lambda node_id=node_id, **values: checkpoint(node_id, **values)))] = start
+                checkpoint(node_id, stage='queued', blocks={
+                    block.name: {'stage': 'queued' if block.name in start.assembly.write_blocks else 'reused', 'attempt': 0}
+                    for block in start.assembly.blocks})
         completed_checks = (['saved_starts'] if starts else [])
         completed_checks += ['assembled_modules'] if any(n.result.code_sha256 for n in delta.nodes) else []
         completed_checks += ['recorded_finishes'] if delta.nodes else []
@@ -565,10 +471,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
         update(status='ready' if delta and delta.best_node_id else 'partial' if published else 'failed',
                stage='complete', stop_reason='error', errors=report.errors + [str(error).replace(settings.api_key, '[REDACTED]')[-5000:]])
     finally:
-        tasks = [*active, *analyses, *([planner] if planner else [])]
+        tasks = [*active, *analyses, *(search.tasks if search else [])]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
     return directory, report
-

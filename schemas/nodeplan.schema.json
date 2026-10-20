@@ -1,0 +1,170 @@
+{
+  "$defs": {
+    "Block": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "source_node": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Node"
+        },
+        "description": {
+          "description": "Behavior and exact input/output types, shapes, column conventions and object APIs",
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "requires": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requires",
+          "type": "array"
+        },
+        "provides": {
+          "description": "Required non-None state outputs; nullable settings belong inside output objects",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Provides",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "provides"
+      ],
+      "title": "Block",
+      "type": "object"
+    },
+    "BlockReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "source_node": {
+          "pattern": "^node_[0-9]{3}$",
+          "title": "Source Node",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "source_node"
+      ],
+      "title": "BlockReference",
+      "type": "object"
+    },
+    "Hypothesis": {
+      "additionalProperties": false,
+      "properties": {
+        "rationale": {
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "expected_effect": {
+          "minLength": 1,
+          "title": "Expected Effect",
+          "type": "string"
+        },
+        "pipeline": {
+          "$ref": "#/$defs/Pipeline"
+        }
+      },
+      "required": [
+        "rationale",
+        "expected_effect",
+        "pipeline"
+      ],
+      "title": "Hypothesis",
+      "type": "object"
+    },
+    "Pipeline": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "title": "Data",
+          "type": "object"
+        },
+        "preprocessing": {
+          "title": "Preprocessing",
+          "type": "object"
+        },
+        "model": {
+          "title": "Model",
+          "type": "object"
+        },
+        "training": {
+          "title": "Training",
+          "type": "object"
+        }
+      },
+      "required": [
+        "data",
+        "preprocessing",
+        "model",
+        "training"
+      ],
+      "title": "Pipeline",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "hypothesis": {
+      "$ref": "#/$defs/Hypothesis"
+    },
+    "order": {
+      "description": "Block names in execution order",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Order",
+      "type": "array"
+    },
+    "reuse": {
+      "description": "References only; Python copies the saved interfaces",
+      "items": {
+        "$ref": "#/$defs/BlockReference"
+      },
+      "title": "Reuse",
+      "type": "array"
+    },
+    "write": {
+      "description": "Complete interfaces of only the new or changed blocks",
+      "items": {
+        "$ref": "#/$defs/Block"
+      },
+      "minItems": 1,
+      "title": "Write",
+      "type": "array"
+    }
+  },
+  "required": [
+    "hypothesis",
+    "order",
+    "write"
+  ],
+  "title": "NodePlan",
+  "type": "object"
+}

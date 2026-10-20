@@ -206,6 +206,35 @@ class Proposal(Contract):
     assembly: Assembly
 
 
+class Idea(Contract):
+    purpose: Literal['baseline', 'improve', 'explore']
+    parent_id: NodeID | None = None
+    change: str = Field(min_length=1, description='One concrete change, including intended algorithm or parameters')
+    change_blocks: list[str] = Field(default_factory=list, description='Existing or proposed block names to change')
+    expected_effect: str = Field(min_length=1)
+
+
+class Ideas(Contract):
+    ideas: list[Idea] = Field(min_length=1)
+
+    @model_validator(mode='after')
+    def requested_ideas(self, info: ValidationInfo):
+        context = info.context or {}
+        if 'purposes' not in context:
+            return self
+        if [idea.purpose for idea in self.ideas] != context['purposes']:
+            raise ValueError('Return exactly the requested purposes in their given order')
+        for idea in self.ideas:
+            if idea.purpose == 'baseline':
+                if idea.parent_id is not None:
+                    raise ValueError('Baseline must have no parent')
+            elif idea.parent_id not in context['parents']:
+                raise ValueError('Choose an available parent')
+            elif idea.purpose == 'improve' and idea.parent_id != context['leader']:
+                raise ValueError('Improve must extend the current leader')
+        return self
+
+
 class Proposals(Contract):
     proposals: list[Proposal] = Field(min_length=1)
 
@@ -234,6 +263,43 @@ class Proposals(Contract):
                     if block.name not in proposal.assembly.write_blocks and block.model_dump(exclude={'source_node'}) != {
                             k: source[k] for k in ('name', 'description', 'requires', 'provides')}:
                         raise ValueError('Keep the declared interface of reused blocks unchanged')
+        return self
+
+
+class BlockReference(Contract):
+    name: str = Field(pattern=r'^[a-z][a-z0-9_]{0,63}$')
+    source_node: NodeID
+
+
+class NodePlan(Contract):
+    hypothesis: Hypothesis
+    order: list[str] = Field(min_length=1, description='Block names in execution order')
+    reuse: list[BlockReference] = Field(default_factory=list, description='References only; Python copies the saved interfaces')
+    write: list[Block] = Field(min_length=1, description='Complete interfaces of only the new or changed blocks')
+
+    def proposal(self, idea: Idea, catalog: dict) -> Proposal:
+        blocks = {block.name: block for block in self.write}
+        for reference in self.reuse:
+            source = next((block for block in catalog.get(reference.source_node, [])
+                           if block['name'] == reference.name), None)
+            if source is None:
+                raise ValueError(f'Unknown saved block: {reference.source_node}/{reference.name}')
+            blocks[reference.name] = Block(source_node=reference.source_node,
+                **{key: source[key] for key in ('name', 'description', 'requires', 'provides')})
+        return Proposal(purpose=idea.purpose, parent_id=idea.parent_id, hypothesis=self.hypothesis,
+                        assembly=Assembly(blocks=[blocks[name] for name in self.order],
+                                          write_blocks=[block.name for block in self.write]))
+
+    @model_validator(mode='after')
+    def assembled_plan(self, info: ValidationInfo):
+        names = [block.name for block in self.write] + [block.name for block in self.reuse]
+        if len(names) != len(set(names)) or len(self.order) != len(set(self.order)) or set(names) != set(self.order):
+            raise ValueError('order must contain every written or reused block exactly once')
+        context = info.context or {}
+        if 'idea' in context:
+            proposal = self.proposal(context['idea'], context['catalog'])
+            Proposals.model_validate({'proposals': [proposal]}, context={**context, 'count': 1,
+                'baseline': proposal.purpose == 'baseline', 'purposes': [proposal.purpose]})
         return self
 
 
@@ -360,6 +426,8 @@ class RunReport(Contract):
     stop_reason: str | None = None
     running_nodes: list[NodeID] = Field(default_factory=list)
     queued_nodes: list[NodeID] = Field(default_factory=list)
+    planning_nodes: list[NodeID] = Field(default_factory=list)
+    queued_ideas: list[dict[str, Any]] = Field(default_factory=list)
     analyzing_nodes: list[NodeID] = Field(default_factory=list)
     planning: bool = False
     max_parallel_nodes: int = 3
@@ -368,4 +436,4 @@ class RunReport(Contract):
     node_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
-SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport, Proposals, Analysis, Assembly, NodeDelta, Delta)
+SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport, Proposals, Ideas, NodePlan, Analysis, Assembly, NodeDelta, Delta)

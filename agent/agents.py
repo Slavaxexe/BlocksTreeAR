@@ -1,7 +1,6 @@
 """Stateless Qwen roles with bounded repair and locally validated JSON."""
 
 import asyncio
-from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -12,8 +11,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from pydantic import ValidationError
 
 from .config import Settings
-from .contracts import (Analysis, DataFacts, Extraction, LLMCall, MetricFacts, OutputFacts,
-                        PreparationDraft, ProblemFacts, Program, Proposal, Proposals, RunReport)
+from .contracts import (Analysis, DataFacts, Extraction, Ideas, LLMCall, MetricFacts, NodePlan, OutputFacts,
+                        PreparationDraft, ProblemFacts, Program, RunReport)
 from .qwen import QwenError, QwenTemporaryError
 from .storage import append_event, fingerprint, save
 
@@ -38,13 +37,6 @@ NODE_RULES = (
 
 def plan_key(plan):
     return fingerprint({'pipeline': plan.hypothesis.pipeline.model_dump(), 'assembly': plan.assembly.model_dump()})
-
-
-@dataclass(frozen=True)
-class PlannedBatch:
-    proposals: list[Proposal]
-    rejected: list[dict]
-    error: str | None = None
 
 
 class JSONAgents:
@@ -256,23 +248,44 @@ class JSONAgents:
             + json.dumps(context, ensure_ascii=False))
         return await self.ask(PreparationDraft, prompt, "preparer", code=True)
 
-    async def plan_baseline(self, context: dict):
-        result = await self.ask(Proposals, NODE_RULES + "Return exactly one baseline proposal, purpose=baseline, parent_id=null. "
-            "Design a simple trainable solution and bootstrap its reusable modules now: no saved blocks exist yet. "
-            "Use meaningful boundaries such as transformations and model fitting/prediction where appropriate; "
-            "do not pack independently reusable stages into one whole-solution block or create empty pass-throughs. "
-            "There is no fixed module count or predefined stage registry; keep jointly trained components together. "
-            "Return an ORDERED assembly.blocks list. All blocks have source_node=null and must appear in "
-            "assembly.write_blocks. A separate implementer will write each listed block IN PARALLEL, before any "
-            "block runs. Specify compatible types, shapes, feature ordering and object APIs in descriptions so "
-            "agents can agree without seeing each other's code. Every module defines run(state) -> dict updates. "
-            "Initial keys are fit, validation, test, preparation, auxiliary. Each requires key must already exist; "
-            "earlier blocks add their provides keys. Final keys are validation_predictions and test_predictions, "
-            "pandas DataFrames in original row order. Learn from fit only; validation/test have no targets. "
-            "Honor installed_libraries, remaining_seconds and experiment_timeout_seconds; keep this first solution simple. "
-            "Describe the intended algorithm in hypothesis and exact state interfaces in assembly. Do not write code.\n"
-            + json.dumps(context, ensure_ascii=False), 'baker', validation={'baseline': True, 'count': 1, 'catalog': {}})
-        return result.proposals[0]
+    async def propose_ideas(self, context: dict):
+        prompt = (
+            "Suggest exactly the requested purposes in their given order. Return short, concrete ML hypotheses, "
+            "not assembly plans or code. Each idea states one coherent change, affected block names and its "
+            "expected effect. Include relevant algorithm choices or parameter values in change. "
+            "Use measured results and analyzer findings; avoid previous, queued or rejected ideas. "
+            "Improve extends leader_id; explore tests a different direction using an available parent. "
+            "For baseline, use parent_id=null and suggest a simple trainable starting solution. "
+            "The separate node planner defines module interfaces; do not describe requires/provides or repeat "
+            "saved block specifications here. Shared data loading, outer split, metric and output are already fixed. "
+            "Honor installed libraries and time limits. Do not invent scores.\n"
+        )
+        result = await self.ask(Ideas, prompt + json.dumps(context, ensure_ascii=False, separators=(',', ':')),
+            'baker', validation={'purposes': context['purposes'], 'parents': context['available_parents'],
+                                 'leader': context['leader_id']})
+        return result.ideas
+
+    async def plan_node(self, context: dict, idea, catalog):
+        prompt = (NODE_RULES +
+            "You are the node planner. Turn ONE supplied idea into a complete, compatible module assembly. "
+            "Preserve its intent and parent; use the current findings and saved module catalog. "
+            "Return order (all block names in execution order), reuse (name/source_node references only) and "
+            "write (complete Block specifications for only the new or changed modules). Python copies saved "
+            "interfaces for reuse; do not repeat them. Each block appears exactly once in reuse or write. "
+            "A written block may reference saved source_node for editing or use null for a new implementation. "
+            "Use meaningful reusable boundaries, while keeping jointly trained components together. "
+            "For baseline, create the first reusable blocks; all blocks must be in write with source_node=null. "
+            "A separate implementer writes each requested block in parallel. Specify compatible types, shapes, "
+            "column order and object APIs in written block descriptions. Trace the feature and target flow. "
+            "Each run(state) returns declared provides keys. Initial state keys are fit, validation, test, "
+            "preparation, auxiliary. Final outputs are validation_predictions and test_predictions DataFrames "
+            "in original row order. Optional blocks may be omitted; there are no fixed module slots. "
+            "Describe concrete algorithms and parameters in hypothesis.pipeline, not only in its rationale. "
+            "Honor installed libraries and time limits. Do not write code or invent scores.\n")
+        plan = await self.ask(NodePlan, prompt + json.dumps(context, ensure_ascii=False, separators=(',', ':')),
+            'node_planner', validation={'idea': idea, 'catalog': catalog,
+                'parents': [idea.parent_id], 'leader': idea.parent_id})
+        return plan.proposal(idea, catalog)
 
     async def implement(self, context: dict):
         return await self.ask(Program, NODE_RULES + "Write ONLY the requested target_block module, defining run(state) -> dict. "
@@ -319,72 +332,6 @@ class JSONAgents:
             "Keep the summary brief. Do not write code or alter the metric, split or task.\n"
             + json.dumps(context, ensure_ascii=False), "analyzer")
 
-    async def propose(self, context: dict, *, log_directory: Path | None = None):
-        prompt_context = {key: value for key, value in context.items() if key != 'used'}
-        prompt = (NODE_RULES + "Plan exactly count DISTINCT experiments in the requested purposes order. "
-            "The controller reserves two node slots for improve and one for explore by default. "
-            "Improve must extend leader_id; explore should test a different algorithm or pipeline and may use "
-            "another available parent. Use completed analyzer findings, scores/errors and pending plans. "
-            "Each proposal is ONE coherent hypothesis implementation with an ORDERED assembly.blocks list and "
-            "assembly.write_blocks naming ALL modules to create or change for this hypothesis. "
-            "Reuse any compatible saved modules from module_catalog by name and source_node, retaining their "
-            "description, requires and provides exactly for unchanged modules. Each write_blocks entry may modify "
-            "a saved module or create a new one with source_node=null; ALL new modules must be listed. "
-            "You may create or change several blocks together, including updating consumers when an interface changes. "
-            "A separate implementer writes each requested block IN PARALLEL, without seeing other new sources. "
-            "Agree exact types, shapes, feature/column order and object APIs in block descriptions. "
-            "Prefer reusing useful compatible stages; when the catalog lacks them, create meaningful reusable "
-            "blocks instead of repeatedly rewriting an entire solution. Omit optional modules to disable them; "
-            "list order is execution order. "
-            "Initial state keys: fit, validation, test, preparation, auxiliary. auxiliary contains extra named "
-            "input tables, excluding full train/test. Each run(state) returns declared provides keys; "
-            "values can be arbitrary in-memory objects. Every requires key must be available from initial state or "
-            "earlier blocks. Final state must contain validation_predictions and test_predictions. "
-            "No fixed features/model/train slots: name blocks for this task. A single composite block can implement "
-            "an entire coupled algorithm, ensemble, internal loop or other unusual approach. Sequential composition "
-            "must not force decomposition of jointly trained components. Plan one coherent hypothesis per node. "
-            "Do not require hidden validation labels, a changed scorer/split or full-train refit. "
-            "Fit on fit rows and predict unlabeled validation/test; preserve their row order. "
-            "Honor installed libraries, experiment_timeout_seconds and remaining_seconds. "
-            "Avoid pending/previous identical experiments. A different rationale alone is not a new experiment: "
-            "record concrete algorithm, parameter or preprocessing changes in pipeline and assembly. "
-            "Use rejected_plans as examples to avoid; always honor the CURRENT count and purposes. "
-            "accepted_proposals are already kept from this batch: do not return them again. "
-            "duplicate_of identifies the saved node or accepted proposal that the rejected plan repeats. "
-            "Do not write code or invent scores.\n")
-        used, accepted, rejected = dict(context['used']), [], []
-        for round_number in (1, 2):
-            try:
-                batch = await self.ask(Proposals,
-                    prompt + json.dumps(prompt_context, ensure_ascii=False, separators=(',', ':')), 'baker', validation={
-                        'count': prompt_context['count'], 'purposes': prompt_context['purposes'],
-                        'parents': context['available_parents'], 'leader': context['leader_id'],
-                        'catalog': context['module_catalog']})
-            except QwenError as error:
-                if log_directory:
-                    save(log_directory / f'response_{round_number:02d}.json', {'error': str(error)})
-                if not accepted:
-                    raise
-                return PlannedBatch(accepted, rejected, str(error))
-            duplicates = []
-            for index, proposal in enumerate(batch.proposals):
-                key = plan_key(proposal)
-                if key in used:
-                    duplicates.append({'index': index, 'purpose': proposal.purpose,
-                        'duplicate_of': used[key], 'proposal': proposal.model_dump(mode='json')})
-                else:
-                    accepted.append(proposal)
-                    used[key] = f'accepted_proposal_{len(accepted)}'
-            rejected.extend(duplicates)
-            if log_directory:
-                save(log_directory / f'response_{round_number:02d}.json', {
-                    'proposals': batch.model_dump(mode='json')['proposals'], 'rejected': duplicates})
-            if not duplicates or not self.remaining_calls or time.monotonic() >= self.deadline:
-                break
-            prompt_context = {**prompt_context, 'count': len(duplicates),
-                'purposes': [item['purpose'] for item in duplicates], 'rejected_plans': duplicates,
-                'accepted_proposals': [p.model_dump(mode='json') for p in accepted]}
-        return PlannedBatch(accepted, rejected)
 
 
 async def extract_task(task_path: Path, output: Path, settings: Settings, *, agents: JSONAgents | None = None):
