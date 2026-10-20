@@ -76,6 +76,7 @@
         "extraction",
         "preparation",
         "baseline",
+        "search",
         "complete"
       ],
       "title": "Stage",
@@ -119,6 +120,37 @@
       },
       "title": "Llm Calls",
       "type": "array"
+    },
+    "stop_reason": {
+      "anyOf": [
+        {
+          "enum": [
+            "node_limit",
+            "time_budget",
+            "llm_error",
+            "preparation_failed",
+            "error"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stop Reason"
+    },
+    "completed_nodes": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Completed Nodes",
+      "type": "integer"
+    },
+    "failed_nodes": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Failed Nodes",
+      "type": "integer"
     }
   },
   "required": [

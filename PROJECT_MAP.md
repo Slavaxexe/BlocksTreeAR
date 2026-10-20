@@ -6,22 +6,22 @@
 
 ```text
 AlfaHakaton/
-├── solution.py              Точка входа платформы: task.md → первый baseline
+├── solution.py              Точка входа платформы: task.md → ограниченный поиск экспериментов
 ├── viewer.py                Один скрипт: HTML-граф, JSON / evidence / исходники, localhost / экспорт
 ├── alfa_agent/
 │   ├── __init__.py          Пакет
 │   ├── __main__.py          CLI check-config / ping / ask / extract / baseline
 │   ├── config.py            Env / .env, проверка настроек, скрытие ключа
 │   ├── qwen.py              Текстовые диагностические вызовы API
-│   ├── contracts.py         Pydantic-контракты фактов, подготовки, плана, кода, start / finish / report
-│   ├── agents.py            Четыре extractor’а, preparer, baker, реализатор; bounded JSON-repair
+│   ├── contracts.py         Контракты фактов, подготовки, start / finish, delta и report
+│   ├── agents.py            Extractor’ы, preparer, baker baseline / улучшений, реализатор; JSON-repair
 │   ├── data.py              Инвентаризация, профиль таблиц, пути, хеши и интерфейс генерируемого кода
-│   ├── runner.py            План до реализации, bounded repair, subprocess / таймер, публикация
+│   ├── runner.py            Цикл дерева, вычисление delta, выбор родителя / лидера, исполнение ноды
 │   ├── worker.py            Исполнение prepare.py, smoke-test, модель, общий scorer, запись finish
 │   └── storage.py           Атомарная запись, сериализация и загрузка контрактов
 ├── tests/
 │   ├── test_extraction.py   Источники / схемы, параллельность, свободные имена / метрики / форматы
-│   ├── test_pipeline.py     Mock HTTP → настоящий код / subprocess → предсказания и кастомный score
+│   ├── test_pipeline.py     Mock HTTP → subprocess → дерево, feedback, лучший ответ и отказы
 │   ├── test_qwen.py         Настройки, HTTP, таймауты, отсутствие ключа в диагностике
 │   └── test_viewer.py       Новая раскладка, незавершённые записи, исходники, безопасный HTML
 ├── schemas/                 JSON Schema публичных артефактов из contracts.py
@@ -33,7 +33,8 @@ AlfaHakaton/
 │   ├── preparation.json     Профиль, конфигурация, готовность, хеши
 │   ├── preparation.log      Диагностика подготовки
 │   ├── split.npz            Индексы общей validation
-│   ├── nodes/node_000/      start.json, experiment.py, finish.json, execution.log, предсказания
+│   ├── delta.json           Общая история: планы, результаты, сравнения, текущий лидер
+│   ├── nodes/node_*/        start.json, experiment.py, finish.json, delta.json, лог и предсказания
 │   └── best.json            Указатель на оценённую ноду
 ├── data/raw/                Публичные условия, исходные данные и словари признаков
 ├── docs/
@@ -41,7 +42,7 @@ AlfaHakaton/
 │   ├── TASK_BRIEF.md        Требования организаторов из исходного PDF
 │   └── ...                 Источники, инвентаризация данных, настройка API, интерфейс vendor baseline
 ├── vendor/                  Неизменённый baseline организаторов и их requirements
-├── history/                 Исторические research_notes / reports и первая проверка API
+├── history/                 Исследования, первая проверка API и локальный архив прежних запусков
 ├── .env.example             Имена настроек без ключа
 ├── pyproject.toml, uv.lock  Зависимости и зафиксированное окружение
 └── README.md                Запуск и поведение
@@ -54,9 +55,12 @@ submission исключены из git. Данные в каждую ноду н
 `solution.py` → CLI baseline → `runner.run()` → extractor’ы → prepare.py через
 worker → baker → start.json → реализатор → проверка → experiment.py через worker → finish / output.
 Start неизменен; finish хранит хеши плана / кода, заметки и этап возможного отказа.
+После finish runner вычисляет node delta, обновляет общий delta и best. Baker
+получает эту историю и выбранного родителя; цикл продолжается до лимита нод / времени.
 `viewer.py` независимо читает известные JSON и два известных исходника; CSV,
 .env, API и выполнение кода ему не нужны. Конкретные загрузчик и scorer создаются
 под условие; в контроллере не зашиты публичные target / имена файлов / метрики.
 
-Старый цикл с фиксированными sklearn pipeline и summarizer удалён. Новый путь
-останавливается после node_000; следующие гипотезы обсудим после проверки baseline.
+Summarizer — детерминированные функции в runner.py, без отдельного модуля / LLM-вызова.
+Политика пока простая: продолжать текущего лидера; без score — последнюю успешную
+ноду, а если успешных нет — последнюю попытку. Это временный способ обхода дерева.

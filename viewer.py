@@ -160,7 +160,7 @@ nav{flex-wrap:wrap}
 }
 
 </style>
-<header><div><h1>Как работает ML-агент</h1><small>Условие → подготовка → код → baseline</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
+<header><div><h1>Как работает ML-агент</h1><small>Условие → подготовка → эксперименты → delta → новые гипотезы</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
 <section id="architecture-panel" class="panel" hidden><p class="muted">Текущий путь до первого baseline. Состояния и JSON конкретного запуска — во вкладке «Извлечение».</p><div class="legend"><span><i class="dot"></i>Детерминированный Python</span><span><i class="dot llm"></i>Вызов Qwen API</span><span><i class="dot cpu"></i>Локальное обучение на CPU</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" viewBox="0 0 1120 820" role="img" aria-label="Текущая архитектура: извлечение, подготовка, генерация кода и первый baseline"></svg></div><p class="footnote">Qwen пишет prepare.py и experiment.py. Общая обвязка измеряет профиль, фиксирует split и вычисляет score. Цикл улучшения гипотез ещё не подключён.</p></section>
@@ -173,7 +173,7 @@ const svg=(tag,attrs={},text)=>{const e=document.createElementNS(NS,tag);for(con
 const fmt=n=>typeof n==='number'&&Number.isFinite(n)?n.toFixed(6):'—';
 const families={dummy:'Dummy baseline',extra_trees:'ExtraTrees',hist_gradient_boosting:'HistGradientBoosting'};
 const statuses={completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
-const stops={max_experiments:'Лимит экспериментов',time_budget:'Лимит времени',proposal_limit:'Лимит предложений',llm_unavailable_or_contract_conflict:'API / конфликт контракта',llm_unavailable_or_invalid_hypothesis:'API / невалидная гипотеза'};
+const stops={node_limit:'Лимит нод',time_budget:'Лимит времени',llm_error:'Ошибка API / JSON',preparation_failed:'Ошибка подготовки',error:'Ошибка контроллера',max_experiments:'Лимит экспериментов'};
 const roles={problem:'Задача',data:'Данные',metric:'Метрика',output:'Формат ответа'};
 const extractionStatus=r=>({running:'Выполняется',ready:'Готово',partial:'Частично',failed:'Ошибка'}[r.report?.status]??'Нет итогового отчёта');
 let state=JSON.parse($('initial-data').textContent), active=null, selected=null, jsonTab='start', signature='', view='extraction', live=__LIVE__;
@@ -184,7 +184,7 @@ function box(canvas,x,y,w,h,title,lines=[],kind=''){
  lines.forEach((line,i)=>g.append(svg('text',{x:x+16,y:y+49+i*18,class:'caption'},line)));canvas.append(g);return g;
 }
 function architecture(){
- const c=$('architecture'); marker(c); c.setAttribute('viewBox','0 0 1120 700');
+ const c=$('architecture'); marker(c); c.setAttribute('viewBox','0 0 1120 820');
  ['M 270 75 H 330','M 670 75 H 760','M 900 120 V 175 H 180 V 230',
   'M 320 275 H 420','M 700 275 H 800','M 940 320 V 370 H 180 V 420',
   'M 320 465 H 420','M 700 465 H 800','M 940 510 V 570 H 560 V 590',
@@ -195,11 +195,14 @@ function architecture(){
  box(c,40,230,280,90,'04  Подготовка · Qwen',['Условие + инвентаризация файлов','Чтение, split, scorer → prepare.py'],'llm');
  box(c,420,230,280,90,'05  Исполнение Python',['Читаем реальные данные','Измеряем профиль; сохраняем split'],'cpu');
  box(c,800,230,280,90,'06  preparation.json',['Общие условия всех экспериментов','Профиль, split, метрика, проблемы']);
- box(c,40,420,280,90,'07  Baker · Qwen',['План простейшего baseline','Данные, preprocessing, модель, fit'],'llm');
+ box(c,40,420,280,90,'07  Baker · Qwen',['Baseline, затем новая гипотеза','Контекст + delta + выбранный родитель'],'llm');
  box(c,420,420,280,90,'08  start.json',['План Baker + ссылки на контекст','Сохраняется до реализации']);
  box(c,800,420,280,90,'09  Реализатор · Qwen',['experiment.py + заметки или отказ','Короткая проверка; план неизменен'],'llm');
  box(c,420,590,280,90,'10  Отдельный процесс',['Fit → predictions → общий scorer','finish.json + предсказания'],'cpu');
- box(c,40,590,280,90,'11  Готовый baseline',['Файл ответа рядом с условием','Best — только при вычисленном score']);
+ box(c,40,590,280,90,'11  delta.json · Python',['Изменения pipeline и реальные score','Обновление истории и best'],'cpu');
+ edge(c,'M 40 635 H 18 V 465 H 40',true);
+ edge(c,'M 180 680 V 720 H 420');
+ box(c,420,720,280,80,'12  Результат поиска',['Лимит нод / времени → лучший ответ']);
 }
 function showTab(name) {
   view = name; const diagram = name === 'architecture';
@@ -238,7 +241,8 @@ function render() {
   const info = [
     ['Источник гипотез', mode === 'offline' ? 'Фиксированная очередь' : mode === 'qwen' ? 'Qwen API' : 'Режим не записан'],
     ['Основная метрика', metric], ['Лучший score', fmt(r.best?.value)],
-    ['Запуск', r.report?.status ? extractionStatus(r) : r.report ? (stops[r.report.stop_reason] ?? r.report.stop_reason) : 'report.json ещё не записан']
+    ['Запуск', r.report?.status ? extractionStatus(r) : 'report.json ещё не записан'],
+    ['Остановка', stops[r.report?.stop_reason]??'Ещё не остановлен'], ['Нод', r.nodes.length]
   ];
   $('summary').replaceChildren();
   for (const [label, value] of info) {
@@ -247,12 +251,12 @@ function render() {
   drawTree(r); drawDetail(r);
 }
 function drawExtraction(r) {
-  if (!(selected in roles) && !['result', 'preparation', 'node_000'].includes(selected)) selected = Object.keys(roles).find(k => r.blocks[k]) ?? 'result';
+  if (!(selected in roles) && !['result', 'preparation', 'node_000', 'delta'].includes(selected)) selected = Object.keys(roles).find(k => r.blocks[k]) ?? 'result';
   const c = $('tree'), report = r.report, accepted = Object.values(r.blocks).filter(Boolean).length;
-  c.replaceChildren(); marker(c); c.setAttribute('viewBox', '0 0 735 540'); c.style.width = '735px'; c.style.height = '540px';
+  c.replaceChildren(); marker(c); c.setAttribute('viewBox', '0 0 735 680'); c.style.width = '735px'; c.style.height = '680px';
   $('summary').replaceChildren();
   for (const [label, value] of [['Статус запуска', extractionStatus(r)], ['Сохранено блоков', accepted+'/4'],
-    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',complete:'Завершён'}[report?.stage]??'Извлечение'],
+    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',search:'Поиск гипотез',complete:'Завершён'}[report?.stage]??'Извлечение'],
     ['Вызовов в отчёте', report?.llm_calls?.length ?? '—']]) {
     const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
   }
@@ -266,7 +270,7 @@ function drawExtraction(r) {
     const g = box(c, x, y, w, 110, title, lines);
     g.setAttribute('class', `tree-node ${status} ${selected===id?'selected':''}`);
     g.setAttribute('role', 'button'); g.setAttribute('tabindex', 0); g.setAttribute('data-node', id);
-    g.setAttribute('aria-label', {result:'Итоговый extraction.json',preparation:'preparation.json',node_000:'node_000 baseline'}[id] ?? id+'.json');
+    g.setAttribute('aria-label', {result:'Итоговый extraction.json',preparation:'preparation.json',node_000:'node_000 baseline',delta:'delta.json'}[id] ?? id+'.json');
     g.onclick = () => { selected = id; render(); };
     g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } };
   }
@@ -289,6 +293,9 @@ function drawExtraction(r) {
     n ? n.code ? 'start + experiment.py' : 'Start сохранён · кода ещё нет' : 'Start ещё не записан',
     f ? (statuses[f.status]??f.status)+(f.stage?' · '+f.stage:'') : 'Finish ещё не записан',
     f?.value !== null && f?.value !== undefined ? 'Score '+fmt(f.value) : 'Score не вычислен'], f?.status??'pending');
+  edge(c, 'M 607 520 V 550');
+  card('delta', 500, 550, 215, 'История и новые ноды', ['delta.json', 'Нод: '+r.nodes.length,
+    'Лидер: '+(r.delta?.best_node_id??r.best?.node_id??'не определён')], r.delta?'completed':'pending');
 }
 function drawExtractionDetail(r) {
   const d = $('detail'), key = selected, report = r.report; d.replaceChildren();
@@ -296,17 +303,21 @@ function drawExtractionDetail(r) {
     if (r.nodes.some(n=>n.id===key)) { drawDetail(r); return; }
     d.append(element('h2', '', 'Baseline'), element('p', '', 'Baker сохранит start.json до реализации. Затем появятся код и результат либо причина отказа.')); return;
   }
-  d.append(element('h2', '', key === 'result' ? 'Извлечение и сборка' : key==='preparation'?'Подготовка данных':roles[key]+' · '+key+'.json'));
+  d.append(element('h2', '', key === 'result' ? 'Извлечение и сборка' : key==='preparation'?'Подготовка данных':key==='delta'?'История экспериментов':roles[key]+' · '+key+'.json'));
   d.append(element('small', 'mono', (key in roles?r.block_directory:r.directory)+'/'+(key === 'result' ? 'extraction.json' : key+'.json')));
-  if (key === 'result' || key === 'preparation') {
+  if (key === 'result' || key === 'preparation' || key === 'delta') {
     d.append(element('p', '', key==='result' ? 'extraction.json объединяет ответы с evidence. report.json хранит этап, ошибки и попытки API.'
+      : key==='delta' ? 'Python сравнил планы и измеренные score. Baker получает эту историю для следующей гипотезы.'
       : 'Qwen предложил чтение, split и scorer в prepare.py. Python измерил профиль и сохранил общие условия экспериментов.'));
+    if (key === 'delta') {
+      const button = element('button', '', 'Открыть дерево экспериментов'); button.onclick = () => showTab('tree'); d.append(button);
+    }
     for (const error of report?.errors ?? []) d.append(element('p', 'error-text', error));
     if (report?.checks?.length) {
       const list = element('ul', 'changes'); for (const check of report.checks) list.append(element('li', 'mono', check));
       const checks = element('details'); checks.append(element('summary', '', 'Пройденные проверки: '+report.checks.length), list); d.append(checks);
     }
-    const files = key==='result'?['extraction','report']:['preparation','preparation_code'];
+    const files = key==='result'?['extraction','report']:key==='delta'?['delta','best','report']:['preparation','preparation_code'];
     if (!files.includes(jsonTab)) jsonTab = files[0];
     const tabs = element('div', 'json-tabs');
     for (const name of files) {
@@ -403,9 +414,10 @@ function drawDetail(r) {
   for (const row of comparisons) {
     const item = element('div', 'comparison'), details = element('details'), list = element('ul', 'changes');
     const direction = row.improvement > 0 ? 'улучшение' : row.improvement < 0 ? 'ухудшение' : 'без изменений';
-    item.append(element('b', '', `К ${row.reference_id}: ${direction} ${fmt(Math.abs(row.improvement))}`));
+    item.append(element('b', '', row.improvement === null || row.comparable === false ? `К ${row.reference_id}: ${row.reason??'нет сопоставимого score'}`
+      : `К ${row.reference_id}: ${direction} ${fmt(Math.abs(row.improvement))}`));
     details.append(element('summary', '', `Изменений параметров: ${row.changes.length}`));
-    for (const change of row.changes) list.append(element('li', 'mono', `${change.path}: ${change.before} → ${change.after}`));
+    for (const change of row.changes) list.append(element('li', 'mono', `${change.path}: ${JSON.stringify(change.before)} → ${JSON.stringify(change.after)}`));
     details.append(list); item.append(details); d.append(item);
   }
   const tabs = element('div', 'json-tabs');

@@ -1,0 +1,445 @@
+{
+  "$defs": {
+    "Change": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "before": {
+          "default": null,
+          "title": "Before"
+        },
+        "after": {
+          "default": null,
+          "title": "After"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "Change",
+      "type": "object"
+    },
+    "Comparison": {
+      "additionalProperties": false,
+      "properties": {
+        "reference_id": {
+          "pattern": "^node_[0-9]{3}$",
+          "title": "Reference Id",
+          "type": "string"
+        },
+        "comparable": {
+          "title": "Comparable",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "value_delta": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Delta"
+        },
+        "improvement": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Improvement"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/Change"
+          },
+          "title": "Changes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "reference_id",
+        "comparable"
+      ],
+      "title": "Comparison",
+      "type": "object"
+    },
+    "Finish": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 3,
+          "default": 3,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "node_id": {
+          "default": "node_000",
+          "pattern": "^node_[0-9]{3}$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed",
+            "timeout"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "stage": {
+          "default": "execution",
+          "enum": [
+            "implementation",
+            "check",
+            "execution"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "metric": {
+          "$ref": "#/$defs/Metric"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        },
+        "evaluation_status": {
+          "default": "unavailable",
+          "enum": [
+            "completed",
+            "unavailable",
+            "failed"
+          ],
+          "title": "Evaluation Status",
+          "type": "string"
+        },
+        "duration_seconds": {
+          "minimum": 0.0,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "preparation_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Preparation Sha256",
+          "type": "string"
+        },
+        "start_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Start Sha256",
+          "type": "string"
+        },
+        "code_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code Sha256"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "validation_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Validation File"
+        },
+        "submission_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Submission File"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "status",
+        "metric",
+        "duration_seconds",
+        "preparation_sha256",
+        "start_sha256"
+      ],
+      "title": "Finish",
+      "type": "object"
+    },
+    "Hypothesis": {
+      "additionalProperties": false,
+      "properties": {
+        "rationale": {
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "expected_effect": {
+          "minLength": 1,
+          "title": "Expected Effect",
+          "type": "string"
+        },
+        "pipeline": {
+          "$ref": "#/$defs/Pipeline"
+        }
+      },
+      "required": [
+        "rationale",
+        "expected_effect",
+        "pipeline"
+      ],
+      "title": "Hypothesis",
+      "type": "object"
+    },
+    "Metric": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "direction": {
+          "anyOf": [
+            {
+              "enum": [
+                "minimize",
+                "maximize"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direction"
+        },
+        "definition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Definition"
+        },
+        "status": {
+          "default": "needs_implementation",
+          "enum": [
+            "ready",
+            "needs_implementation"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "title": "Metric",
+      "type": "object"
+    },
+    "NodeDelta": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "node_id": {
+          "pattern": "^node_[0-9]{3}$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parent Id"
+        },
+        "hypothesis": {
+          "$ref": "#/$defs/Hypothesis"
+        },
+        "result": {
+          "$ref": "#/$defs/Finish"
+        },
+        "comparisons": {
+          "items": {
+            "$ref": "#/$defs/Comparison"
+          },
+          "title": "Comparisons",
+          "type": "array"
+        },
+        "best_node_id": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Best Node Id"
+        }
+      },
+      "required": [
+        "node_id",
+        "parent_id",
+        "hypothesis",
+        "result"
+      ],
+      "title": "NodeDelta",
+      "type": "object"
+    },
+    "Pipeline": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "title": "Data",
+          "type": "object"
+        },
+        "preprocessing": {
+          "title": "Preprocessing",
+          "type": "object"
+        },
+        "model": {
+          "title": "Model",
+          "type": "object"
+        },
+        "training": {
+          "title": "Training",
+          "type": "object"
+        }
+      },
+      "required": [
+        "data",
+        "preprocessing",
+        "model",
+        "training"
+      ],
+      "title": "Pipeline",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "preparation_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Preparation Sha256",
+      "type": "string"
+    },
+    "metric": {
+      "$ref": "#/$defs/Metric"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/NodeDelta"
+      },
+      "title": "Nodes",
+      "type": "array"
+    },
+    "best_node_id": {
+      "anyOf": [
+        {
+          "pattern": "^node_[0-9]{3}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Best Node Id"
+    }
+  },
+  "required": [
+    "preparation_sha256",
+    "metric"
+  ],
+  "title": "Delta",
+  "type": "object"
+}

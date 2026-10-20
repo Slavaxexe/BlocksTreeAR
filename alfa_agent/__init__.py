@@ -1,1 +1,1 @@
-"""Source-backed task extraction and one generated ML baseline."""
+"""Source-backed task extraction and a bounded tree of generated ML experiments."""

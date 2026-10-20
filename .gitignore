@@ -13,6 +13,7 @@ logs/
 
 # Generated model artifacts
 artifacts/
+history/runs/
 outputs/
 data/**/submission.csv
 *.zip

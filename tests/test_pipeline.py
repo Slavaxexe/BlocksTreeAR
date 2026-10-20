@@ -15,9 +15,9 @@ from openai import AsyncOpenAI
 import pandas as pd
 
 from alfa_agent.config import Settings
-from alfa_agent.contracts import Finish, Preparation, Start
+from alfa_agent.contracts import Delta, Finish, Hypothesis, Metric, Preparation, Start
 from alfa_agent.data import check_code, file_hash
-from alfa_agent.runner import Options, process, run
+from alfa_agent.runner import Options, process, run, summarize
 from alfa_agent.storage import load
 
 PREPARE = '''import numpy as np
@@ -139,7 +139,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError('Experiment time limit')
             return await process(arguments, *args)
         with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), patch('alfa_agent.runner.process', side_effect=launch):
-            result = await run(path, Options(time_budget=40, experiment_timeout=12, output_dir=run_directory),
+            result = await run(path, Options(time_budget=40, experiment_timeout=12, output_dir=run_directory, max_nodes=1),
                                Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         return result, seen
 
@@ -297,6 +297,129 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                      PROGRAM.replace('fit_predict', 'wrong_function')):
             with self.subTest(code=code[:30]), self.assertRaises(ValueError):
                 check_code(code, ('fit_predict',))
+
+
+class TreeTests(unittest.IsolatedAsyncioTestCase):
+    async def exercise(self, directory, *, blocked=False, stop_api=False, stop_time=False):
+        path, answers = fixture(directory)
+        root = directory / 'artifacts' / 'tree'
+        plans, code = [], []
+        for index, (family, value) in enumerate((('constant', 'float(fit[column].mean())'),
+                                                ('linear', None), ('constant', '0.'), ('constant', '50.'))):
+            plans.append({**answers['Hypothesis'], 'pipeline': {**answers['Hypothesis']['pipeline'],
+                          'model': {'family': family, 'value': value}}})
+            if index == 1:
+                code.append('from sklearn.linear_model import LinearRegression\nimport pandas as pd\n'
+                    'def fit_predict(fit, validation, test, preparation):\n'
+                    '    column = preparation["data"]["target_columns"][0]\n'
+                    '    model = LinearRegression().fit(fit[["signal"]], fit[column])\n'
+                    '    return pd.DataFrame({column:model.predict(validation[["signal"]])}), pd.DataFrame({column:model.predict(test[["signal"]])})\n')
+            else:
+                code.append(PROGRAM.replace('float(fit[column].mean())', value))
+        baker_calls, starts = [], {}
+        def handler(request):
+            body = json.loads(request.content)
+            title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
+            context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
+            if title == 'Hypothesis':
+                index = len(baker_calls)
+                if index:
+                    self.assertEqual(context['delta'], json.loads((root / 'delta.json').read_text()))
+                    self.assertEqual(context['parent']['start']['node_id'], 'node_000' if index == 1 else 'node_001')
+                    self.assertIn('code', context['parent'])
+                baker_calls.append(index)
+                if stop_api and index == 2:
+                    return httpx.Response(503, json={'error': {'message': 'Unavailable'}})
+                answer = plans[index]
+            elif title == 'Program':
+                node_id = context['start']['node_id']
+                index = int(node_id.split('_')[1])
+                saved = (root / 'nodes' / node_id / 'start.json').read_bytes()
+                starts[node_id] = saved
+                self.assertEqual(context['start'], json.loads(saved))
+                answer = {'blocked_reason': 'Candidate failed', 'notes': ['Keep searching']} if blocked and index == 2 else {'code': code[index], 'notes': [f'Candidate {index}']}
+            else:
+                answer = answers[title]
+            return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0,
+                'model': 'model', 'choices': [{'index': 0, 'finish_reason': 'stop',
+                'message': {'role': 'assistant', 'content': json.dumps(answer)}}]})
+        def client(**kwargs):
+            return AsyncOpenAI(api_key='fake-secret', base_url='https://qwen.example/v1', max_retries=0,
+                               http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        # Expire only the controller's clock after a measured winner, without sleeping or changing asyncio's clock.
+        from types import SimpleNamespace
+        offset = [0.]
+        def record(*args):
+            result = summarize(*args)
+            if stop_time and result[0].node_id == 'node_001':
+                offset[0] = 100.
+            return result
+        with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), patch('alfa_agent.runner.summarize', side_effect=record), \
+             patch('alfa_agent.runner.time', SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])):
+            directory, report = await run(path, Options(time_budget=60, experiment_timeout=12, output_dir=root, max_nodes=4),
+                                          Settings('fake-secret', 'https://qwen.example/v1', 'model'))
+        for node_id, saved in starts.items():
+            self.assertEqual((root / 'nodes' / node_id / 'start.json').read_bytes(), saved)
+        return directory, report
+
+    async def test_feedback_creates_branches_and_publishes_best_instead_of_latest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, report = await self.exercise(Path(temporary))
+            self.assertEqual((report.status, report.stop_reason, report.completed_nodes), ('ready', 'node_limit', 4), report.errors)
+            delta = load(root / 'delta.json', Delta)
+            self.assertEqual([n.parent_id for n in delta.nodes], [None, 'node_000', 'node_001', 'node_001'])
+            self.assertEqual(delta.best_node_id, 'node_001')
+            self.assertEqual([round(n.result.value) for n in delta.nodes], [47, 7, 78, 28])
+            self.assertAlmostEqual(delta.nodes[1].comparisons[0].improvement, 40.)
+            self.assertEqual(len(delta.nodes[3].comparisons), 3)
+            self.assertTrue(any(c.path == 'pipeline.model.family' for c in delta.nodes[1].comparisons[0].changes))
+            for node in delta.nodes:
+                self.assertEqual(node.result.node_id, node.node_id)
+                self.assertEqual(json.loads((root / 'nodes' / node.node_id / 'delta.json').read_text()), node.model_dump(mode='json'))
+            best = json.loads((root / 'best.json').read_text())
+            self.assertEqual(best['node_id'], 'node_001')
+            self.assertEqual((Path(temporary) / 'result.tsv').read_bytes(), (root / best['submission_file']).read_bytes())
+
+    async def test_failed_candidate_has_delta_and_does_not_stop_following_nodes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, report = await self.exercise(Path(temporary), blocked=True)
+            self.assertEqual((report.status, report.completed_nodes, report.failed_nodes), ('ready', 3, 1), report.errors)
+            delta = load(root / 'delta.json', Delta)
+            self.assertEqual(delta.nodes[2].result.stage, 'implementation')
+            self.assertTrue(all(not c.comparable and c.improvement is None for c in delta.nodes[2].comparisons))
+            self.assertEqual(delta.nodes[3].parent_id, 'node_001')
+            self.assertEqual(delta.best_node_id, 'node_001')
+
+    async def test_api_or_budget_stop_preserves_measured_winner(self):
+        for mode in ('stop_api', 'stop_time'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root, report = await self.exercise(Path(temporary), **{mode: True})
+                self.assertEqual(report.status, 'partial', report.errors)
+                self.assertEqual(report.stop_reason, 'llm_error' if mode == 'stop_api' else 'time_budget')
+                self.assertEqual(report.completed_nodes, 2)
+                best = json.loads((root / 'best.json').read_text())
+                self.assertEqual(best['node_id'], 'node_001')
+                self.assertEqual((Path(temporary) / 'result.tsv').read_bytes(), (root / best['submission_file']).read_bytes())
+
+    def test_comparisons_handle_maximization_missing_direction_and_different_preparation(self):
+        hypothesis = Hypothesis(rationale='test', expected_effect='test', pipeline={'data': {}, 'preprocessing': {}, 'model': {}, 'training': {}})
+        metric = Metric(name='custom', direction='maximize', status='ready')
+        first = Start(hypothesis=hypothesis, preparation_sha256='a'*64, outputs={}, timeout_seconds=12.)
+        result = Finish(status='completed', metric=metric, value=-5., evaluation_status='completed', duration_seconds=0.,
+                        preparation_sha256='a'*64, start_sha256='b'*64, code_sha256='c'*64, validation_file='v', submission_file='s')
+        _, history = summarize(Delta(preparation_sha256='a'*64, metric=metric), first, result)
+        second = first.model_copy(update={'node_id': 'node_001', 'parent_id': 'node_000'})
+        row, history = summarize(history, second, result.model_copy(update={'node_id': 'node_001', 'value': -2.}))
+        self.assertEqual(row.comparisons[0].improvement, 3.)
+        self.assertEqual(history.best_node_id, 'node_001')
+        row, _ = summarize(history, second, result.model_copy(update={'preparation_sha256': 'd'*64}))
+        self.assertTrue(all(not c.comparable for c in row.comparisons))
+        unknown = metric.model_copy(update={'direction': None})
+        no_direction = result.model_copy(update={'metric': unknown})
+        _, history = summarize(Delta(preparation_sha256='a'*64, metric=unknown), first, no_direction)
+        row, history = summarize(history, second, no_direction.model_copy(update={'node_id': 'node_001'}))
+        self.assertIsNone(history.best_node_id)
+        self.assertEqual(row.comparisons[0].reason, 'Optimization direction unknown')
 
 
 if __name__ == '__main__':

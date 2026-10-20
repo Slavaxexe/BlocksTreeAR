@@ -212,6 +212,39 @@ class Finish(Contract):
         return self
 
 
+class Change(Contract):
+    path: str
+    before: Any = None
+    after: Any = None
+
+
+class Comparison(Contract):
+    reference_id: NodeID
+    comparable: bool
+    reason: str | None = None
+    value_delta: float | None = None
+    improvement: float | None = None
+    changes: list[Change] = Field(default_factory=list)
+
+
+class NodeDelta(Contract):
+    schema_version: Literal[1] = 1
+    node_id: NodeID
+    parent_id: NodeID | None
+    hypothesis: Hypothesis
+    result: Finish
+    comparisons: list[Comparison] = Field(default_factory=list)
+    best_node_id: NodeID | None = None
+
+
+class Delta(Contract):
+    schema_version: Literal[1] = 1
+    preparation_sha256: SHA256
+    metric: Metric
+    nodes: list[NodeDelta] = Field(default_factory=list)
+    best_node_id: NodeID | None = None
+
+
 class LLMCall(Contract):
     role: str
     attempt: int
@@ -224,13 +257,16 @@ class LLMCall(Contract):
 class RunReport(Contract):
     schema_version: Literal[2] = 2
     status: Literal["running", "ready", "partial", "failed"]
-    stage: Literal["extraction", "preparation", "baseline", "complete"] = "extraction"
+    stage: Literal["extraction", "preparation", "baseline", "search", "complete"] = "extraction"
     mode: Literal["qwen"] = "qwen"
     task_sha256: SHA256
     checks: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     llm_calls: list[LLMCall] = Field(default_factory=list)
+    stop_reason: Literal["node_limit", "time_budget", "llm_error", "preparation_failed", "error"] | None = None
+    completed_nodes: int = Field(default=0, ge=0)
+    failed_nodes: int = Field(default=0, ge=0)
 
 
-SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport)
+SCHEMAS = (Extraction, Preparation, Start, Finish, NodeDelta, Delta, RunReport)

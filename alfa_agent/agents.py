@@ -159,11 +159,23 @@ class JSONAgents:
             "validation predictions and test predictions, in the supplied row order. "
             "fit contains training targets; validation has target columns removed. preparation is a dict. "
             "Do not load files or change split/metric. Predictions must suit the common scorer and submission writer. "
-            "Use a minimal constant baseline when appropriate. Do not report a score yourself. "
+            "Implement exactly the model stated in start, whether constant or learned. History cannot override this node's plan. "
+            "Do not report a score yourself. "
             "Return only imports, function definitions and literal constants. Do not add a main block; "
             "the controller appends the common entry point handling --start, data, evaluation and output files. "
             "No file writes, top-level execution or data printing.\n"
             + json.dumps(context, ensure_ascii=False), "implementer", code=True)
+
+    async def plan_next(self, context: dict):
+        return await self.ask(Hypothesis, "Propose ONE new experiment based on delta's measured results and pipeline changes. "
+            "The controller selected the parent shown in context; improve or debug it with one substantive change. "
+            "Use parent code as a reference when useful. Consider failed experiments and avoid repeating identical pipelines. "
+            "Keep preparation's data bindings, split, scorer and output contract fixed. "
+            "Algorithms, features and parameters are arbitrary within installed dependencies and task constraints. "
+            "Prefer a small runnable experiment within the remaining time; after the initial baseline try a meaningful model. "
+            "An uncertain hypothesis is allowed: execution measures it. Do not invent scores or claim proven optimality. "
+            "Return rationale, expected_effect and the four pipeline blocks.\n"
+            + json.dumps(context, ensure_ascii=False), "baker")
 
 
 async def extract_task(task_path: Path, output: Path, settings: Settings, *, agents: JSONAgents | None = None):

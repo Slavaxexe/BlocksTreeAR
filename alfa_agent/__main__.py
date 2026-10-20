@@ -1,4 +1,4 @@
-"""Qwen diagnostics, source extraction and one complete baseline run."""
+"""Qwen diagnostics, extraction and bounded experiment search."""
 
 import argparse
 import asyncio
@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, help="Новый каталог запуска; существующий не перезаписывается.")
     parser.add_argument("--time-budget", type=float, default=600)
     parser.add_argument("--experiment-timeout", type=float, default=120)
+    parser.add_argument("--max-nodes", type=int, default=4, help="Число нод вместе с baseline; 1 — только baseline.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
     args = parser.parse_args(argv)
     if args.command == "ask" and not args.prompt:
@@ -39,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "extract":
                 report = asyncio.run(extract_task(args.task.resolve(), output, settings))
             else:
-                options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout, output_dir=output)
+                options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout,
+                                  output_dir=output, max_nodes=args.max_nodes)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")
