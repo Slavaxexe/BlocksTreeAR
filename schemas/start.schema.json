@@ -1,153 +1,14 @@
 {
   "$defs": {
-    "DataFiles": {
-      "additionalProperties": false,
-      "properties": {
-        "train_file": {
-          "minLength": 1,
-          "title": "Train File",
-          "type": "string"
-        },
-        "test_file": {
-          "minLength": 1,
-          "title": "Test File",
-          "type": "string"
-        },
-        "sample_submission_file": {
-          "minLength": 1,
-          "title": "Sample Submission File",
-          "type": "string"
-        },
-        "id_column": {
-          "minLength": 1,
-          "title": "Id Column",
-          "type": "string"
-        }
-      },
-      "required": [
-        "train_file",
-        "test_file",
-        "sample_submission_file",
-        "id_column"
-      ],
-      "title": "DataFiles",
-      "type": "object"
-    },
-    "Dummy": {
-      "additionalProperties": false,
-      "properties": {
-        "family": {
-          "const": "dummy",
-          "default": "dummy",
-          "title": "Family",
-          "type": "string"
-        }
-      },
-      "title": "Dummy",
-      "type": "object"
-    },
-    "ExtraTrees": {
-      "additionalProperties": false,
-      "properties": {
-        "family": {
-          "const": "extra_trees",
-          "default": "extra_trees",
-          "title": "Family",
-          "type": "string"
-        },
-        "n_estimators": {
-          "default": 64,
-          "maximum": 160,
-          "minimum": 16,
-          "title": "N Estimators",
-          "type": "integer"
-        },
-        "max_depth": {
-          "anyOf": [
-            {
-              "maximum": 24,
-              "minimum": 2,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": 16,
-          "title": "Max Depth"
-        },
-        "min_samples_leaf": {
-          "default": 1,
-          "maximum": 64,
-          "minimum": 1,
-          "title": "Min Samples Leaf",
-          "type": "integer"
-        },
-        "class_weight": {
-          "default": "none",
-          "enum": [
-            "none",
-            "balanced"
-          ],
-          "title": "Class Weight",
-          "type": "string"
-        }
-      },
-      "title": "ExtraTrees",
-      "type": "object"
-    },
-    "HistBoosting": {
-      "additionalProperties": false,
-      "properties": {
-        "family": {
-          "const": "hist_gradient_boosting",
-          "default": "hist_gradient_boosting",
-          "title": "Family",
-          "type": "string"
-        },
-        "max_iter": {
-          "default": 80,
-          "maximum": 200,
-          "minimum": 20,
-          "title": "Max Iter",
-          "type": "integer"
-        },
-        "max_leaf_nodes": {
-          "default": 15,
-          "maximum": 63,
-          "minimum": 3,
-          "title": "Max Leaf Nodes",
-          "type": "integer"
-        },
-        "learning_rate": {
-          "default": 0.1,
-          "maximum": 0.3,
-          "minimum": 0.01,
-          "title": "Learning Rate",
-          "type": "number"
-        },
-        "l2_regularization": {
-          "default": 1.0,
-          "maximum": 10.0,
-          "minimum": 0.0,
-          "title": "L2 Regularization",
-          "type": "number"
-        }
-      },
-      "title": "HistBoosting",
-      "type": "object"
-    },
     "Hypothesis": {
       "additionalProperties": false,
       "properties": {
         "rationale": {
-          "maxLength": 1600,
           "minLength": 1,
           "title": "Rationale",
           "type": "string"
         },
         "expected_effect": {
-          "maxLength": 800,
           "minLength": 1,
           "title": "Expected Effect",
           "type": "string"
@@ -164,201 +25,66 @@
       "title": "Hypothesis",
       "type": "object"
     },
-    "Metric": {
+    "Implementation": {
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "enum": [
-            "rmse",
-            "macro_f1"
-          ],
-          "title": "Name",
+        "file": {
+          "default": "experiment.py",
+          "title": "File",
           "type": "string"
         },
-        "direction": {
-          "enum": [
-            "minimize",
-            "maximize"
-          ],
-          "title": "Direction",
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
           "type": "string"
         }
       },
       "required": [
-        "name",
-        "direction"
+        "sha256"
       ],
-      "title": "Metric",
+      "title": "Implementation",
       "type": "object"
     },
     "Pipeline": {
       "additionalProperties": false,
       "properties": {
+        "data": {
+          "title": "Data",
+          "type": "object"
+        },
         "preprocessing": {
-          "$ref": "#/$defs/Preprocessing"
+          "title": "Preprocessing",
+          "type": "object"
         },
         "model": {
-          "discriminator": {
-            "mapping": {
-              "dummy": "#/$defs/Dummy",
-              "extra_trees": "#/$defs/ExtraTrees",
-              "hist_gradient_boosting": "#/$defs/HistBoosting"
-            },
-            "propertyName": "family"
-          },
-          "oneOf": [
-            {
-              "$ref": "#/$defs/Dummy"
-            },
-            {
-              "$ref": "#/$defs/ExtraTrees"
-            },
-            {
-              "$ref": "#/$defs/HistBoosting"
-            }
-          ],
-          "title": "Model"
+          "title": "Model",
+          "type": "object"
+        },
+        "training": {
+          "title": "Training",
+          "type": "object"
         }
       },
       "required": [
-        "model"
+        "data",
+        "preprocessing",
+        "model",
+        "training"
       ],
       "title": "Pipeline",
-      "type": "object"
-    },
-    "Preprocessing": {
-      "additionalProperties": false,
-      "properties": {
-        "numeric_imputer": {
-          "default": "median",
-          "enum": [
-            "median",
-            "mean"
-          ],
-          "title": "Numeric Imputer",
-          "type": "string"
-        },
-        "categorical_encoder": {
-          "const": "ordinal",
-          "default": "ordinal",
-          "title": "Categorical Encoder",
-          "type": "string"
-        },
-        "missing_indicators": {
-          "default": false,
-          "title": "Missing Indicators",
-          "type": "boolean"
-        },
-        "augmentation": {
-          "const": "none",
-          "default": "none",
-          "title": "Augmentation",
-          "type": "string"
-        }
-      },
-      "title": "Preprocessing",
-      "type": "object"
-    },
-    "Problem": {
-      "additionalProperties": false,
-      "properties": {
-        "task_type": {
-          "enum": [
-            "regression",
-            "classification"
-          ],
-          "title": "Task Type",
-          "type": "string"
-        },
-        "target_column": {
-          "minLength": 1,
-          "title": "Target Column",
-          "type": "string"
-        }
-      },
-      "required": [
-        "task_type",
-        "target_column"
-      ],
-      "title": "Problem",
-      "type": "object"
-    },
-    "Task": {
-      "additionalProperties": false,
-      "properties": {
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "problem": {
-          "$ref": "#/$defs/Problem"
-        },
-        "data": {
-          "$ref": "#/$defs/DataFiles"
-        },
-        "metric": {
-          "$ref": "#/$defs/Metric"
-        }
-      },
-      "required": [
-        "problem",
-        "data",
-        "metric"
-      ],
-      "title": "Task",
-      "type": "object"
-    },
-    "Validation": {
-      "additionalProperties": false,
-      "properties": {
-        "strategy": {
-          "const": "holdout",
-          "default": "holdout",
-          "title": "Strategy",
-          "type": "string"
-        },
-        "seed": {
-          "default": 42,
-          "minimum": 0,
-          "title": "Seed",
-          "type": "integer"
-        },
-        "fraction": {
-          "default": 0.2,
-          "exclusiveMaximum": 1.0,
-          "exclusiveMinimum": 0.0,
-          "title": "Fraction",
-          "type": "number"
-        },
-        "stratified": {
-          "title": "Stratified",
-          "type": "boolean"
-        },
-        "split_sha256": {
-          "pattern": "^[a-f0-9]{64}$",
-          "title": "Split Sha256",
-          "type": "string"
-        }
-      },
-      "required": [
-        "stratified",
-        "split_sha256"
-      ],
-      "title": "Validation",
       "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": 1,
-      "default": 1,
+      "const": 2,
+      "default": 2,
       "title": "Schema Version",
       "type": "integer"
     },
     "node_id": {
+      "default": "node_000",
       "pattern": "^node_[0-9]{3}$",
       "title": "Node Id",
       "type": "string"
@@ -373,40 +99,50 @@
           "type": "null"
         }
       ],
+      "default": null,
       "title": "Parent Id"
     },
     "source": {
-      "enum": [
-        "baseline",
-        "qwen",
-        "offline"
-      ],
+      "const": "qwen",
+      "default": "qwen",
       "title": "Source",
       "type": "string"
     },
-    "task": {
-      "$ref": "#/$defs/Task"
-    },
-    "dataset_sha256": {
-      "pattern": "^[a-f0-9]{64}$",
-      "title": "Dataset Sha256",
+    "preparation": {
+      "default": "../../preparation.json",
+      "title": "Preparation",
       "type": "string"
     },
-    "validation": {
-      "$ref": "#/$defs/Validation"
+    "preparation_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Preparation Sha256",
+      "type": "string"
     },
     "hypothesis": {
       "$ref": "#/$defs/Hypothesis"
+    },
+    "implementation": {
+      "$ref": "#/$defs/Implementation"
+    },
+    "outputs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Outputs",
+      "type": "object"
+    },
+    "timeout_seconds": {
+      "exclusiveMinimum": 0.0,
+      "title": "Timeout Seconds",
+      "type": "number"
     }
   },
   "required": [
-    "node_id",
-    "parent_id",
-    "source",
-    "task",
-    "dataset_sha256",
-    "validation",
-    "hypothesis"
+    "preparation_sha256",
+    "hypothesis",
+    "implementation",
+    "outputs",
+    "timeout_seconds"
   ],
   "title": "Start",
   "type": "object"

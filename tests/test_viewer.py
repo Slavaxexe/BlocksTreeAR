@@ -101,6 +101,40 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(extracted['extraction']['problem'], facts)
         self.assertEqual(extracted['task']['problem']['target_column'], 'value')
 
+    def test_new_layout_is_one_run_with_preparation_node_and_source(self):
+        root = self.root / 'artifacts'
+        run = root / 'run-new'
+        blocks = run / 'extraction'
+        node = run / 'nodes' / 'node_000'
+        blocks.mkdir(parents=True)
+        node.mkdir(parents=True)
+        facts = {'target_column': 'price', 'evidence': {'target_column': ['predict price']}}
+        self.write(blocks / 'problem.json', facts)
+        self.write(run / 'extraction.json', {'problem': facts, 'metric': {'name': 'custom'}})
+        self.write(run / 'report.json', {'status': 'running', 'stage': 'baseline', 'task_sha256': 'hash'})
+        self.write(run / 'preparation.json', {'status': 'ready', 'profile': {'train': {'rows': 123}}})
+        self.write(node / 'start.json', {'node_id': 'node_000', 'parent_id': None, 'source': 'qwen'})
+        (run / 'prepare.py').write_text('def load_data(): pass')
+        (node / 'experiment.py').write_text('def fit_predict(): pass')
+        snapshot = collect(root)
+        self.assertEqual(len(snapshot['runs']), 1)
+        collected = snapshot['runs'][0]
+        self.assertEqual(collected['blocks']['problem'], facts)
+        self.assertEqual(collected['preparation']['profile']['train']['rows'], 123)
+        self.assertEqual(collected['preparation_code'], 'def load_data(): pass')
+        self.assertEqual(collected['nodes'][0]['code'], 'def fit_predict(): pass')
+        self.assertEqual(collected['task']['metric']['name'], 'custom')
+
+    def test_partially_extracted_new_run_is_visible_without_assembled_json(self):
+        root = self.root / 'artifacts'
+        blocks = root / 'run-new' / 'extraction'
+        blocks.mkdir(parents=True)
+        self.write(blocks / 'metric.json', {'name': 'MAE', 'evidence': {'name': ['MAE']}})
+        snapshot = collect(root)
+        self.assertEqual(len(snapshot['runs']), 1)
+        self.assertEqual(snapshot['runs'][0]['id'], 'run-new')
+        self.assertIsNone(snapshot['runs'][0]['extraction'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -52,6 +52,24 @@ class QwenTests(unittest.TestCase):
     def setUp(self):
         self.settings = Settings("test-secret", "https://qwen.example/v1", "qwen-model", 5, 128)
 
+    def test_existing_run_is_not_overwritten_and_cli_has_no_traceback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task = root / 'task.md'
+            task.write_text('A task')
+            output = root / 'run'
+            output.mkdir()
+            marker = output / 'report.json'
+            marker.write_text('{"status":"keep"}')
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch('alfa_agent.__main__.Settings.from_env', return_value=self.settings), \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                result = main(['extract', '--task', str(task), '--output-dir', str(output)])
+            self.assertEqual(result, 2)
+            self.assertEqual(marker.read_text(), '{"status":"keep"}')
+            self.assertNotIn('Traceback', stderr.getvalue())
+            self.assertNotIn('test-secret', stdout.getvalue()+stderr.getvalue())
+
     def test_chat_request_uses_explicit_host_model_auth_and_token_limit(self):
         seen = []
 

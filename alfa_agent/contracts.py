@@ -1,7 +1,6 @@
-"""The protocol is data, not a conversation history or executable LLM output."""
+"""Stable JSON envelopes; task names and algorithms are deliberately open-ended."""
 
-from typing import Annotated, Literal
-
+from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
@@ -12,248 +11,197 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False, frozen=True)
 
 
-class Problem(Contract):
-    task_type: Literal["regression", "classification"]
-    target_column: str = Field(min_length=1)
-
-
-class DataFiles(Contract):
-    train_file: str = Field(min_length=1)
-    test_file: str = Field(min_length=1)
-    sample_submission_file: str = Field(min_length=1)
-    id_column: str = Field(min_length=1)
-
-
-class Metric(Contract):
-    name: Literal["rmse", "macro_f1"]
-    direction: Literal["minimize", "maximize"]
-
-    @model_validator(mode="after")
-    def correct_direction(self):
-        expected = "minimize" if self.name == "rmse" else "maximize"
-        if self.direction != expected:
-            raise ValueError("Metric direction contradicts its definition")
-        return self
-
-
-class Task(Contract):
-    schema_version: Literal[1] = 1
-    problem: Problem
-    data: DataFiles
-    metric: Metric
-
-    @model_validator(mode="after")
-    def compatible_metric(self):
-        if (self.problem.task_type == "regression") != (self.metric.name == "rmse"):
-            raise ValueError("Unsupported task/metric combination")
-        if self.problem.target_column == self.data.id_column:
-            raise ValueError("Target cannot be the ID")
-        return self
-
-
 class Sourced(Contract):
-    evidence: dict[str, list[str]] = Field(description="Exact task quotes keyed by each nonempty field name")
+    evidence: dict[str, list[str]] = Field(description="Flat lists of exact Markdown quotes for every populated field, including mapping fields")
+
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_evidence(cls, value):
+        if not isinstance(value, dict) or not isinstance(value.get('evidence'), dict):
+            return value
+        evidence = {}
+        for field, quotes in value['evidence'].items():
+            if field in cls.model_fields and value.get(field) in (None, '', [], {}):
+                continue
+            if isinstance(quotes, dict):
+                quotes = [quote for group in quotes.values() for quote in (group if isinstance(group, list) else [group])]
+            quotes = [quotes] if isinstance(quotes, str) else quotes
+            evidence[field] = list(dict.fromkeys(quotes)) if isinstance(quotes, list) and all(isinstance(q, str) for q in quotes) else quotes
+        return {**value, 'evidence': evidence}
 
     @model_validator(mode="after")
     def check_evidence(self, info: ValidationInfo):
         values = self.model_dump(exclude={"evidence"})
-        populated = {key for key, value in values.items() if value is not None and value != [] and value != ""}
+        populated = {k for k, v in values.items() if v is not None and v != [] and v != {} and v != ""}
         if set(self.evidence) != populated:
-            raise ValueError("Every nonempty field needs evidence; unknown fields cannot have evidence")
+            raise ValueError(f"Evidence keys: missing {sorted(populated - set(self.evidence))}; "
+                             f"unexpected {sorted(set(self.evidence) - populated)}")
         source = (info.context or {}).get("source")
-        if source is None:
-            return self
         normalize = lambda text: " ".join(text.split())
-        literal = {"target_column", "id_column", "train_file", "test_file", "sample_submission_file",
-                   "dictionary_file", "submission_file", "target_unit", "class_labels", "columns", "warnings"}
         for field, quotes in self.evidence.items():
-            if not quotes or len(quotes) > 8 or any(not quote.strip() or len(quote) > 1800
-                                                  or normalize(quote) not in normalize(source) for quote in quotes):
-                raise ValueError(f"{field}: evidence needs real task quotes, each up to 1800 characters")
-            if field in literal:
+            if not quotes or any(not q.strip() for q in quotes):
+                raise ValueError(f"{field}: expected nonempty source quotes")
+            if source is not None and any(normalize(q) not in normalize(source) for q in quotes):
+                raise ValueError(f"{field}: quote does not occur in the original Markdown")
+            if field.endswith('_file') or field in {'target_column', 'target_columns', 'id_column', 'columns', 'class_labels', 'warnings'}:
                 items = values[field] if isinstance(values[field], list) else [values[field]]
-                if any(not any(normalize(str(item)) in normalize(quote) for quote in quotes) for item in items):
-                    raise ValueError(f"{field}: extracted values must occur in their evidence")
+                if any(not any(normalize(str(item)) in normalize(q) for q in quotes) for item in items):
+                    raise ValueError(f'{field}: literal identifiers must occur in their evidence')
         return self
 
 
-class ProblemFacts(Problem, Sourced):
+class ProblemFacts(Sourced):
+    task_type: str | None = None
+    target_column: str | None = None
+    target_columns: list[str] = Field(default_factory=list)
     target_unit: str | None = None
-    class_labels: list[str] = Field(default_factory=list, max_length=100)
-    warnings: list[str] = Field(default_factory=list, max_length=8, description="Verbatim task caveats, not recommendations")
+    class_labels: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list, description="Short verbatim caveats from the source, not recommendations")
 
 
-class DataFacts(DataFiles, Sourced):
+class DataFacts(Sourced):
+    train_file: str | None = None
+    test_file: str | None = None
+    sample_submission_file: str | None = None
     dictionary_file: str | None = None
+    id_column: str | None = None
+    files: dict[str, str] = Field(default_factory=dict, description="Other named inputs: role to path")
+    formats: dict[str, str] = Field(default_factory=dict, description="Explicitly stated file formats")
     encoding: str | None = None
-    delimiter: str | None = Field(default=None, min_length=1, max_length=1)
-    decimal: str | None = Field(default=None, min_length=1, max_length=1)
+    delimiter: str | None = None
+    decimal: str | None = None
 
 
-class MetricFacts(Metric, Sourced):
-    secondary_metrics: list[Literal["accuracy", "weighted_f1"]] = Field(default_factory=list)
+class MetricFacts(Sourced):
+    name: str | None = None
+    direction: Literal["minimize", "maximize"] | None = None
+    definition: str | None = Field(default=None, description="Definition, formula or supplied code reference")
+    secondary_metrics: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class OutputFacts(Sourced):
-    submission_file: str = Field(min_length=1)
-    columns: list[str] = Field(min_length=2, max_length=2)
-    prediction_type: Literal["number", "label"]
-    preserve_test_order: bool
-    unique_ids: bool
+    submission_file: str | None = None
+    files: dict[str, str] = Field(default_factory=dict)
+    format: str | None = None
+    columns: list[str] = Field(default_factory=list)
+    prediction_type: str | None = None
+    preserve_test_order: bool | None = None
+    unique_ids: bool | None = None
+    description: str | None = None
 
 
 class Extraction(Contract):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     problem: ProblemFacts
     data: DataFacts
     metric: MetricFacts
     output: OutputFacts
 
-    def core_task(self) -> Task:
-        return Task(**{key: schema.model_validate(getattr(self, key).model_dump(include=set(schema.model_fields)))
-                       for key, schema in (("problem", Problem), ("data", DataFiles), ("metric", Metric))})
 
-    @model_validator(mode="after")
-    def coherent(self):
-        task = self.core_task()
-        if self.output.columns != [task.data.id_column, task.problem.target_column]:
-            raise ValueError("Output columns must match the task ID and target in order")
-        expected = "number" if task.problem.task_type == "regression" else "label"
-        if self.output.prediction_type != expected:
-            raise ValueError("Prediction type contradicts the task")
-        if expected == "number" and self.problem.class_labels:
-            raise ValueError("Regression cannot have classification labels")
-        return self
+class Metric(Contract):
+    name: str | None = None
+    direction: Literal["minimize", "maximize"] | None = None
+    definition: str | None = None
+    status: Literal["ready", "needs_implementation"] = "needs_implementation"
 
 
-class Profile(Contract):
-    dataset_sha256: SHA256
-    train_rows: int = Field(gt=0)
-    test_rows: int = Field(gt=0)
-    numeric_columns: list[str]
-    categorical_columns: list[str]
-    missing_train_cells: int = Field(ge=0)
-    class_counts: dict[str, int]
+class DataBinding(Contract):
+    files: dict[str, str] = Field(description="Input roles to paths relative to the task directory")
+    target_columns: list[str] = Field(default_factory=list)
+    id_columns: list[str] = Field(default_factory=list)
 
 
-class Validation(Contract):
-    strategy: Literal["holdout"] = "holdout"
-    seed: int = Field(default=42, ge=0)
-    fraction: float = Field(default=0.2, gt=0, lt=1)
-    stratified: bool
-    split_sha256: SHA256
+class OutputBinding(Contract):
+    filename: str = Field(min_length=1)
+    format: str | None = None
+    columns: list[str] = Field(default_factory=list)
 
 
-class Preprocessing(Contract):
-    numeric_imputer: Literal["median", "mean"] = "median"
-    categorical_encoder: Literal["ordinal"] = "ordinal"
-    missing_indicators: bool = False
-    augmentation: Literal["none"] = "none"
+class PreparationDraft(Contract):
+    rationale: str = Field(min_length=1)
+    data: DataBinding
+    validation: dict[str, Any]
+    metric: Metric
+    output: OutputBinding
+    code: str = Field(min_length=1, description="Complete prepare.py source implementing the requested Python interface")
 
 
-class Dummy(Contract):
-    family: Literal["dummy"] = "dummy"
-
-
-class ExtraTrees(Contract):
-    family: Literal["extra_trees"] = "extra_trees"
-    n_estimators: int = Field(default=64, ge=16, le=160)
-    max_depth: int | None = Field(default=16, ge=2, le=24)
-    min_samples_leaf: int = Field(default=1, ge=1, le=64)
-    class_weight: Literal["none", "balanced"] = "none"
-
-
-class HistBoosting(Contract):
-    family: Literal["hist_gradient_boosting"] = "hist_gradient_boosting"
-    max_iter: int = Field(default=80, ge=20, le=200)
-    max_leaf_nodes: int = Field(default=15, ge=3, le=63)
-    learning_rate: float = Field(default=0.1, ge=0.01, le=0.3)
-    l2_regularization: float = Field(default=1.0, ge=0.0, le=10.0)
+class Preparation(Contract):
+    schema_version: Literal[2] = 2
+    status: Literal["pending", "ready", "partial", "blocked"] = "pending"
+    extraction: str = "extraction.json"
+    task_directory: str
+    rationale: str
+    data: DataBinding
+    validation: dict[str, Any]
+    metric: Metric
+    output: OutputBinding
+    profile: dict[str, Any] = Field(default_factory=dict)
+    source_hashes: dict[str, str] = Field(default_factory=dict)
+    code_sha256: SHA256
+    issues: list[str] = Field(default_factory=list)
 
 
 class Pipeline(Contract):
-    preprocessing: Preprocessing = Field(default_factory=Preprocessing)
-    model: Annotated[Dummy | ExtraTrees | HistBoosting, Field(discriminator="family")]
+    data: dict[str, Any]
+    preprocessing: dict[str, Any]
+    model: dict[str, Any]
+    training: dict[str, Any]
 
 
 class Hypothesis(Contract):
-    rationale: str = Field(min_length=1, max_length=1600)
-    expected_effect: str = Field(min_length=1, max_length=800)
+    rationale: str = Field(min_length=1)
+    expected_effect: str = Field(min_length=1)
     pipeline: Pipeline
 
 
+class Program(Contract):
+    hypothesis: Hypothesis = Field(description="The implemented hypothesis, including any explicit changes needed for runnable code")
+    code: str = Field(min_length=1, description="Complete experiment.py source; code belongs only in this field")
+
+
+class Implementation(Contract):
+    file: str = "experiment.py"
+    sha256: SHA256
+
+
 class Start(Contract):
-    schema_version: Literal[1] = 1
-    node_id: NodeID
-    parent_id: NodeID | None
-    source: Literal["baseline", "qwen", "offline"]
-    task: Task
-    dataset_sha256: SHA256
-    validation: Validation
+    schema_version: Literal[2] = 2
+    node_id: NodeID = "node_000"
+    parent_id: NodeID | None = None
+    source: Literal["qwen"] = "qwen"
+    preparation: str = "../../preparation.json"
+    preparation_sha256: SHA256
     hypothesis: Hypothesis
+    implementation: Implementation
+    outputs: dict[str, str]
+    timeout_seconds: float = Field(gt=0)
 
 
 class Finish(Contract):
-    schema_version: Literal[1] = 1
-    node_id: NodeID
+    schema_version: Literal[2] = 2
+    node_id: NodeID = "node_000"
     status: Literal["completed", "failed", "timeout"]
     metric: Metric
     value: float | None = None
+    evaluation_status: Literal["completed", "unavailable", "failed"] = "unavailable"
     duration_seconds: float = Field(ge=0)
-    split_sha256: SHA256
-    pipeline_sha256: SHA256
+    preparation_sha256: SHA256
+    code_sha256: SHA256
+    validation_file: str | None = None
     submission_file: str | None = None
-    validation_rows: int = Field(default=0, ge=0)
-    error: str | None = Field(default=None, max_length=1200)
+    error: str | None = None
 
     @model_validator(mode="after")
-    def result_consistency(self):
-        if self.status == "completed":
-            if self.value is None or not self.submission_file or self.error:
-                raise ValueError("Completed runs require a metric and predictions, without an error")
-            if self.value < 0 or (self.metric.name == "macro_f1" and self.value > 1):
-                raise ValueError("Metric outside its mathematical range")
-        elif self.value is not None or self.submission_file is not None or not self.error:
-            raise ValueError("Failed runs require an error and cannot have a score or predictions")
+    def consistent_result(self):
+        if self.status == 'completed' and (not self.submission_file or not self.validation_file):
+            raise ValueError('Completed execution requires prediction files')
+        if (self.evaluation_status == 'completed') != (self.value is not None):
+            raise ValueError('Only completed evaluation can have a score')
+        if self.status != 'completed' and (self.value is not None or not self.error):
+            raise ValueError('Failed execution requires an error and cannot have a score')
         return self
-
-
-class Score(Contract):
-    node_id: NodeID
-    value: float
-    family: str
-
-
-class Change(Contract):
-    path: str
-    before: str
-    after: str
-
-
-class Comparison(Contract):
-    reference_id: NodeID
-    candidate_id: NodeID
-    metric_delta: float
-    improvement: float
-    changes: list[Change]
-
-
-class Delta(Contract):
-    schema_version: Literal[1] = 1
-    latest_node_id: NodeID
-    best_node_id: NodeID | None
-    metric: Metric
-    leaderboard: list[Score]
-    comparisons: list[Comparison]
-    failed_node_ids: list[NodeID]
-
-
-class Best(Contract):
-    node_id: NodeID
-    metric: Metric
-    value: float
-    submission_file: str
-    split_sha256: SHA256
 
 
 class LLMCall(Contract):
@@ -262,27 +210,19 @@ class LLMCall(Contract):
     status: Literal["completed", "invalid_json", "api_error"]
     prompt_tokens: int = 0
     completion_tokens: int = 0
-
-
-class ExtractionReport(Contract):
-    schema_version: Literal[1] = 1
-    status: Literal["ready", "failed"]
-    task_sha256: SHA256
-    checks: list[str]
-    errors: list[str]
-    llm_calls: list[LLMCall]
+    error: str | None = None
 
 
 class RunReport(Contract):
-    schema_version: Literal[1] = 1
-    mode: Literal["qwen", "offline"]
-    stop_reason: str
-    best: Best
-    experiments: int
-    elapsed_seconds: float
-    llm_calls: list[LLMCall]
-    warnings: list[str]
+    schema_version: Literal[2] = 2
+    status: Literal["running", "ready", "partial", "failed"]
+    stage: Literal["extraction", "preparation", "baseline", "complete"] = "extraction"
+    mode: Literal["qwen"] = "qwen"
+    task_sha256: SHA256
+    checks: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    llm_calls: list[LLMCall] = Field(default_factory=list)
 
 
-SCHEMAS = (Problem, DataFiles, Metric, Task, Profile, Validation, Hypothesis,
-           Start, Finish, Delta, Best, LLMCall, RunReport, Extraction, ExtractionReport)
+SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport)

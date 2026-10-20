@@ -1,122 +1,155 @@
-"""One bounded CPU experiment, executed in a child process with no API credentials."""
+"""Common runtime: measured preparation and one generated experiment in a child process."""
 
 import argparse
-import hashlib
+import io
 from pathlib import Path
 import time
+import tempfile
 
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.dummy import DummyClassifier, DummyRegressor
-from sklearn.ensemble import (ExtraTreesClassifier, ExtraTreesRegressor,
-                              HistGradientBoostingClassifier, HistGradientBoostingRegressor)
-from sklearn.impute import SimpleImputer
-from sklearn.metrics import f1_score, root_mean_squared_error
-from sklearn.pipeline import Pipeline as SKPipeline
-from sklearn.preprocessing import OrdinalEncoder
 from threadpoolctl import threadpool_limits
 
-from .contracts import Finish, Profile, Start
-from .data import dataset_hash, read_tables, validate_submission
-from .storage import atomic_bytes, fingerprint, load, save
+from .contracts import Finish, Preparation, Start
+from .data import file_hash, input_hashes, module, profile, within
+from .storage import atomic_bytes, load, save
 
 
-def build_pipeline(start: Start, profile: Profile, threads: int):
-    spec = start.hypothesis.pipeline
-    regression = start.task.problem.task_type == "regression"
-    model = spec.model
-    if model.family == "dummy":
-        estimator = DummyRegressor(strategy="mean") if regression else DummyClassifier(strategy="most_frequent")
-        # Dummy consumes no features and cannot fail on categorical/missing values.
-        return estimator
-    blocks = []
-    if profile.numeric_columns:
-        blocks.append(("numeric", SimpleImputer(strategy=spec.preprocessing.numeric_imputer,
-                                               add_indicator=spec.preprocessing.missing_indicators,
-                                               keep_empty_features=True), profile.numeric_columns))
-    if profile.categorical_columns:
-        blocks.append(("categorical", SKPipeline([
-            ("imputer", SimpleImputer(strategy="constant", fill_value="__missing__", keep_empty_features=True)),
-            ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1,
-                                        encoded_missing_value=-1)),
-        ]), profile.categorical_columns))
-    if model.family == "extra_trees":
-        kwargs = dict(n_estimators=model.n_estimators, max_depth=model.max_depth,
-                      min_samples_leaf=model.min_samples_leaf, n_jobs=threads,
-                      random_state=start.validation.seed)
-        if regression:
-            if model.class_weight != "none":
-                raise ValueError("class_weight is only supported for classification")
-            estimator = ExtraTreesRegressor(**kwargs)
-        else:
-            estimator = ExtraTreesClassifier(class_weight=None if model.class_weight == "none" else "balanced", **kwargs)
-    else:
-        constructor = HistGradientBoostingRegressor if regression else HistGradientBoostingClassifier
-        estimator = constructor(max_iter=model.max_iter, max_leaf_nodes=model.max_leaf_nodes,
-                                learning_rate=model.learning_rate, l2_regularization=model.l2_regularization,
-                                random_state=start.validation.seed, early_stopping=False)
-    return SKPipeline([("preprocess", ColumnTransformer(blocks)), ("model", estimator)])
+def prepare(directory: Path):
+    path = directory / 'preparation.json'
+    preparation = load(path, Preparation)
+    reader = module(directory / 'prepare.py', preparation.code_sha256)
+    config = preparation.model_dump(mode='json')
+    source = Path(preparation.task_directory)
+    hashes = input_hashes(source, preparation.data.files)
+    tables = reader.load_data(source, config)
+    measured = profile(tables)
+    train, test = tables['train'], tables['test']
+    if any(column not in train for column in preparation.data.target_columns):
+        raise ValueError('Prepared target columns are absent from the loaded training table')
+    fit, valid = (np.asarray(indices) for indices in reader.make_split(train, config))
+    for indices in (fit, valid):
+        if indices.ndim != 1 or not len(indices) or indices.dtype.kind not in 'iu':
+            raise ValueError('Split must contain nonempty one-dimensional integer row positions')
+        if len(np.unique(indices)) != len(indices) or indices.min() < 0 or indices.max() >= len(train):
+            raise ValueError('Split contains duplicate or out-of-range rows')
+    if np.intersect1d(fit, valid).size:
+        raise ValueError('Fit and validation rows overlap')
+    buffer = io.BytesIO()
+    np.savez(buffer, fit=fit.astype(np.int64), valid=valid.astype(np.int64))
+    atomic_bytes(directory / 'split.npz', buffer.getvalue())
+    validation = {**preparation.validation, 'split_file': 'split.npz', 'fit_rows': len(fit),
+                  'validation_rows': len(valid), 'split_sha256': file_hash(directory / 'split.npz')}
+    metric_ready = preparation.metric.status == 'ready' and callable(getattr(reader, 'score', None))
+    metric = preparation.metric.model_copy(update={'status': 'ready' if metric_ready else 'needs_implementation'})
+    issues = [] if metric_ready else ['Metric implementation is unavailable; predictions can still be generated']
+    prepared = preparation.model_copy(update={'status': 'ready' if metric_ready else 'partial',
+        'profile': measured, 'source_hashes': hashes, 'validation': validation, 'metric': metric, 'issues': issues})
+    save(path, prepared)
 
 
-def evaluate(start_path: Path, task_directory: Path, run_directory: Path, threads: int) -> Finish:
+def predict(preparation: Preparation, root: Path, fit_predict, *, small=False):
+    source = Path(preparation.task_directory)
+    if input_hashes(source, preparation.data.files) != preparation.source_hashes:
+        raise ValueError('Input files changed after preparation')
+    split_path = within(root, preparation.validation['split_file'])
+    if file_hash(split_path) != preparation.validation['split_sha256']:
+        raise ValueError('Validation split changed after preparation')
+    reader = module(root / 'prepare.py', preparation.code_sha256)
+    config = preparation.model_dump(mode='json')
+    tables = reader.load_data(source, config)
+    train, test = tables['train'], tables['test']
+    with np.load(split_path, allow_pickle=False) as split:
+        fit, valid = split['fit'], split['valid']
+    if small:
+        fit, valid = fit[:200], valid[:50]
+        tables = {key: frame.iloc[:50].copy() if key != 'train' and len(frame) == len(test) else frame
+                  for key, frame in tables.items()}
+        test = tables['test']
+    reference = train.iloc[valid].reset_index(drop=True)
+    validation_input = reference.drop(columns=preparation.data.target_columns)
+    with threadpool_limits(limits=2):
+        valid_predictions, test_predictions = fit_predict(train.iloc[fit].copy(), validation_input.copy(), test.copy(), config)
+    if any(not isinstance(frame, pd.DataFrame) for frame in (valid_predictions, test_predictions)):
+        raise ValueError('fit_predict must return two DataFrames')
+    if len(valid_predictions) != len(valid) or len(test_predictions) != len(test):
+        raise ValueError('Prediction row count differs from validation or test')
+    return reader, config, tables, reference, valid_predictions.reset_index(drop=True), test_predictions.reset_index(drop=True)
+
+
+def smoke(directory: Path, preparation_path: Path):
+    preparation = load(preparation_path, Preparation)
+    program = module(directory / 'experiment.py', file_hash(directory / 'experiment.py'))
+    reader, config, tables, _, _, predictions = predict(preparation, preparation_path.parent, program.fit_predict, small=True)
+    with tempfile.TemporaryDirectory() as temporary:
+        destination = within(Path(temporary), preparation.output.filename)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        reader.write_submission(tables['test'], predictions, tables, config, destination)
+        if not destination.is_file() or not destination.stat().st_size:
+            raise ValueError('Smoke test produced no nonempty output file')
+
+
+def evaluate(start_path: Path, fit_predict) -> Finish:
     start = load(start_path, Start)
-    profile = load(run_directory / "profile.json", Profile)
+    directory = start_path.parent.resolve()
     started = time.monotonic()
-    common = dict(node_id=start.node_id, metric=start.task.metric,
-                  split_sha256=start.validation.split_sha256,
-                  pipeline_sha256=fingerprint(start.hypothesis.pipeline))
+    preparation_path = within(directory.parent.parent, str((directory / start.preparation).resolve()))
+    preparation = load(preparation_path, Preparation)
+    common = dict(node_id=start.node_id, metric=preparation.metric,
+                  preparation_sha256=start.preparation_sha256, code_sha256=start.implementation.sha256)
     try:
-        if dataset_hash(task_directory, start.task) != start.dataset_sha256:
-            raise ValueError("Dataset changed since profiling")
-        split = np.load(run_directory / "split.npz", allow_pickle=False)
-        fit, valid = split["fit"], split["valid"]
-        digest = hashlib.sha256(fit.tobytes() + valid.tobytes()).hexdigest()
-        if digest != start.validation.split_sha256:
-            raise ValueError("Validation split changed")
-        train, test, sample = read_tables(task_directory, start.task)
-        target, identifier = start.task.problem.target_column, start.task.data.id_column
-        x = train.drop(columns=[target, identifier]).replace([np.inf, -np.inf], np.nan)
-        x_test = test.drop(columns=identifier).replace([np.inf, -np.inf], np.nan)
-        y = train[target]
-        model = build_pipeline(start, profile, threads)
-        # Preprocessing and model fit see ONLY the fitting fold at evaluation time.
-        with threadpool_limits(limits=threads):
-            model.fit(x.iloc[fit], y.iloc[fit])
-            predicted = model.predict(x.iloc[valid])
-            if start.task.metric.name == "rmse":
-                value = float(root_mean_squared_error(y.iloc[valid], predicted))
-            else:
-                value = float(f1_score(y.iloc[valid], predicted, average="macro",
-                                       labels=sorted(y.unique()), zero_division=0))
-            # Refit only after the honest metric has been computed.
-            model.fit(x, y)
-            predictions = model.predict(x_test)
-        submission = sample.copy()
-        submission[target] = predictions
-        validate_submission(submission, test, sample, train, start.task)
-        relative = f"nodes/{start.node_id}/submission.csv"
-        atomic_bytes(run_directory / relative, submission.to_csv(index=False).encode())
-        result = Finish(status="completed", value=value, submission_file=relative,
-                        validation_rows=len(valid), duration_seconds=time.monotonic() - started, **common)
-    except Exception as error:
-        # Never forward uncontrolled estimator/provider output into an agent prompt.
-        result = Finish(status="failed", error=f"Experiment failed: {type(error).__name__}",
-                        duration_seconds=time.monotonic() - started, **common)
-    save(start_path.with_name("finish.json"), result)
+        if file_hash(preparation_path) != start.preparation_sha256:
+            raise ValueError('Preparation changed after start')
+        if file_hash(within(directory, start.implementation.file)) != start.implementation.sha256:
+            raise ValueError('Experiment source changed after start')
+        reader, config, tables, reference, valid_predictions, test_predictions = predict(
+            preparation, preparation_path.parent, fit_predict)
+        validation_file = within(directory, start.outputs['validation'])
+        atomic_bytes(validation_file, valid_predictions.to_csv(index=False).encode())
+        submission_file = within(directory, start.outputs['submission'])
+        submission_file.parent.mkdir(parents=True, exist_ok=True)
+        reader.write_submission(tables['test'], test_predictions, tables, config, submission_file)
+        if not submission_file.is_file() or not submission_file.stat().st_size:
+            raise ValueError('Submission writer produced no nonempty output file')
+        value, evaluation, error = None, 'unavailable', None
+        if preparation.metric.status == 'ready':
+            try:
+                value = float(reader.score(reference, valid_predictions, config))
+                if not np.isfinite(value):
+                    raise ValueError('Metric returned a non-finite value')
+                evaluation = 'completed'
+            except Exception as exception:
+                value, evaluation, error = None, 'failed', f'Metric: {type(exception).__name__}: {exception}'[:2000]
+        result = Finish(status='completed', value=value, evaluation_status=evaluation,
+                        duration_seconds=time.monotonic() - started,
+                        validation_file=validation_file.relative_to(directory).as_posix(),
+                        submission_file=submission_file.relative_to(directory).as_posix(), error=error, **common)
+    except Exception as exception:
+        result = Finish(status='failed', duration_seconds=time.monotonic() - started,
+                        error=f'{type(exception).__name__}: {exception}'[:2000], **common)
+    save(directory / 'finish.json', result)
     return result
 
 
-def main():
+def main(fit_predict=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("start", type=Path)
-    parser.add_argument("task_directory", type=Path)
-    parser.add_argument("run_directory", type=Path)
-    parser.add_argument("threads", type=int)
-    args = parser.parse_args()
-    result = evaluate(args.start, args.task_directory, args.run_directory, args.threads)
-    return 0 if result.status == "completed" else 1
+    if fit_predict is None:
+        stage = parser.add_mutually_exclusive_group(required=True)
+        stage.add_argument('--prepare', type=Path)
+        stage.add_argument('--check', type=Path)
+        parser.add_argument('--preparation', type=Path)
+        args = parser.parse_args()
+        if args.prepare:
+            prepare(args.prepare.resolve())
+        else:
+            smoke(args.check.resolve(), args.preparation.resolve())
+    else:
+        parser.add_argument('--start', type=Path, required=True)
+        args = parser.parse_args()
+        result = evaluate(args.start.resolve(), fit_predict)
+        if result.status != 'completed':
+            raise SystemExit(1)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == '__main__':
+    main()

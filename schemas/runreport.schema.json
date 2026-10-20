@@ -1,40 +1,5 @@
 {
   "$defs": {
-    "Best": {
-      "additionalProperties": false,
-      "properties": {
-        "node_id": {
-          "pattern": "^node_[0-9]{3}$",
-          "title": "Node Id",
-          "type": "string"
-        },
-        "metric": {
-          "$ref": "#/$defs/Metric"
-        },
-        "value": {
-          "title": "Value",
-          "type": "number"
-        },
-        "submission_file": {
-          "title": "Submission File",
-          "type": "string"
-        },
-        "split_sha256": {
-          "pattern": "^[a-f0-9]{64}$",
-          "title": "Split Sha256",
-          "type": "string"
-        }
-      },
-      "required": [
-        "node_id",
-        "metric",
-        "value",
-        "submission_file",
-        "split_sha256"
-      ],
-      "title": "Best",
-      "type": "object"
-    },
     "LLMCall": {
       "additionalProperties": false,
       "properties": {
@@ -64,6 +29,18 @@
           "default": 0,
           "title": "Completion Tokens",
           "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
         }
       },
       "required": [
@@ -73,71 +50,60 @@
       ],
       "title": "LLMCall",
       "type": "object"
-    },
-    "Metric": {
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "enum": [
-            "rmse",
-            "macro_f1"
-          ],
-          "title": "Name",
-          "type": "string"
-        },
-        "direction": {
-          "enum": [
-            "minimize",
-            "maximize"
-          ],
-          "title": "Direction",
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "direction"
-      ],
-      "title": "Metric",
-      "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": 1,
-      "default": 1,
+      "const": 2,
+      "default": 2,
       "title": "Schema Version",
       "type": "integer"
     },
-    "mode": {
+    "status": {
       "enum": [
-        "qwen",
-        "offline"
+        "running",
+        "ready",
+        "partial",
+        "failed"
       ],
+      "title": "Status",
+      "type": "string"
+    },
+    "stage": {
+      "default": "extraction",
+      "enum": [
+        "extraction",
+        "preparation",
+        "baseline",
+        "complete"
+      ],
+      "title": "Stage",
+      "type": "string"
+    },
+    "mode": {
+      "const": "qwen",
+      "default": "qwen",
       "title": "Mode",
       "type": "string"
     },
-    "stop_reason": {
-      "title": "Stop Reason",
+    "task_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Task Sha256",
       "type": "string"
     },
-    "best": {
-      "$ref": "#/$defs/Best"
-    },
-    "experiments": {
-      "title": "Experiments",
-      "type": "integer"
-    },
-    "elapsed_seconds": {
-      "title": "Elapsed Seconds",
-      "type": "number"
-    },
-    "llm_calls": {
+    "checks": {
       "items": {
-        "$ref": "#/$defs/LLMCall"
+        "type": "string"
       },
-      "title": "Llm Calls",
+      "title": "Checks",
+      "type": "array"
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
       "type": "array"
     },
     "warnings": {
@@ -146,16 +112,18 @@
       },
       "title": "Warnings",
       "type": "array"
+    },
+    "llm_calls": {
+      "items": {
+        "$ref": "#/$defs/LLMCall"
+      },
+      "title": "Llm Calls",
+      "type": "array"
     }
   },
   "required": [
-    "mode",
-    "stop_reason",
-    "best",
-    "experiments",
-    "elapsed_seconds",
-    "llm_calls",
-    "warnings"
+    "status",
+    "task_sha256"
   ],
   "title": "RunReport",
   "type": "object"

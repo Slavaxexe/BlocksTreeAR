@@ -10,29 +10,45 @@
             },
             "type": "array"
           },
-          "description": "Exact task quotes keyed by each nonempty field name",
+          "description": "Flat lists of exact Markdown quotes for every populated field, including mapping fields",
           "title": "Evidence",
           "type": "object"
         },
         "train_file": {
-          "minLength": 1,
-          "title": "Train File",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Train File"
         },
         "test_file": {
-          "minLength": 1,
-          "title": "Test File",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Test File"
         },
         "sample_submission_file": {
-          "minLength": 1,
-          "title": "Sample Submission File",
-          "type": "string"
-        },
-        "id_column": {
-          "minLength": 1,
-          "title": "Id Column",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Submission File"
         },
         "dictionary_file": {
           "anyOf": [
@@ -45,6 +61,34 @@
           ],
           "default": null,
           "title": "Dictionary File"
+        },
+        "id_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id Column"
+        },
+        "files": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Other named inputs: role to path",
+          "title": "Files",
+          "type": "object"
+        },
+        "formats": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Explicitly stated file formats",
+          "title": "Formats",
+          "type": "object"
         },
         "encoding": {
           "anyOf": [
@@ -61,8 +105,6 @@
         "delimiter": {
           "anyOf": [
             {
-              "maxLength": 1,
-              "minLength": 1,
               "type": "string"
             },
             {
@@ -75,8 +117,6 @@
         "decimal": {
           "anyOf": [
             {
-              "maxLength": 1,
-              "minLength": 1,
               "type": "string"
             },
             {
@@ -88,11 +128,7 @@
         }
       },
       "required": [
-        "evidence",
-        "train_file",
-        "test_file",
-        "sample_submission_file",
-        "id_column"
+        "evidence"
       ],
       "title": "DataFacts",
       "type": "object"
@@ -107,42 +143,68 @@
             },
             "type": "array"
           },
-          "description": "Exact task quotes keyed by each nonempty field name",
+          "description": "Flat lists of exact Markdown quotes for every populated field, including mapping fields",
           "title": "Evidence",
           "type": "object"
         },
         "name": {
-          "enum": [
-            "rmse",
-            "macro_f1"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Name",
-          "type": "string"
+          "default": null,
+          "title": "Name"
         },
         "direction": {
-          "enum": [
-            "minimize",
-            "maximize"
+          "anyOf": [
+            {
+              "enum": [
+                "minimize",
+                "maximize"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Direction",
-          "type": "string"
+          "default": null,
+          "title": "Direction"
+        },
+        "definition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Definition, formula or supplied code reference",
+          "title": "Definition"
         },
         "secondary_metrics": {
           "items": {
-            "enum": [
-              "accuracy",
-              "weighted_f1"
-            ],
             "type": "string"
           },
           "title": "Secondary Metrics",
           "type": "array"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
         }
       },
       "required": [
-        "evidence",
-        "name",
-        "direction"
+        "evidence"
       ],
       "title": "MetricFacts",
       "type": "object"
@@ -157,48 +219,99 @@
             },
             "type": "array"
           },
-          "description": "Exact task quotes keyed by each nonempty field name",
+          "description": "Flat lists of exact Markdown quotes for every populated field, including mapping fields",
           "title": "Evidence",
           "type": "object"
         },
         "submission_file": {
-          "minLength": 1,
-          "title": "Submission File",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Submission File"
+        },
+        "files": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "object"
+        },
+        "format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Format"
         },
         "columns": {
           "items": {
             "type": "string"
           },
-          "maxItems": 2,
-          "minItems": 2,
           "title": "Columns",
           "type": "array"
         },
         "prediction_type": {
-          "enum": [
-            "number",
-            "label"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Prediction Type",
-          "type": "string"
+          "default": null,
+          "title": "Prediction Type"
         },
         "preserve_test_order": {
-          "title": "Preserve Test Order",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preserve Test Order"
         },
         "unique_ids": {
-          "title": "Unique Ids",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unique Ids"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
         }
       },
       "required": [
-        "evidence",
-        "submission_file",
-        "columns",
-        "prediction_type",
-        "preserve_test_order",
-        "unique_ids"
+        "evidence"
       ],
       "title": "OutputFacts",
       "type": "object"
@@ -213,22 +326,40 @@
             },
             "type": "array"
           },
-          "description": "Exact task quotes keyed by each nonempty field name",
+          "description": "Flat lists of exact Markdown quotes for every populated field, including mapping fields",
           "title": "Evidence",
           "type": "object"
         },
         "task_type": {
-          "enum": [
-            "regression",
-            "classification"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Task Type",
-          "type": "string"
+          "default": null,
+          "title": "Task Type"
         },
         "target_column": {
-          "minLength": 1,
-          "title": "Target Column",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Column"
+        },
+        "target_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Columns",
+          "type": "array"
         },
         "target_unit": {
           "anyOf": [
@@ -246,24 +377,20 @@
           "items": {
             "type": "string"
           },
-          "maxItems": 100,
           "title": "Class Labels",
           "type": "array"
         },
         "warnings": {
-          "description": "Verbatim task caveats, not recommendations",
+          "description": "Short verbatim caveats from the source, not recommendations",
           "items": {
             "type": "string"
           },
-          "maxItems": 8,
           "title": "Warnings",
           "type": "array"
         }
       },
       "required": [
-        "evidence",
-        "task_type",
-        "target_column"
+        "evidence"
       ],
       "title": "ProblemFacts",
       "type": "object"
@@ -272,8 +399,8 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": 1,
-      "default": 1,
+      "const": 2,
+      "default": 2,
       "title": "Schema Version",
       "type": "integer"
     },

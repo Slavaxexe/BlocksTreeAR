@@ -1,4 +1,4 @@
-"""Stage-one proof: real task text → mocked HTTP → sourced contracts → real CSV checks."""
+"""Stage one extracts source-backed facts without opening datasets."""
 
 import asyncio
 import json
@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from alfa_agent.agents import JSONAgents, extract_task
 from alfa_agent.config import Settings
-from alfa_agent.contracts import Extraction, ProblemFacts
+from alfa_agent.contracts import DataFacts, Extraction, ProblemFacts
 from alfa_agent.storage import load
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,7 +60,7 @@ def expected(name):
 
 
 class ExtractionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_two_public_tasks_through_http_schema_source_and_csv_checks_without_training(self):
+    async def test_two_public_tasks_through_http_and_source_checks_without_reading_data(self):
         for name in ('regression', 'classification'):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 path, text, facts = expected(name)
@@ -80,16 +80,18 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
                                        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
                 output = Path(temporary) / name
                 with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), \
-                        patch.object(JSONAgents, 'bake', side_effect=AssertionError('No baker in stage one')), \
+                        patch.object(JSONAgents, 'plan_baseline', side_effect=AssertionError('No baker in stage one')), \
                         patch('asyncio.create_subprocess_exec', side_effect=AssertionError('No workers in stage one')):
                     report = await extract_task(path, output, settings)
                 self.assertEqual(report.status, 'ready', report.errors)
                 self.assertCountEqual(seen, ['problem', 'data', 'metric', 'output'])
                 extracted = load(output / 'extraction.json', Extraction)
-                self.assertEqual(extracted.core_task().problem.target_column, facts['problem']['target_column'])
+                self.assertEqual(extracted.problem.target_column, facts['problem']['target_column'])
                 self.assertEqual(extracted.metric.secondary_metrics, facts['metric']['secondary_metrics'])
                 self.assertEqual(extracted.output.columns, facts['output']['columns'])
                 self.assertFalse((output / 'nodes').exists())
+                self.assertFalse((output / 'task.json').exists())
+                self.assertTrue((output / 'extraction' / 'problem.json').is_file())
                 self.assertNotIn('fake-secret', (output / 'report.json').read_text())
 
     async def test_four_extractors_are_concurrent_and_receive_no_bootstrap_answers(self):
@@ -109,14 +111,12 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_fabricated_or_unrelated_evidence_and_unknown_fields_are_rejected(self):
         _, text, facts = expected('regression')
-        for change in ('fabricated', 'wrong_target', 'missing_target', 'missing_evidence', 'extra_field'):
+        for change in ('fabricated', 'wrong_target', 'missing_evidence', 'extra_field'):
             value = json.loads(json.dumps(facts['problem']))
             if change == 'fabricated':
                 value['evidence']['target_column'] = ['a quote not present in the task']
             elif change == 'wrong_target':
                 value['target_column'] = 'invented_target'
-            elif change == 'missing_target':
-                value.pop('target_column')
             elif change == 'missing_evidence':
                 value['evidence'].pop('task_type')
             else:
@@ -124,31 +124,54 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(change=change), self.assertRaises(ValidationError):
                 ProblemFacts.model_validate_json(json.dumps(value), context={'source': text})
 
-    def test_primary_metric_and_output_columns_cannot_be_silently_changed(self):
+    def test_arbitrary_metrics_and_output_shapes_are_not_execution_constraints(self):
         _, text, facts = expected('classification')
-        for change in ('secondary_as_primary', 'wrong_direction', 'reversed_columns'):
-            value = json.loads(json.dumps(facts))
-            if change == 'secondary_as_primary':
-                value['metric']['name'] = 'accuracy'
-            elif change == 'wrong_direction':
-                value['metric']['direction'] = 'minimize'
-            else:
-                value['output']['columns'].reverse()
-            with self.subTest(change=change), self.assertRaises(ValidationError):
-                Extraction.model_validate(value, context={'source': text})
+        facts['metric']['name'] = 'Accuracy'
+        facts['metric']['direction'] = 'minimize'
+        facts['output']['columns'].reverse()
+        # Source presence is checked here; interpreting requirements belongs to preparation.
+        result = Extraction.model_validate(facts, context={'source': text})
+        self.assertEqual(result.metric.name, 'Accuracy')
+        self.assertEqual(result.output.columns, ['attack_cat', 'id'])
 
-    async def test_csv_conflict_leaves_a_failed_report_instead_of_an_accepted_task(self):
-        path, text, facts = expected('regression')
-        agents_result = Extraction.model_validate(facts, context={'source': text})
+    async def test_unavailable_inputs_and_custom_metric_do_not_block_extraction(self):
+        text = 'Train: mystery.parquet. Test: holdout.jsonl. Score = median(abs(error)) + 3; direction unstated.'
+        facts = dict(problem={'evidence': {}},
+            data={'train_file': 'mystery.parquet', 'test_file': 'holdout.jsonl',
+                  'evidence': {'train_file': [text], 'test_file': [text]}},
+            metric={'name': 'custom', 'definition': 'median(abs(error)) + 3',
+                    'evidence': {'name': [text], 'definition': [text]}},
+            output={'evidence': {}})
+        extracted = Extraction.model_validate(facts, context={'source': text})
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / 'extract'
-            with patch.object(JSONAgents, 'extract', return_value=agents_result), \
-                    patch('alfa_agent.data.read_tables', side_effect=ValueError('CSV contract conflict')):
+            path = Path(temporary) / 'task.md'
+            path.write_text(text)
+            output = Path(temporary) / 'run'
+            with patch.object(JSONAgents, 'extract', return_value=extracted), \
+                    patch('alfa_agent.data.inventory', side_effect=AssertionError('No data inspection during extraction')):
                 report = await extract_task(path, output, Settings('fake', 'https://qwen.example/v1', 'model'))
-            self.assertEqual(report.status, 'failed')
-            self.assertEqual(report.errors, ['CSV contract conflict'])
-            self.assertFalse((output / 'extraction.json').exists())
-            self.assertTrue((output / 'report.json').is_file())
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertTrue((output / 'extraction.json').is_file())
+            self.assertFalse((output / 'preparation.json').exists())
+            self.assertIsNone(extracted.metric.direction)
+
+    def test_nested_evidence_is_normalized_without_weakening_source_validation(self):
+        text = 'Input a.tsv is TSV; b.jsonl is JSON Lines.'
+        facts = {'formats': {'a.tsv': 'TSV', 'b.jsonl': 'JSON Lines'},
+                 'evidence': {'formats': {'a.tsv': [text], 'b.jsonl': text}}}
+        result = DataFacts.model_validate(facts, context={'source': text})
+        self.assertEqual(result.evidence['formats'], [text])
+        facts['evidence']['formats']['b.jsonl'] = 'fabricated source quote'
+        with self.assertRaises(ValidationError):
+            DataFacts.model_validate(facts, context={'source': text})
+
+    def test_long_evidence_and_empty_field_annotations_do_not_reject_real_quotes(self):
+        text = '\n'.join(f'Input part {i}: supplied data.' for i in range(12))
+        value = {'warnings': text.splitlines(), 'class_labels': [],
+                 'evidence': {'warnings': text.splitlines(), 'class_labels': [text]}}
+        result = ProblemFacts.model_validate(value, context={'source': text})
+        self.assertEqual(len(result.evidence['warnings']), 12)
+        self.assertNotIn('class_labels', result.evidence)
 
 
 if __name__ == '__main__':

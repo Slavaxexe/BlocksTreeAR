@@ -1,4 +1,4 @@
-"""Qwen diagnostics and the standalone, training-free extraction stage."""
+"""Qwen diagnostics, source extraction and one complete baseline run."""
 
 import argparse
 import asyncio
@@ -14,11 +14,13 @@ from .qwen import QwenError, ask_qwen
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Подключение Qwen и отдельная проверка извлечения условия.")
-    parser.add_argument("command", choices=["check-config", "ping", "ask", "extract"])
+    parser.add_argument("command", choices=["check-config", "ping", "ask", "extract", "baseline"])
     parser.add_argument("--env-file", type=Path, help="Файл настроек; по умолчанию .env в корне проекта.")
     parser.add_argument("--prompt", help="Текст запроса для команды ask.")
-    parser.add_argument("--task", type=Path, default=Path("task.md"), help="Условие для extract; без обучения.")
-    parser.add_argument("--output-dir", type=Path, help="Новый каталог результатов extract.")
+    parser.add_argument("--task", type=Path, default=Path("task.md"), help="Markdown с условием задачи.")
+    parser.add_argument("--output-dir", type=Path, help="Новый каталог запуска; существующий не перезаписывается.")
+    parser.add_argument("--time-budget", type=float, default=600)
+    parser.add_argument("--experiment-timeout", type=float, default=120)
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
     args = parser.parse_args(argv)
     if args.command == "ask" and not args.prompt:
@@ -29,14 +31,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.key_stdin:
             from dataclasses import replace
             settings = replace(settings, api_key=getpass.getpass("Qwen API key (hidden): "))
-        if args.command == "extract":
+        if args.command in {"extract", "baseline"}:
             from .agents import extract_task
+            from .runner import Options, run
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-            output = args.output_dir or Path("artifacts/extraction") / args.task.parent.name / stamp
-            report = asyncio.run(extract_task(args.task.resolve(), output, settings))
+            output = args.output_dir or Path("artifacts") / f"{args.task.resolve().parent.name}-{stamp}"
+            if args.command == "extract":
+                report = asyncio.run(extract_task(args.task.resolve(), output, settings))
+            else:
+                options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout, output_dir=output)
+                output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")
-            return 0 if report.status == "ready" else 2
+            return 2 if report.status == "failed" else 0
         if args.command == "check-config":
             status = settings.public_status()
             try:
@@ -54,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         output = json.dumps(payload, ensure_ascii=False, indent=2)
         print(output.replace(settings.api_key, "[REDACTED]"))
         return 0
-    except (ConfigurationError, QwenError, ValueError) as error:
+    except (ConfigurationError, QwenError, ValueError, OSError) as error:
         message = str(error)
         if settings and settings.api_key:
             message = message.replace(settings.api_key, "[REDACTED]")

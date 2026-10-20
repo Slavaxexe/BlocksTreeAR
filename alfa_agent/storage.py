@@ -34,6 +34,7 @@ def atomic_bytes(path: Path, content: bytes) -> None:
 
 def save(path: Path, value: Contract) -> None:
     # Re-validate even locally constructed artifacts at the persistence boundary.
+    canonical(value)  # Also rejects non-finite numbers nested in open-ended configuration blocks.
     type(value).model_validate_json(value.model_dump_json())
     atomic_bytes(path, value.model_dump_json(indent=2).encode())
 

@@ -4,26 +4,55 @@
       "additionalProperties": false,
       "properties": {
         "name": {
-          "enum": [
-            "rmse",
-            "macro_f1"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Name",
-          "type": "string"
+          "default": null,
+          "title": "Name"
         },
         "direction": {
-          "enum": [
-            "minimize",
-            "maximize"
+          "anyOf": [
+            {
+              "enum": [
+                "minimize",
+                "maximize"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Direction",
+          "default": null,
+          "title": "Direction"
+        },
+        "definition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Definition"
+        },
+        "status": {
+          "default": "needs_implementation",
+          "enum": [
+            "ready",
+            "needs_implementation"
+          ],
+          "title": "Status",
           "type": "string"
         }
       },
-      "required": [
-        "name",
-        "direction"
-      ],
       "title": "Metric",
       "type": "object"
     }
@@ -31,12 +60,13 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": 1,
-      "default": 1,
+      "const": 2,
+      "default": 2,
       "title": "Schema Version",
       "type": "integer"
     },
     "node_id": {
+      "default": "node_000",
       "pattern": "^node_[0-9]{3}$",
       "title": "Node Id",
       "type": "string"
@@ -65,20 +95,42 @@
       "default": null,
       "title": "Value"
     },
+    "evaluation_status": {
+      "default": "unavailable",
+      "enum": [
+        "completed",
+        "unavailable",
+        "failed"
+      ],
+      "title": "Evaluation Status",
+      "type": "string"
+    },
     "duration_seconds": {
       "minimum": 0.0,
       "title": "Duration Seconds",
       "type": "number"
     },
-    "split_sha256": {
+    "preparation_sha256": {
       "pattern": "^[a-f0-9]{64}$",
-      "title": "Split Sha256",
+      "title": "Preparation Sha256",
       "type": "string"
     },
-    "pipeline_sha256": {
+    "code_sha256": {
       "pattern": "^[a-f0-9]{64}$",
-      "title": "Pipeline Sha256",
+      "title": "Code Sha256",
       "type": "string"
+    },
+    "validation_file": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Validation File"
     },
     "submission_file": {
       "anyOf": [
@@ -92,16 +144,9 @@
       "default": null,
       "title": "Submission File"
     },
-    "validation_rows": {
-      "default": 0,
-      "minimum": 0,
-      "title": "Validation Rows",
-      "type": "integer"
-    },
     "error": {
       "anyOf": [
         {
-          "maxLength": 1200,
           "type": "string"
         },
         {
@@ -113,12 +158,11 @@
     }
   },
   "required": [
-    "node_id",
     "status",
     "metric",
     "duration_seconds",
-    "split_sha256",
-    "pipeline_sha256"
+    "preparation_sha256",
+    "code_sha256"
   ],
   "title": "Finish",
   "type": "object"
