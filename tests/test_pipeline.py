@@ -4,10 +4,13 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from zipfile import ZipFile
 
 import httpx
 import numpy as np
@@ -16,10 +19,11 @@ import pandas as pd
 
 from alfa_agent.config import Settings
 from alfa_agent.agents import baker_context, implementation_context
-from alfa_agent.contracts import Delta, Finish, Hypotheses, Hypothesis, Metric, Preparation, Start
+from alfa_agent.contracts import Delta, Finish, Hypotheses, Hypothesis, Metric, Preparation, RunReport, Start
 from alfa_agent.data import check_code, file_hash, profile
 from alfa_agent.runner import Options, process, run, summarize
 from alfa_agent.storage import load
+from package_solution import build
 
 PREPARE = '''import numpy as np
 import pandas as pd
@@ -810,6 +814,75 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
         row, history = summarize(history, second, no_direction.model_copy(update={'node_id': 'node_001'}))
         self.assertIsNone(history.best_node_id)
         self.assertEqual(row.comparisons[0].reason, 'Optimization direction unknown')
+
+
+class SubmissionTests(unittest.TestCase):
+    def test_zip_contains_only_root_modules_and_original_requirements(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = build(Path(temporary) / 'submission.zip')
+            with ZipFile(archive) as bundle:
+                self.assertEqual(set(bundle.namelist()), {'solution.py', 'requirements.txt', 'alfa_cli.py',
+                    'alfa_agents.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py', 'alfa_qwen.py',
+                    'alfa_runner.py', 'alfa_storage.py', 'alfa_worker.py'})
+                self.assertEqual(bundle.read('requirements.txt'), Path('vendor/requirements_data_folder.txt').read_bytes())
+                for name in bundle.namelist():
+                    if name.endswith('.py'):
+                        self.assertNotIn('alfa_agent.', bundle.read(name).decode())
+            self.assertLess(archive.stat().st_size, 100 * 1024**2)
+
+    def test_export_runs_from_task_directory_without_the_package_or_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with ZipFile(build(root / 'submission.zip')) as bundle:
+                bundle.extractall(root)
+            task, answers = fixture(root)
+            task.rename(root / 'task.md')
+            (root / 'mock_answers.json').write_text(json.dumps(answers))
+            driver = '''import importlib.util,json,runpy,sys
+from pathlib import Path
+from unittest.mock import patch
+import httpx
+from openai import AsyncOpenAI
+assert importlib.util.find_spec('alfa_agent') is None
+answers=json.loads(Path('mock_answers.json').read_text())
+def handler(request):
+    body=json.loads(request.content)
+    assert body['model']=='qwen/qwen3.8-27b'
+    title=json.loads(body['messages'][0]['content'].split('Schema: ',1)[1])['title']
+    context=json.loads(body['messages'][1]['content'].rsplit('\\n',1)[1])
+    if title=='Hypotheses':
+        count=sum(1 for _ in Path('artifacts').glob('*/nodes/*/start.json'))
+        proposals=[]
+        for offset,purpose in enumerate(context['requested_purposes']):
+            hypothesis=json.loads(json.dumps(answers['Hypothesis']))
+            hypothesis['pipeline']['model']={'family':'constant','value':count+offset}
+            proposals.append({'purpose':purpose,'parent_id':context['parent']['node_id'],'hypothesis':hypothesis})
+        answer={'hypotheses':proposals}
+    elif title=='Program':
+        index=int(context['start']['node_id'].split('_')[1])
+        answer={**answers[title]}
+        if index: answer['code']=answer['code'].replace('float(fit[column].mean())',str(index)+'.')
+    else: answer=answers[title]
+    return httpx.Response(200,json={'id':'mock','object':'chat.completion','created':0,'model':'model',
+        'choices':[{'index':0,'finish_reason':'stop','message':{'role':'assistant','content':json.dumps(answer)}}]})
+def client(**kwargs):
+    return AsyncOpenAI(**kwargs,http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+sys.argv=['solution.py','task.md']
+with patch('alfa_agents.AsyncOpenAI',side_effect=client):
+    runpy.run_path('solution.py',run_name='__main__')
+'''
+            env = {'PATH': os.defpath, 'PYTHONPATH': '', 'PYTHONDONTWRITEBYTECODE': '1',
+                   'OPENAI_API_KEY': 'fake-secret', 'OPENAI_BASE_URL': 'https://qwen.example/v1',
+                   'OMP_NUM_THREADS': '2', 'OPENBLAS_NUM_THREADS': '2', 'MKL_NUM_THREADS': '2'}
+            result = subprocess.run([sys.executable, '-c', driver], cwd=root, env=env, capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            output = next((root / 'artifacts').iterdir())
+            report = load(output / 'report.json', RunReport)
+            self.assertEqual((report.status, report.completed_nodes), ('ready', 10))
+            self.assertIn('working_baseline', report.checks)
+            self.assertEqual(load(output / 'delta.json', Delta).best_node_id, 'node_000')
+            submission = pd.read_csv(root / 'result.tsv', sep='\t', dtype={'record': str})
+            self.assertEqual(list(submission.record), ['0100', '0101', '0102', '0103', '0104'])
 
 
 if __name__ == '__main__':

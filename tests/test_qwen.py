@@ -36,6 +36,14 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "OPENAI_BASE_URL"):
             Settings("test-secret", "", "qwen-model").validate()
 
+    def test_platform_can_supply_only_key_and_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings.from_env(Path(directory) / '.env', {
+                'OPENAI_API_KEY': 'fake-secret', 'OPENAI_BASE_URL': 'https://proxy.example/v1'})
+            settings.validate()
+            self.assertEqual(settings.model, 'qwen/qwen3.8-27b')
+            self.assertEqual(settings.timeout_seconds, 300)
+
     def test_plain_http_credentials_and_query_are_rejected(self):
         for url in ["http://remote.example/v1", "https://user:secret@qwen.example/v1",
                     "https://qwen.example/v1?token=secret", "not-a-url"]:

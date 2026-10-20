@@ -19,7 +19,7 @@ class Settings:
     api_key: str = field(repr=False)
     base_url: str
     model: str
-    timeout_seconds: float = 90
+    timeout_seconds: float = 300
     max_tokens: int = 6144
 
     @classmethod
@@ -33,14 +33,14 @@ class Settings:
         values = dict(dotenv_values(path, encoding="utf-8", interpolate=False))
         values.update(os.environ if environ is None else environ)
         try:
-            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "90")
+            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "300")
             max_tokens = int(values.get("QWEN_MAX_TOKENS") or "6144")
         except (ValueError, TypeError):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS и QWEN_MAX_TOKENS должны быть числами.") from None
         return cls(
             api_key=(values.get("OPENAI_API_KEY") or "").strip(),
             base_url=(values.get("OPENAI_BASE_URL") or "").strip(),
-            model=(values.get("OPENAI_MODEL") or "").strip(),
+            model=(values.get("OPENAI_MODEL") or "").strip() or "qwen/qwen3.8-27b",
             timeout_seconds=timeout,
             max_tokens=max_tokens,
         )
