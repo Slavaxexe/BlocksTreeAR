@@ -60,8 +60,8 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": 2,
-      "default": 2,
+      "const": 4,
+      "default": 4,
       "title": "Schema Version",
       "type": "integer"
     },
@@ -79,6 +79,29 @@
       ],
       "title": "Status",
       "type": "string"
+    },
+    "stage": {
+      "default": "execution",
+      "enum": [
+        "implementation",
+        "assembly",
+        "check",
+        "execution"
+      ],
+      "title": "Stage",
+      "type": "string"
+    },
+    "failed_block": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failed Block"
     },
     "metric": {
       "$ref": "#/$defs/Metric"
@@ -115,10 +138,30 @@
       "title": "Preparation Sha256",
       "type": "string"
     },
-    "code_sha256": {
+    "start_sha256": {
       "pattern": "^[a-f0-9]{64}$",
-      "title": "Code Sha256",
+      "title": "Start Sha256",
       "type": "string"
+    },
+    "code_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Code Sha256"
+    },
+    "notes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Notes",
+      "type": "array"
     },
     "validation_file": {
       "anyOf": [
@@ -162,7 +205,7 @@
     "metric",
     "duration_seconds",
     "preparation_sha256",
-    "code_sha256"
+    "start_sha256"
   ],
   "title": "Finish",
   "type": "object"

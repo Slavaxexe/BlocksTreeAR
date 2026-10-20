@@ -63,9 +63,24 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
         nodes = []
         for directory in sorted((folder / "nodes").glob("node_*")):
             start = read(directory / "start.json")
+            start = start or read(directory / 'proposal.json')
             if start:
-                nodes.append({"id": directory.name, "start": start, "finish": read(directory / "finish.json"),
-                              "delta": read(directory / "delta.json"), "code": source(directory / 'experiment.py')})
+                attempts = []
+                for request in sorted((directory / 'attempts').rglob('request.json')):
+                    attempt = request.parent
+                    attempts.append({'number': attempt.name, 'request': read(attempt / 'request.json'),
+                                     'error': read(attempt / 'error.json'),
+                                     'code': {p.stem: source(p) for p in sorted(attempt.glob('*.py'))}})
+                nodes.append({"id": directory.name, "start": start,
+                              "finish": read(directory / "finish.json") or read(directory / 'failure.json'),
+                              "delta": read(directory / "delta.json"), "code": source(directory / 'experiment.py'),
+                              "analysis": read(directory / 'analysis.json'), "analysis_error": read(directory / 'analysis_error.json'),
+                              "assembly": read(directory / 'assembly.json') or start.get('assembly'),
+                              "modules": {p.stem: source(p) for p in sorted((directory / 'modules').glob('*.py'))},
+                              "progress": read(directory / 'progress.json'), "attempts": attempts,
+                              "executions": [{'number': p.name, 'status': read(p / 'status.json'),
+                                              'error': read(p / 'error.json')}
+                                             for p in sorted((directory / 'executions').glob('*'))]})
         if task is None and extraction:
             task = {key: extraction.get(key, {}) for key in ('problem', 'data', 'metric')}
         run.update(id=prefix + (folder.relative_to(root).as_posix() if folder != root else folder.name),
@@ -111,7 +126,7 @@ main{max-width:1400px;margin:auto;padding:0 32px 28px}
 .dot.cpu{background:var(--teal)}
 .dot.error{background:var(--red)}
 .diagram-scroll{overflow:auto}
-.architecture{width:100%;min-width:920px;display:block}
+.architecture{width:100%;display:block}
 .architecture text,.tree text{fill:var(--ink);font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 .architecture .caption,.tree .caption{fill:var(--muted);font-size:12px}
 .architecture .title,.tree .title{font-weight:650}
@@ -159,12 +174,28 @@ header,main{padding-left:16px;padding-right:16px}
 nav{flex-wrap:wrap}
 }
 
+.assembly-chain{display:flex;gap:8px;align-items:stretch;overflow-x:auto;padding:8px 0 14px}
+.module-card{min-width:170px;max-width:230px;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--paper);flex-shrink:0}
+.module-card.changed{border:2px solid var(--purple);background:var(--purple-bg)}
+.module-card.repaired{border-color:var(--amber)}
+.module-card b{display:block;margin-bottom:8px;overflow-wrap:anywhere}
+.module-card small{display:block;margin:5px 0;overflow-wrap:anywhere}
+.module-arrow{align-self:center;color:var(--muted);font-size:20px}
+.module-card button{padding:4px 7px;font-size:12px;margin-top:7px}
+.badge{display:inline-block;padding:3px 7px;border-radius:5px;background:var(--purple-bg);color:var(--purple);font-size:12px;margin:3px 5px 3px 0}
+.analysis-card{padding:14px;border:1px solid var(--purple);border-radius:10px;background:var(--purple-bg);margin:16px 0}
+.assembly-overview{border:1px solid var(--line);padding:16px;border-radius:12px;margin:0 0 18px;background:var(--paper)}
+.assembly-overview h2{margin-bottom:6px}
+.source-edge{stroke:var(--purple);stroke-width:2;stroke-dasharray:5 5;fill:none;opacity:.8}
+.phase-label{fill:var(--purple);font-size:11px}
+.tree-node.analyzing .box{stroke:var(--purple);stroke-width:2}
+.assembly-json{margin-top:12px}
 </style>
-<header><div><h1>Как работает ML-агент</h1><small>Условие → подготовка → код → baseline</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
+<header><div><h1>Поиск ML-решений</h1><small>3 ноды: 2 улучшения + 1 исследование · до 8 агентов Qwen</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel" hidden><p class="muted">Текущий путь до первого baseline. Состояния и JSON конкретного запуска — во вкладке «Извлечение».</p><div class="legend"><span><i class="dot"></i>Детерминированный Python</span><span><i class="dot llm"></i>Вызов Qwen API</span><span><i class="dot cpu"></i>Локальное обучение на CPU</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" viewBox="0 0 1120 820" role="img" aria-label="Текущая архитектура: извлечение, подготовка, генерация кода и первый baseline"></svg></div><p class="footnote">Qwen пишет prepare.py и experiment.py. Общая обвязка измеряет профиль, фиксирует split и вычисляет score. Цикл улучшения гипотез ещё не подключён.</p></section>
-<section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><p id="tree-legend" class="legend"></p><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Граф сохранённых JSON"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранного блока"></aside></div></div><p id="tree-note" class="footnote"></p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">Общая подготовка фиксирует условия сравнения. Нода реализует одну гипотезу и может создавать или менять несколько блоков. Их агенты пишут код параллельно, а готовые блоки выполняются по порядку.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Три ноды, до восьми агентов блоков, сборщик и анализатор"></svg></div><p class="footnote">На каждый блок: первая версия и до двух исправлений, включая ошибки полного запуска. Исправляется только проблемный блок. Лимит 8 общий для реализаторов, Baker, анализаторов и извлечения.</p></section>
+<section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><p id="tree-legend" class="legend"></p><div id="assembly-overview" class="assembly-overview" hidden></div><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Основные предки и источники модулей"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранной ноды"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
 const $=id=>document.getElementById(id), NS='http://www.w3.org/2000/svg';
@@ -173,7 +204,10 @@ const svg=(tag,attrs={},text)=>{const e=document.createElementNS(NS,tag);for(con
 const fmt=n=>typeof n==='number'&&Number.isFinite(n)?n.toFixed(6):'—';
 const families={dummy:'Dummy baseline',extra_trees:'ExtraTrees',hist_gradient_boosting:'HistGradientBoosting'};
 const statuses={completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
-const stops={max_experiments:'Лимит экспериментов',time_budget:'Лимит времени',proposal_limit:'Лимит предложений',llm_unavailable_or_contract_conflict:'API / конфликт контракта',llm_unavailable_or_invalid_hypothesis:'API / невалидная гипотеза'};
+const purposes={baseline:'baseline',improve:'улучшение',explore:'исследование'};
+const phases={queued:'В очереди',implementation:'Написание блоков',ready:'Код готов',reused:'Сохранённая версия',assembly:'Сборка',check:'Короткая проверка',execution:'Полный запуск',completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
+const analysisLabels={pending:'Ожидает анализа',running:'Анализатор работает',completed:'Анализ готов',failed:'Ошибка анализатора',skipped:'Анализ пропущен'};
+const stops={node_limit:'Лимит нод',time_budget:'Лимит времени',llm_error:'Ошибка API / JSON',preparation_failed:'Ошибка подготовки',error:'Ошибка контроллера',max_experiments:'Лимит экспериментов',planning_stalled:'Baker не предложил новых планов'};
 const roles={problem:'Задача',data:'Данные',metric:'Метрика',output:'Формат ответа'};
 const extractionStatus=r=>({running:'Выполняется',ready:'Готово',partial:'Частично',failed:'Ошибка'}[r.report?.status]??'Нет итогового отчёта');
 let state=JSON.parse($('initial-data').textContent), active=null, selected=null, jsonTab='start', signature='', view='extraction', live=__LIVE__;
@@ -184,28 +218,61 @@ function box(canvas,x,y,w,h,title,lines=[],kind=''){
  lines.forEach((line,i)=>g.append(svg('text',{x:x+16,y:y+49+i*18,class:'caption'},line)));canvas.append(g);return g;
 }
 function architecture(){
- const c=$('architecture'); marker(c); c.setAttribute('viewBox','0 0 1120 700');
- ['M 270 75 H 330','M 670 75 H 760','M 900 120 V 175 H 180 V 230',
-  'M 320 275 H 420','M 700 275 H 800','M 940 320 V 370 H 180 V 420',
-  'M 320 465 H 420','M 700 465 H 800','M 940 510 V 570 H 560 V 590',
-  'M 420 635 H 320'].forEach(p=>edge(c,p));
- box(c,40,30,230,90,'01  Markdown',['Текст условия','Файлы остаются локально']);
- box(c,330,30,340,90,'02  Четыре extractor’а Qwen',['Problem · Data · Metric · Output','Произвольные имена, форматы и метрики'],'llm');
- box(c,760,30,320,90,'03  extraction.json',['Схема + проверка исходных цитат','Не проверяем поддержку исполнителем']);
- box(c,40,230,280,90,'04  Подготовка · Qwen',['Условие + инвентаризация файлов','Чтение, split, scorer → prepare.py'],'llm');
- box(c,420,230,280,90,'05  Исполнение Python',['Читаем реальные данные','Измеряем профиль; сохраняем split'],'cpu');
- box(c,800,230,280,90,'06  preparation.json',['Общие условия всех экспериментов','Профиль, split, метрика, проблемы']);
- box(c,40,420,280,90,'07  Baker · Qwen',['План простейшего baseline','Данные, preprocessing, модель, fit'],'llm');
- box(c,420,420,280,90,'08  Реализатор · Qwen',['Один experiment.py','Короткая проверка на части данных'],'llm');
- box(c,800,420,280,90,'09  start.json',['План + ссылки + хеш исходника','После записи start код фиксируется']);
- box(c,420,590,280,90,'10  Отдельный процесс',['Fit → predictions → общий scorer','finish.json + предсказания'],'cpu');
- box(c,40,590,280,90,'11  Готовый baseline',['Файл ответа рядом с условием','Best — только при вычисленном score']);
+ const c=$('architecture'); marker(c); c.setAttribute('viewBox','0 0 1120 960');
+ if(window.innerWidth<900){
+  c.setAttribute('viewBox','0 0 560 1100');
+  const cards=[
+   ['01 Задание',['Markdown и локальные данные'],''],
+   ['02 Извлечение · Qwen',['Четыре запроса → факты'],'llm'],
+   ['03 Подготовка · Qwen',['Общий prepare.py'],'llm'],
+   ['04 Условия · Python',['Профиль, split, scorer'],'cpu'],
+   ['05 Baker · Qwen',['Анализы + каталог модулей'],'llm'],
+   ['06 План до реализации',['Порядок + список write_blocks'],''],
+   ['07 Три параллельные ноды',['2 улучшения + 1 исследование'],''],
+   ['08 Агенты блоков · Qwen',['До 8 обращений для всех ролей'],'llm'],
+   ['09 Сборщик · Python',['Снимки блоков + интерфейсы'],''],
+   ['10 Обучение и оценка',['Проверка → полный запуск'],'cpu'],
+   ['11 Сравнение · Python',['Метрики + лучший submission'],'cpu'],
+   ['12 Анализатор · Qwen',['Вся сборка, ошибки, идеи'],'llm'],
+   ['13 Следующие гипотезы',['После нового анализа'],'llm'],
+   ['14 Лучшее решение',['best.json и файл ответа'],'']];
+  cards.forEach((card,i)=>{
+   const x=i%2?300:20,y=20+Math.floor(i/2)*150;
+   if(i){const px=(i-1)%2?300:20,py=20+Math.floor((i-1)/2)*150;
+    edge(c,i%2?`M ${px+240} ${py+50} H ${x}`:`M ${px+120} ${py+100} V ${py+125} H ${x+120} V ${y}`);}
+   box(c,x,y,240,100,card[0],card[1],card[2]);
+  });
+  edge(c,'M 20 970 H 5 V 370 H 20',true);
+  return;
+ }
+ ['M 320 75 H 420','M 700 75 H 800','M 940 120 V 165 H 180 V 210',
+  'M 320 255 H 420','M 700 255 H 800','M 940 300 V 345 H 180 V 390',
+  'M 320 435 H 420','M 700 435 H 800','M 940 480 V 525 H 180 V 570',
+  'M 320 615 H 420','M 700 615 H 800','M 940 660 V 705 H 560 V 750',
+  'M 700 795 H 800'].forEach(p=>edge(c,p));
+ box(c,40,30,280,90,'01  Задание',['Markdown + локальные файлы','Имена и требования из условия']);
+ box(c,420,30,280,90,'02  Четыре extractor’а',['Задача · данные · метрика · ответ','Факты с исходными цитатами'],'llm');
+ box(c,800,30,280,90,'03  Извлечение',['extraction.json','Проверенные требования']);
+ box(c,40,210,280,90,'04  Подготовка · Qwen',['Чтение, split, scorer, submission','Один общий prepare.py'],'llm');
+ box(c,420,210,280,90,'05  Выполнение подготовки',['Профиль реальных данных','Фиксированный split'],'cpu');
+ box(c,800,210,280,90,'06  Общие условия',['Метрика + форматы + профиль','Компактный контекст для ролей']);
+ box(c,40,390,280,90,'07  Baker · Qwen',['До 3 нод одновременно','2 улучшения + 1 исследование'],'llm');
+ box(c,420,390,280,90,'08  Сохранённый план',['Порядок, источники и интерфейсы','write_blocks: создать или изменить']);
+ box(c,800,390,280,90,'09  Агенты блоков · Qwen',['Отдельный агент на каждый блок','До 8 обращений для всех ролей'],'llm');
+ box(c,40,570,280,90,'10  Сборщик · Python',['Копирует сохранённые версии','Проверяет порядок, входы и хеши']);
+ box(c,420,570,280,90,'11  Обучение и оценка',['Короткая проверка → полный запуск','Общий scorer → finish.json'],'cpu');
+ box(c,800,570,280,90,'12  Сравнение · Python',['Метрики и изменения блоков','Обновление лучшего submission'],'cpu');
+ box(c,420,750,280,90,'13  Анализатор · Qwen',['Вся сборка, ошибки, сравнения','Наблюдения + идеи по блокам'],'llm');
+ box(c,800,750,280,90,'Лучшее решение',['best.json + файл ответа','Худшая попытка его не заменяет']);
+ edge(c,'M 420 795 H 15 V 435 H 40',true);
+ edge(c,'M 560 660 V 700 H 1100 V 435 H 1080',true);
+ c.append(svg('text',{x:585,y:695,class:'caption'},'Ошибка → исправление нужного блока'));
 }
 function showTab(name) {
   view = name; const diagram = name === 'architecture';
   $('architecture-panel').hidden = !diagram; $('tree-panel').hidden = diagram; $('run-picker').hidden = diagram;
   for (const tab of ['extraction', 'architecture', 'tree']) $(tab+'-tab').setAttribute('aria-selected', tab === name);
-  location.hash = name;
+  history.replaceState(null,'','#'+name);
   if (!diagram) { selected = null; updatePicker(); render(); }
 }
 function modeOf(run) {
@@ -227,32 +294,41 @@ function render() {
   const r = state.runs.find(r => r.id === active);
   $('empty').hidden = !!r; $('experiment').hidden = !r;
   $('tree-legend').textContent = view === 'extraction' ? 'Четыре extractor’а → сборка → подготовка → baseline · зелёный = готово · красный = ошибка · нажмите блок'
-    : 'Связь = parent_id · зелёный = завершён · красный = ошибка · фиолетовая рамка = лидер';
+    : 'Сплошная линия — основной предок · пунктир — источники блоков выбранной ноды · фиолетовая рамка — лидер';
   $('tree-note').textContent = view === 'extraction' ? (live ? 'Граф читает сохранённые файлы каждые 2 с. ' : 'Снимок сохранённых JSON. ')+ 'Evidence подтверждает источник фактов. preparation.json содержит измеренный профиль. Статусы читаются из последних записанных файлов и не являются проверкой, что процесс ещё жив.'
     : 'Показаны записанные JSON. Нода без finish могла выполняться или быть прервана. Без report.json завершение запуска не подтверждено.';
-  if (!r) { $('empty').textContent = view === 'extraction' ? 'Результатов извлечения пока нет. Запустите python -m alfa_agent extract; JSON появятся здесь автоматически.' : 'Экспериментов пока нет.'; return; }
+  if (!r) { $('assembly-overview').hidden=true; $('empty').textContent = view === 'extraction' ? 'Результатов извлечения пока нет. Запустите python -m agent extract; JSON появятся здесь автоматически.' : 'Экспериментов пока нет.'; return; }
   if (r.kind === 'extraction' && view === 'extraction') { drawExtraction(r); drawExtractionDetail(r); return; }
-  if (!['start', 'finish', 'delta', 'code'].includes(jsonTab)) jsonTab = 'start';
+   if (!['start', 'finish', 'delta', 'code', 'analysis', 'assembly', 'attempts', 'modules', 'executions'].includes(jsonTab)) jsonTab = 'start';
   if (!r.nodes.some(n => n.id === selected)) selected = r.nodes.find(n => n.id === r.best?.node_id)?.id ?? r.nodes[0]?.id;
   const mode = modeOf(r), metric = r.preparation?.metric?.name ?? r.task?.metric?.name ?? 'Не записана';
   const info = [
     ['Источник гипотез', mode === 'offline' ? 'Фиксированная очередь' : mode === 'qwen' ? 'Qwen API' : 'Режим не записан'],
     ['Основная метрика', metric], ['Лучший score', fmt(r.best?.value)],
-    ['Запуск', r.report?.status ? extractionStatus(r) : r.report ? (stops[r.report.stop_reason] ?? r.report.stop_reason) : 'report.json ещё не записан']
+    ['Запуск', r.report?.status ? extractionStatus(r) : 'report.json ещё не записан'],
+    ['Остановка', stops[r.report?.stop_reason]??'Ещё не остановлен'], ['Нод всего', r.nodes.length],
+    ['Нод одновременно', (r.report?.running_nodes?.length??0)+' / '+(r.report?.max_parallel_nodes??'—')],
+    ['Агентов Qwen', (r.report?.active_agents?.length??0)+' / '+(r.report?.max_parallel_agents??'—')],
+    ['Улучшения', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='improve').length??0],
+    ['Исследование', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='explore').length??0],
+    ['В очереди', r.report?.queued_nodes?.length??0],
+    ['Анализатор', r.report?.analyzing_nodes?.length?'Анализирует '+r.report.analyzing_nodes.join(', '):'—'],
+    ['Бейкер', r.report?.planning?'Планирует':'Ожидает результатов']
   ];
   $('summary').replaceChildren();
   for (const [label, value] of info) {
     const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
   }
-  drawTree(r); drawDetail(r);
+  drawTree(r); drawAssembly(r); drawDetail(r);
 }
 function drawExtraction(r) {
-  if (!(selected in roles) && !['result', 'preparation', 'node_000'].includes(selected)) selected = Object.keys(roles).find(k => r.blocks[k]) ?? 'result';
+  $('assembly-overview').hidden=true;
+  if (!(selected in roles) && !['result', 'preparation', 'node_000', 'delta'].includes(selected)) selected = Object.keys(roles).find(k => r.blocks[k]) ?? 'result';
   const c = $('tree'), report = r.report, accepted = Object.values(r.blocks).filter(Boolean).length;
-  c.replaceChildren(); marker(c); c.setAttribute('viewBox', '0 0 735 540'); c.style.width = '735px'; c.style.height = '540px';
+  c.replaceChildren(); marker(c); c.setAttribute('viewBox', '0 0 735 680'); c.style.width = '735px'; c.style.height = '680px';
   $('summary').replaceChildren();
   for (const [label, value] of [['Статус запуска', extractionStatus(r)], ['Сохранено блоков', accepted+'/4'],
-    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',complete:'Завершён'}[report?.stage]??'Извлечение'],
+    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',search:'Поиск гипотез',complete:'Завершён'}[report?.stage]??'Извлечение'],
     ['Вызовов в отчёте', report?.llm_calls?.length ?? '—']]) {
     const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
   }
@@ -266,7 +342,7 @@ function drawExtraction(r) {
     const g = box(c, x, y, w, 110, title, lines);
     g.setAttribute('class', `tree-node ${status} ${selected===id?'selected':''}`);
     g.setAttribute('role', 'button'); g.setAttribute('tabindex', 0); g.setAttribute('data-node', id);
-    g.setAttribute('aria-label', {result:'Итоговый extraction.json',preparation:'preparation.json',node_000:'node_000 baseline'}[id] ?? id+'.json');
+    g.setAttribute('aria-label', {result:'Итоговый extraction.json',preparation:'preparation.json',node_000:'node_000 baseline',delta:'delta.json'}[id] ?? id+'.json');
     g.onclick = () => { selected = id; render(); };
     g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } };
   }
@@ -286,26 +362,34 @@ function drawExtraction(r) {
     'preparation.json', p?.status??'Файл ещё не записан', p?.metric?.name??''],
     p?.status==='blocked'?'failed':p?.status==='ready'?'completed':p?.status==='partial'?'partial':'pending');
   card('node_000', 500, 410, 215, 'node_000 · Baseline', [
-    n ? 'start + experiment.py' : 'Start ещё не записан', f ? statuses[f.status]??f.status : 'Finish ещё не записан',
+    n ? n.code ? 'start + experiment.py' : 'Start сохранён · кода ещё нет' : 'Start ещё не записан',
+    f ? (statuses[f.status]??f.status)+(f.stage?' · '+f.stage:'') : 'Finish ещё не записан',
     f?.value !== null && f?.value !== undefined ? 'Score '+fmt(f.value) : 'Score не вычислен'], f?.status??'pending');
+  edge(c, 'M 607 520 V 550');
+  card('delta', 500, 550, 215, 'История и новые ноды', ['delta.json', 'Нод: '+r.nodes.length,
+    'Лидер: '+(r.delta?.best_node_id??r.best?.node_id??'не определён')], r.delta?'completed':'pending');
 }
 function drawExtractionDetail(r) {
   const d = $('detail'), key = selected, report = r.report; d.replaceChildren();
   if (key === 'node_000') {
     if (r.nodes.some(n=>n.id===key)) { drawDetail(r); return; }
-    d.append(element('h2', '', 'Baseline'), element('p', '', 'start.json появится после генерации кода и короткой проверки запуска.')); return;
+    d.append(element('h2', '', 'Baseline'), element('p', '', 'Baker сохранит start.json до реализации. Затем появятся код и результат либо причина отказа.')); return;
   }
-  d.append(element('h2', '', key === 'result' ? 'Извлечение и сборка' : key==='preparation'?'Подготовка данных':roles[key]+' · '+key+'.json'));
+  d.append(element('h2', '', key === 'result' ? 'Извлечение и сборка' : key==='preparation'?'Подготовка данных':key==='delta'?'История экспериментов':roles[key]+' · '+key+'.json'));
   d.append(element('small', 'mono', (key in roles?r.block_directory:r.directory)+'/'+(key === 'result' ? 'extraction.json' : key+'.json')));
-  if (key === 'result' || key === 'preparation') {
+  if (key === 'result' || key === 'preparation' || key === 'delta') {
     d.append(element('p', '', key==='result' ? 'extraction.json объединяет ответы с evidence. report.json хранит этап, ошибки и попытки API.'
+      : key==='delta' ? 'Python сравнил планы и измеренные score. Baker получает эту историю для следующей пары гипотез.'
       : 'Qwen предложил чтение, split и scorer в prepare.py. Python измерил профиль и сохранил общие условия экспериментов.'));
+    if (key === 'delta') {
+      const button = element('button', '', 'Открыть дерево экспериментов'); button.onclick = () => showTab('tree'); d.append(button);
+    }
     for (const error of report?.errors ?? []) d.append(element('p', 'error-text', error));
     if (report?.checks?.length) {
       const list = element('ul', 'changes'); for (const check of report.checks) list.append(element('li', 'mono', check));
       const checks = element('details'); checks.append(element('summary', '', 'Пройденные проверки: '+report.checks.length), list); d.append(checks);
     }
-    const files = key==='result'?['extraction','report']:['preparation','preparation_code'];
+    const files = key==='result'?['extraction','report']:key==='delta'?['delta','best','report']:['preparation','preparation_code'];
     if (!files.includes(jsonTab)) jsonTab = files[0];
     const tabs = element('div', 'json-tabs');
     for (const name of files) {
@@ -349,66 +433,124 @@ function drawTree(r) {
     visiting.add(n.id);
     const kids = children.get(n.id).filter(k => !visiting.has(k.id)); kids.forEach(k => place(k, depth + 1));
     const ys = kids.map(k => positions.get(k.id)?.y).filter(y => y !== undefined);
-    positions.set(n.id, {x: 24 + depth * 290, y: ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : 30 + leaf++ * 150});
+    positions.set(n.id, {x: 24 + depth * 290, y: ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : 30 + leaf++ * 180});
     visiting.delete(n.id);
   }
   roots.forEach(n => place(n, 0)); nodes.filter(n => !positions.has(n.id)).forEach(n => place(n, 0));
   const width = Math.max(650, ...Array.from(positions.values(), p => p.x + 270));
-  const height = Math.max(270, ...Array.from(positions.values(), p => p.y + 145));
+  const height = Math.max(270, ...Array.from(positions.values(), p => p.y + 170));
   c.setAttribute('viewBox', `0 0 ${width} ${height}`); c.style.width = width + 'px'; c.style.height = height + 'px';
   for (const n of nodes) {
     const p = positions.get(n.start.parent_id), q = positions.get(n.id);
     if (p && n.start.parent_id !== n.id) edge(c, `M ${p.x+240} ${p.y+55} C ${p.x+265} ${p.y+55} ${q.x-25} ${q.y+55} ${q.x} ${q.y+55}`);
   }
+  const chosen=nodes.find(n=>n.id===selected), destination=positions.get(selected);
+  const origins=new Set((chosen?.start.assembly?.blocks??[]).map(b=>b.source_node).filter(Boolean));
+  for(const id of origins){const p=positions.get(id);if(p&&destination&&id!==selected)c.append(svg('path',{
+    d:`M ${p.x+240} ${p.y+110} C ${p.x+290} ${p.y+135} ${destination.x-45} ${destination.y+135} ${destination.x} ${destination.y+110}`,
+    class:'source-edge','marker-end':`url(#${c.id}-arrow)`}));}
   for (const n of nodes) {
     const p = positions.get(n.id), f = n.finish, best = r.best?.node_id === n.id;
-    const status = statuses[f?.status] ?? 'Нет finish';
+    const execution=r.report?.node_states?.[n.id], analyzing=r.report?.analyzing_nodes?.includes(n.id);
+    const status = statuses[f?.status] ?? phases[execution?.stage] ?? (r.report?.running_nodes?.includes(n.id)?'Выполняется':r.report?.queued_nodes?.includes(n.id)?'В очереди':'Ожидает запуска');
     const duration = typeof f?.duration_seconds === 'number' ? ' · ' + f.duration_seconds.toFixed(2) + ' с' : '';
     const g = svg('g', {
-      class: `tree-node ${f?.status??'pending'} ${n.id===selected?'selected':''} ${best?'best':''}`,
+      class: `tree-node ${f?.status??'pending'} ${n.id===selected?'selected':''} ${best?'best':''} ${analyzing?'analyzing':''}`,
       role: 'button', tabindex: 0, 'aria-label': `${n.id}, ${status}, ${fmt(f?.value)}`, 'data-node': n.id
     });
-    g.append(svg('rect', {x:p.x, y:p.y, width:240, height:110, rx:9, class:'box'}));
-    g.append(svg('text', {x:p.x+15, y:p.y+24, class:'caption'}, n.id + ' · ' + n.start.source));
+    g.append(svg('rect', {x:p.x, y:p.y, width:240, height:140, rx:9, class:'box'}));
+    g.append(svg('text', {x:p.x+15, y:p.y+24, class:'caption'}, n.id + ' · ' + (purposes[n.start.purpose??n.start.context?.purpose]??n.start.source)));
     if (best) g.append(svg('text', {x:p.x+189, y:p.y+24, class:'best-label'}, 'ЛИДЕР'));
     const model = n.start.hypothesis?.pipeline?.model;
     const label = families[model?.family] ?? model?.family ?? model?.name ?? model?.type ?? 'Описание модели в JSON';
     g.append(svg('text', {x:p.x+15, y:p.y+46, class:'title'}, String(label).slice(0, 30)));
     g.append(svg('text', {x:p.x+15, y:p.y+73, class:'score'}, fmt(f?.value)));
     g.append(svg('text', {x:p.x+15, y:p.y+95, class:'caption'}, status + duration));
+    const block=execution?.stage==='execution'?n.progress?.block:execution?.block;
+    const writing=Object.values(execution?.blocks??{}).filter(b=>b.stage==='implementation').length;
+    const line=analyzing?'Анализатор работает':writing?'Пишутся блоки: '+writing:analysisLabels[n.delta?.analysis_status]??(n.analysis?'Анализ готов':block?'Блок: '+block:'');
+    g.append(svg('text', {x:p.x+15, y:p.y+119, class:'phase-label'}, String(line).slice(0,35)));
     const select = () => { selected = n.id; render(); };
     g.addEventListener('click', select);
     g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); } });
     c.append(g);
   }
 }
+function drawAssembly(r){
+ const panel=$('assembly-overview'),n=r.nodes.find(n=>n.id===selected),blocks=n?.start.assembly?.blocks??[];
+ panel.replaceChildren();panel.hidden=!blocks.length;if(!blocks.length)return;
+ panel.append(element('h2','',n.id+' · сборка решения'),element('small','',
+  'Основной предок: '+(n.start.parent_id??'нет · baseline')+'. Блоки выполняются слева направо; источники могут различаться.'));
+ const chain=element('div','assembly-chain'),repaired=new Set((n.attempts??[]).filter(a=>Number(a.number)>1||a.request?.execution_error).map(a=>a.request?.block));
+ const writes=new Set(n.start.assembly.write_blocks??[n.start.assembly.edit_block]);
+ const agents=new Set((r.report?.active_agents??[]).filter(a=>a.node_id===n.id&&a.role==='implementer').map(a=>a.block));
+ blocks.forEach((b,i)=>{
+  if(i)chain.append(element('span','module-arrow','→'));
+  const edited=writes.has(b.name),card=element('div','module-card'+(edited?' changed':'')+(repaired.has(b.name)?' repaired':''));
+  card.append(element('b','',`${i+1}. ${b.name}`),element('span','badge',repaired.has(b.name)?'Исправлялся':edited?b.source_node?'Изменяемый':'Новый':'Повторное использование'));
+  card.append(element('small','',b.description),element('small','', 'Вход: '+(b.requires.join(', ')||'—')),
+   element('small','', 'Выход: '+b.provides.join(', ')));
+  const progress=r.report?.node_states?.[n.id]?.blocks?.[b.name];
+  if(progress){const label=progress.stage==='implementation'?(agents.has(b.name)?'Агент пишет код':'Ожидает места для Qwen'):(phases[progress.stage]??progress.stage);
+   card.append(element('small','',label+(progress.attempt?' · версия '+progress.attempt+'/3':'')));}
+  if(b.source_node){const button=element('button','',(edited||repaired.has(b.name)?'Основа: ':'Из ')+b.source_node);button.onclick=()=>{selected=b.source_node;render()};card.append(button);}
+  else card.append(element('small','','Создан в этой ноде'));
+  chain.append(card);
+ });
+ panel.append(chain);
+}
 function drawDetail(r) {
   const n = r.nodes.find(n => n.id === selected), d = $('detail'); d.replaceChildren();
   if (!n) { d.append(element('p', 'muted', 'start.json ещё не записан.')); return; }
-  const files = ['start', 'finish', ...(n.code?['code']:[]), ...(n.delta?['delta']:[])];
+  const files = ['start', 'finish', ...(n.code?['code']:[]), ...(n.delta?['delta']:[]),
+    ...(n.assembly?['assembly']:[]), ...(Object.keys(n.modules??{}).length?['modules']:[]),
+    ...(n.analysis?['analysis']:[]), ...((n.attempts??[]).length?['attempts']:[]), ...((n.executions??[]).length?['executions']:[])];
   if (!files.includes(jsonTab)) jsonTab = 'start';
   d.append(element('h2', '', n.id), element('small', '', `Родитель: ${n.start.parent_id ?? 'нет · baseline'}`));
+  const purpose=n.start.purpose??n.start.context?.purpose;
+  if (purpose) d.append(element('p', 'muted', 'Роль: '+(purposes[purpose]??purpose)));
+  const calls = r.report?.llm_calls?.filter(call=>call.node_id===n.id&&call.role==='implementer')??[];
+  if (calls.length) d.append(element('small', '', 'Запросов реализаторов: '+calls.length+' · версий блоков: '+(n.attempts?.length??0)+' · до 3 на каждый блок'));
   if (n.finish) d.append(element('p', 'metric', `${n.finish.metric?.name??'Метрика'}: ${fmt(n.finish.value)} · ${n.finish.evaluation_status??n.finish.status}`));
   d.append(element('h3', '', 'Гипотеза'), element('p', '', n.start.hypothesis?.rationale ?? '—'));
   d.append(element('small', '', n.start.hypothesis?.expected_effect ?? ''));
   if (n.finish?.error) d.append(element('p', 'error-text', n.finish.error));
+  if (n.finish?.stage) d.append(element('p', 'muted', 'Этап результата: '+(phases[n.finish.stage]??n.finish.stage)+(n.finish.failed_block?' · блок '+n.finish.failed_block:'')));
+  const phase=r.report?.node_states?.[n.id];
+  if(!n.finish&&phase)d.append(element('p','badge',(phases[phase.stage]??phase.stage)+(phase.block?' · '+phase.block:'')));
+  if (n.finish?.notes?.length) {
+    const list = element('ul', 'changes'); for (const note of n.finish.notes) list.append(element('li', '', note));
+    d.append(element('h3', '', 'Заметки реализатора'), list);
+  }
+  const analysisCard=element('div','analysis-card');
+  analysisCard.append(element('b','','Анализатор · '+(analysisLabels[n.delta?.analysis_status]??(n.analysis?'Анализ готов':'Ожидает результата'))));
+  if(n.analysis){analysisCard.append(element('p','',n.analysis.summary));
+   for(const [label,values] of [['Наблюдения',n.analysis.findings],['Что попробовать',n.analysis.next_ideas]]){
+    if(values?.length){analysisCard.append(element('h3','',label));const list=element('ul','changes');for(const value of values)list.append(element('li','',value));analysisCard.append(list);}
+   }
+  }
+  if(n.analysis_error)analysisCard.append(element('p','error-text',n.analysis_error.error));
+  d.append(analysisCard);
   const comparisons = n.delta?.comparisons ?? [];
   if (comparisons.length) d.append(element('h3', '', 'Сравнения'));
   for (const row of comparisons) {
     const item = element('div', 'comparison'), details = element('details'), list = element('ul', 'changes');
     const direction = row.improvement > 0 ? 'улучшение' : row.improvement < 0 ? 'ухудшение' : 'без изменений';
-    item.append(element('b', '', `К ${row.reference_id}: ${direction} ${fmt(Math.abs(row.improvement))}`));
+    item.append(element('b', '', row.improvement === null || row.comparable === false ? `К ${row.reference_id}: ${row.reason??'нет сопоставимого score'}`
+      : `К ${row.reference_id}: ${direction} ${fmt(Math.abs(row.improvement))}`));
     details.append(element('summary', '', `Изменений параметров: ${row.changes.length}`));
-    for (const change of row.changes) list.append(element('li', 'mono', `${change.path}: ${change.before} → ${change.after}`));
+    for (const change of row.changes) list.append(element('li', 'mono', `${change.path}: ${JSON.stringify(change.before)} → ${JSON.stringify(change.after)}`));
     details.append(list); item.append(details); d.append(item);
   }
   const tabs = element('div', 'json-tabs');
   for (const key of files) {
-    const button = element('button', '', key==='code'?'experiment.py':key+'.json'); button.setAttribute('aria-selected', key === jsonTab);
+    const button = element('button', '', ({code:'Обвязка',modules:'Код блоков',analysis:'Анализ',assembly:'Сборка',attempts:'Версии блоков',executions:'Запуски'})[key]??key+'.json'); button.setAttribute('aria-selected', key === jsonTab);
     button.onclick = () => { jsonTab = key; drawDetail(r); }; tabs.append(button);
   }
   d.append(tabs);
-  const value = n[jsonTab]; d.append(element('pre', '', typeof value==='string'?value:value?JSON.stringify(value, null, 2):jsonTab+'.json ещё не записан.'));
+  const value = n[jsonTab];
+  if(jsonTab==='modules')for(const [name,code] of Object.entries(n.modules??{}))d.append(element('h3','',name+'.py'),element('pre','',code??'Код ещё не записан'));
+  else d.append(element('pre', '', typeof value==='string'?value:value?JSON.stringify(value, null, 2):jsonTab+'.json ещё не записан.'));
   for (const warning of [...r.warnings, ...(r.report?.warnings ?? [])]) d.append(element('p', 'error-text', warning));
 }
 async function refresh() {
@@ -424,6 +566,7 @@ async function refresh() {
 for (const tab of ['extraction','architecture','tree']) $(tab+'-tab').onclick=()=>showTab(tab);
 $('runs').onchange=()=>{active=$('runs').value;selected=null;render()};
 architecture();showTab(['#tree','#architecture'].includes(location.hash)?location.hash.slice(1):'extraction');$('connection').textContent='Снимок · '+new Date(state.captured*1000).toLocaleString('ru-RU');if(live)refresh();
+window.addEventListener('resize',()=>{ $('architecture').replaceChildren();architecture(); });
 </script></html>'''
 
 

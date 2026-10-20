@@ -1,5 +1,4 @@
 # Preserve the downloaded source files byte for byte on every platform.
-data/raw/** -text
-vendor/** -text
-docs/source/** -text
+data/** -text
+baseline/** -text
 *.pdf binary

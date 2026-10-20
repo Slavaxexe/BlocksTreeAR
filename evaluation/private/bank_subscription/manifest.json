@@ -1,0 +1,38 @@
+{
+  "dataset": "bank_subscription",
+  "seed": 20261020,
+  "source_rows": 41188,
+  "train_rows": 32974,
+  "test_rows": 8214,
+  "feature_count": 19,
+  "target": "subscribed",
+  "metric": "roc_auc",
+  "direction": "maximize",
+  "source": {
+    "source_name": "UCI Bank Marketing, bank-additional-full.csv",
+    "page": "https://archive.ics.uci.edu/dataset/222/bank+marketing",
+    "url": "https://archive.ics.uci.edu/static/public/222/bank+marketing.zip",
+    "sha256": "e0bf5f5de5b846e2f18e9d90606637267d46dfa260e0f17bb12e605db5efbeb4",
+    "citation": "S. Moro, P. Rita, P. Cortez (2014), DOI: 10.24432/C5K306."
+  },
+  "license": "CC BY 4.0",
+  "adaptation_date": "2026-10-20",
+  "changes": "Удалена duration; y преобразован yes→1, no→0 и переименован subscribed; добавлен случайный id. unknown и pdays=999 сохранены.",
+  "split": "Первый fold StratifiedGroupKFold(n_splits=5, shuffle=True); группы по всем признакам.",
+  "participant_sha256": {
+    "task.md": "a531a02ae394a8df8938b27c88d25431295195d1e90457c47bdb947a7f46af78",
+    "train.csv": "497fdea35c63be5b53790d217bafa207a0446bfc2ac2528d139e3cda458e276e",
+    "test.csv": "f85944489beacfa249d1fb85de2387e0173b9b17f8674f62b178147286e1559a",
+    "data_dictionary.csv": "2d09bc160fb251631168df52f5014df19803acb3f5f1598301f03db09ee52704",
+    "sample_submission.csv": "b4427a871a7306f19684c1fb2b99e343eed3156e1dd55cf3416991c1291d7b12"
+  },
+  "labels_sha256": "90be9fd8b03f051af816f03932f67ab78dc21ade50fcba4d4db991680a2a4c2e",
+  "train_class_counts": {
+    "0": 29265,
+    "1": 3709
+  },
+  "test_class_counts": {
+    "0": 7283,
+    "1": 931
+  }
+}

@@ -7,6 +7,31 @@
           "title": "Role",
           "type": "string"
         },
+        "node_id": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Node Id"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block"
+        },
         "attempt": {
           "title": "Attempt",
           "type": "integer"
@@ -76,6 +101,7 @@
         "extraction",
         "preparation",
         "baseline",
+        "search",
         "complete"
       ],
       "title": "Stage",
@@ -119,6 +145,89 @@
       },
       "title": "Llm Calls",
       "type": "array"
+    },
+    "experiments": {
+      "default": 0,
+      "title": "Experiments",
+      "type": "integer"
+    },
+    "best_node": {
+      "anyOf": [
+        {
+          "pattern": "^node_[0-9]{3}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Best Node"
+    },
+    "stop_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stop Reason"
+    },
+    "running_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3}$",
+        "type": "string"
+      },
+      "title": "Running Nodes",
+      "type": "array"
+    },
+    "queued_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3}$",
+        "type": "string"
+      },
+      "title": "Queued Nodes",
+      "type": "array"
+    },
+    "analyzing_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3}$",
+        "type": "string"
+      },
+      "title": "Analyzing Nodes",
+      "type": "array"
+    },
+    "planning": {
+      "default": false,
+      "title": "Planning",
+      "type": "boolean"
+    },
+    "max_parallel_nodes": {
+      "default": 3,
+      "title": "Max Parallel Nodes",
+      "type": "integer"
+    },
+    "max_parallel_agents": {
+      "default": 8,
+      "title": "Max Parallel Agents",
+      "type": "integer"
+    },
+    "active_agents": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Active Agents",
+      "type": "array"
+    },
+    "node_states": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "title": "Node States",
+      "type": "object"
     }
   },
   "required": [

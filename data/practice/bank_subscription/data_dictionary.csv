@@ -1,0 +1,22 @@
+feature,role,dtype,unit,description_ru
+id,id,string,,Случайный идентификатор; не использовать как признак
+age,feature,int64,years,Возраст клиента
+job,feature,object,category,Профессия; unknown означает неизвестное значение
+marital,feature,object,category,Семейное положение; divorced включает вдовство
+education,feature,object,category,Образование
+default,feature,object,category,Наличие просроченной кредитной задолженности
+housing,feature,object,category,Наличие жилищного кредита
+loan,feature,object,category,Наличие потребительского кредита
+contact,feature,object,category,Тип связи: cellular или telephone
+month,feature,object,category,Месяц последнего контакта
+day_of_week,feature,object,category,День недели последнего контакта
+campaign,feature,int64,count,"Число контактов в текущей кампании, включая текущий"
+pdays,feature,int64,days,Дней с прошлого контакта; 999 означает отсутствие прошлого контакта
+previous,feature,int64,count,Число контактов до текущей кампании
+poutcome,feature,object,category,Результат предыдущей кампании
+emp.var.rate,feature,float64,source scale,Квартальный показатель изменения занятости
+cons.price.idx,feature,float64,index,Месячный индекс потребительских цен
+cons.conf.idx,feature,float64,index,Месячный индекс потребительской уверенности
+euribor3m,feature,float64,source scale,Дневная ставка Euribor на три месяца
+nr.employed,feature,float64,source scale,Квартальный показатель числа занятых
+subscribed,target,int64,0/1,"1 — согласие открыть вклад, 0 — отказ; целевая переменная"

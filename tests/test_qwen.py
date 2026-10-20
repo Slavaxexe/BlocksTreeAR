@@ -11,9 +11,9 @@ from unittest.mock import patch
 
 import httpx
 
-from alfa_agent.__main__ import main
-from alfa_agent.config import ConfigurationError, Settings
-from alfa_agent.qwen import QwenError, ask_qwen
+from agent.__main__ import main
+from agent.config import ConfigurationError, Settings
+from agent.qwen import QwenError, ask_qwen
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -62,7 +62,7 @@ class QwenTests(unittest.TestCase):
             marker = output / 'report.json'
             marker.write_text('{"status":"keep"}')
             stdout, stderr = io.StringIO(), io.StringIO()
-            with patch('alfa_agent.__main__.Settings.from_env', return_value=self.settings), \
+            with patch('agent.__main__.Settings.from_env', return_value=self.settings), \
                     redirect_stdout(stdout), redirect_stderr(stderr):
                 result = main(['extract', '--task', str(task), '--output-dir', str(output)])
             self.assertEqual(result, 2)
@@ -128,8 +128,8 @@ class QwenTests(unittest.TestCase):
     def test_check_config_is_offline_and_hides_the_key(self):
         out = io.StringIO()
         config = Settings("test-secret", "", "qwen-model")
-        with patch("alfa_agent.__main__.Settings.from_env", return_value=config), \
-             patch("alfa_agent.__main__.ask_qwen") as ask, redirect_stdout(out):
+        with patch("agent.__main__.Settings.from_env", return_value=config), \
+             patch("agent.__main__.ask_qwen") as ask, redirect_stdout(out):
             result = main(["check-config"])
         self.assertEqual(result, 2)
         self.assertFalse(json.loads(out.getvalue())["ready"])
@@ -138,8 +138,8 @@ class QwenTests(unittest.TestCase):
 
     def test_cli_handles_provider_failure_without_traceback_or_secret(self):
         err = io.StringIO()
-        with patch("alfa_agent.__main__.Settings.from_env", return_value=self.settings), \
-             patch("alfa_agent.__main__.ask_qwen", side_effect=QwenError("HTTP 401 test-secret")), \
+        with patch("agent.__main__.Settings.from_env", return_value=self.settings), \
+             patch("agent.__main__.ask_qwen", side_effect=QwenError("HTTP 401 test-secret")), \
              redirect_stderr(err):
             result = main(["ping"])
         self.assertEqual(result, 2)

@@ -14,6 +14,7 @@ logs/
 # Generated model artifacts
 artifacts/
 outputs/
+evaluation/smoke_report.json
 data/**/submission.csv
 *.zip
 .playwright-cli/

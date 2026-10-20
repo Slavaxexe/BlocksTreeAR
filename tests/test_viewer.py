@@ -56,7 +56,12 @@ class ViewerTests(unittest.TestCase):
     def test_symlink_cannot_read_json_outside_selected_root(self):
         outside = self.root / 'outside.json'
         self.write(outside, {'secret': 'outside-file'})
-        (self.node / 'finish.json').symlink_to(outside)
+        try:
+            (self.node / 'finish.json').symlink_to(outside)
+        except OSError as error:
+            if getattr(error, 'winerror', None) == 1314:
+                self.skipTest('Creating symlinks requires Windows developer mode or elevated rights')
+            raise
         snapshot = collect(self.run)
         self.assertIsNone(snapshot['runs'][0]['nodes'][0]['finish'])
         self.assertNotIn('outside-file', json.dumps(snapshot))
@@ -134,6 +139,24 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(len(snapshot['runs']), 1)
         self.assertEqual(snapshot['runs'][0]['id'], 'run-new')
         self.assertIsNone(snapshot['runs'][0]['extraction'])
+
+    def test_module_sources_repair_attempts_and_analyzer_remain_visible(self):
+        plan = {'blocks': [{'name': 'features', 'source_node': 'node_003'},
+                           {'name': 'model', 'source_node': 'node_007'}], 'edit_block': 'model'}
+        self.write(self.node / 'start.json', {'schema_version': 4, 'node_id': 'node_000', 'assembly': plan})
+        modules = self.node / 'modules'
+        modules.mkdir()
+        (modules / 'model.py').write_text('def run(state): return {}', encoding='utf-8')
+        attempt = self.node / 'attempts/02'
+        attempt.mkdir(parents=True)
+        self.write(attempt / 'request.json', {'block': 'model', 'stage': 'execution'})
+        self.write(attempt / 'error.json', {'block': 'model', 'error': 'training failed'})
+        self.write(self.node / 'analysis.json', {'summary': 'Model repaired', 'findings': [], 'next_ideas': []})
+        node = collect(self.root)['runs'][0]['nodes'][0]
+        self.assertEqual(node['assembly'], plan)
+        self.assertEqual(node['modules']['model'], 'def run(state): return {}')
+        self.assertEqual(node['attempts'][0]['request']['block'], 'model')
+        self.assertEqual(node['analysis']['summary'], 'Model repaired')
 
 
 if __name__ == '__main__':

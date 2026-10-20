@@ -12,10 +12,10 @@ import httpx
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 
-from alfa_agent.agents import JSONAgents, extract_task
-from alfa_agent.config import Settings
-from alfa_agent.contracts import DataFacts, Extraction, ProblemFacts
-from alfa_agent.storage import load
+from agent.agents import JSONAgents, extract_task
+from agent.config import Settings
+from agent.contracts import DataFacts, Extraction, ProblemFacts
+from agent.storage import load
 
 ROOT = Path(__file__).resolve().parents[1]
 CLASSES = ['Normal', 'Generic', 'Exploits', 'Fuzzers', 'DoS', 'Reconnaissance', 'Analysis', 'Backdoor', 'Shellcode', 'Worms']
@@ -23,7 +23,7 @@ CLASSES = ['Normal', 'Generic', 'Exploits', 'Fuzzers', 'DoS', 'Reconnaissance', 
 
 def expected(name):
     """Manually specified facts for the two public tasks; never supplied to real Qwen."""
-    path = ROOT / 'data/raw' / name / 'task.local.md'
+    path = ROOT / 'data' / name / 'task.local.md'
     text = path.read_text(encoding='utf-8')
     line = lambda needle: next(row for row in text.splitlines() if needle in row)
     classification = name == 'classification'
@@ -79,7 +79,7 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
                     return AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url, max_retries=0,
                                        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
                 output = Path(temporary) / name
-                with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), \
+                with patch('agent.agents.AsyncOpenAI', side_effect=client), \
                         patch.object(JSONAgents, 'plan_baseline', side_effect=AssertionError('No baker in stage one')), \
                         patch('asyncio.create_subprocess_exec', side_effect=AssertionError('No workers in stage one')):
                     report = await extract_task(path, output, settings)
@@ -148,7 +148,7 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
             path.write_text(text)
             output = Path(temporary) / 'run'
             with patch.object(JSONAgents, 'extract', return_value=extracted), \
-                    patch('alfa_agent.data.inventory', side_effect=AssertionError('No data inspection during extraction')):
+                    patch('agent.data.inventory', side_effect=AssertionError('No data inspection during extraction')):
                 report = await extract_task(path, output, Settings('fake', 'https://qwen.example/v1', 'model'))
             self.assertEqual(report.status, 'ready', report.errors)
             self.assertTrue((output / 'extraction.json').is_file())
