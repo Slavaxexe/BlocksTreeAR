@@ -156,14 +156,32 @@ class Hypothesis(Contract):
     pipeline: Pipeline
 
 
+class Proposal(Contract):
+    purpose: Literal['improve', 'explore']
+    parent_id: NodeID
+    hypothesis: Hypothesis
+
+
 class Hypotheses(Contract):
-    hypotheses: list[Hypothesis] = Field(min_length=1, max_length=2)
+    hypotheses: list[Proposal] = Field(min_length=1, max_length=2)
 
     @model_validator(mode='after')
     def requested_count(self, info: ValidationInfo):
-        count = (info.context or {}).get('hypothesis_count')
+        context = info.context or {}
+        count = context.get('hypothesis_count')
         if count is not None and len(self.hypotheses) != count:
             raise ValueError(f'Return exactly {count} hypotheses')
+        if [p.purpose for p in self.hypotheses] != ['improve', 'explore'][:len(self.hypotheses)]:
+            raise ValueError('Return improve first, then explore if two proposals were requested')
+        for proposal in self.hypotheses:
+            if 'parent_ids' in context and proposal.parent_id not in context['parent_ids']:
+                raise ValueError('Parent must be one of the available completed nodes')
+            if proposal.purpose == 'improve' and context.get('leader_id', proposal.parent_id) != proposal.parent_id:
+                raise ValueError('The improve proposal must extend the selected leader')
+            if proposal.hypothesis.pipeline.model_dump() in context.get('used_pipelines', []):
+                raise ValueError('Pipeline already evaluated or pending; propose a different one')
+        if len(self.hypotheses) == 2 and self.hypotheses[0].hypothesis.pipeline == self.hypotheses[1].hypothesis.pipeline:
+            raise ValueError('The two proposals must have different pipelines')
         return self
 
 
@@ -258,6 +276,7 @@ class Delta(Contract):
 
 class LLMCall(Contract):
     role: str
+    node_id: NodeID | None = None
     attempt: int
     status: Literal["completed", "invalid_json", "api_error"]
     prompt_tokens: int = 0
@@ -278,6 +297,9 @@ class RunReport(Contract):
     stop_reason: Literal["node_limit", "time_budget", "llm_error", "preparation_failed", "error"] | None = None
     completed_nodes: int = Field(default=0, ge=0)
     failed_nodes: int = Field(default=0, ge=0)
+    running_nodes: list[NodeID] = Field(default_factory=list)
+    queued_nodes: list[NodeID] = Field(default_factory=list)
+    planning: bool = False
 
 
 SCHEMAS = (Extraction, Preparation, Start, Finish, NodeDelta, Delta, RunReport)

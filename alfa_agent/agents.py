@@ -17,10 +17,12 @@ from .storage import save
 
 
 class JSONAgents:
-    def __init__(self, settings: Settings, deadline: float, max_calls: int = 20):
+    def __init__(self, settings: Settings, deadline: float, max_calls: int = 20, *, shared=None, node_id=None):
         settings.validate()
         self.settings, self.deadline, self.max_calls = settings, deadline, max_calls
-        self.calls: list[LLMCall] = []
+        self.calls: list[LLMCall] = shared.calls if shared is not None else []
+        self.budget = shared.budget if shared is not None else {'requests': 0, 'limit': max_calls}
+        self.node_id = node_id
         self.requests = 0
 
     async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
@@ -40,9 +42,10 @@ class JSONAgents:
         limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
         for attempt in (1, 2):
             remaining = self.deadline - time.monotonic()
-            if remaining <= 0 or self.requests >= limit:
+            if remaining <= 0 or self.requests >= limit or self.budget['requests'] >= self.budget['limit']:
                 raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
             self.requests += 1
+            self.budget['requests'] += 1
             try:
                 async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
                                        max_retries=0, timeout=min(self.settings.timeout_seconds, remaining)) as client:
@@ -51,11 +54,14 @@ class JSONAgents:
                     response = await client.chat.completions.create(
                         model=self.settings.model, messages=messages, temperature=0,
                         max_tokens=self.settings.max_tokens, **kwargs)
+            except asyncio.CancelledError:
+                self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
+                raise
             except (APIStatusError, APITimeoutError, APIConnectionError) as error:
                 status = error.status_code if isinstance(error, APIStatusError) else None
                 suffix = f"HTTP {status}" if status else (
                     "таймаут" if isinstance(error, APITimeoutError) else "ошибка соединения")
-                self.calls.append(LLMCall(role=role, attempt=attempt, status="api_error", error=suffix))
+                self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
                 if status == 400 and json_mode and attempt == 1:
                     json_mode = False
                     continue
@@ -64,7 +70,7 @@ class JSONAgents:
                 raise QwenError(f"Qwen: {suffix}; тело ответа сервера скрыто.") from None
             content = response.choices[0].message.content if response.choices else None
             usage = response.usage
-            stats = dict(role=role, attempt=attempt, prompt_tokens=usage.prompt_tokens if usage else 0,
+            stats = dict(role=role, node_id=self.node_id, attempt=attempt, prompt_tokens=usage.prompt_tokens if usage else 0,
                          completion_tokens=usage.completion_tokens if usage else 0)
             try:
                 json.dumps(json.loads(content or ''), allow_nan=False)
@@ -175,16 +181,26 @@ class JSONAgents:
             + json.dumps(context, ensure_ascii=False), "implementer", code=True, request_limit=request_limit)
 
     async def plan_next(self, context: dict, count: int = 2):
-        result = await self.ask(Hypotheses, f"Propose exactly {count} distinct experiments based on delta's measured results and pipeline changes. "
-            "The controller selected the parent shown in context; improve or debug it with one substantive change. "
-            "All hypotheses share this parent and will be tested; do not rank away uncertain ideas. "
-            "Use parent code as a reference when useful. Consider failed experiments and avoid repeating identical pipelines. "
+        result = await self.ask(Hypotheses, f"Propose exactly {count} experiments: first improve, then explore if two are requested. "
+            "The improve proposal extends the selected leader in parent with one substantive change. "
+            "The explore proposal tests a DIFFERENT model family or a substantially different pipeline, not small tuning of the leader. "
+            "It may revive a previously losing branch; one bad result does not disqualify a family forever. "
+            "Choose each parent_id from available_parents; improve must use parent's node_id. "
+            "For the first pair after the constant baseline, propose two different nonconstant approaches. "
+            "Consider pending plans as already scheduled: avoid duplicating them or previous pipelines. "
+            "Use parent code as a reference when useful. All accepted proposals will be tested. "
             "Keep preparation's data bindings, split, scorer and output contract fixed. "
+            "The executor receives labeled fit rows and UNLABELED validation/test rows; do not require refitting on full labeled train. "
+            "Train on fit and predict both validation and test. Use at most two parallel training jobs; another experiment may run concurrently. "
             "Algorithms, features and parameters are arbitrary within installed dependencies and task constraints. "
             "Prefer a small runnable experiment within the remaining time; after the initial baseline try a meaningful model. "
             "An uncertain hypothesis is allowed: execution measures it. Do not invent scores or claim proven optimality. "
-            "Return a hypotheses list; each item has rationale, expected_effect and the four pipeline blocks.\n"
-            + json.dumps(context, ensure_ascii=False), "baker", validation={'hypothesis_count': count})
+            "Each execution must fit experiment_timeout_seconds; remaining_seconds is the whole run's budget. "
+            "Duration_seconds includes code generation and checks, not just training. "
+            "Return hypotheses entries containing purpose, parent_id and hypothesis (rationale, expected_effect, four pipeline blocks).\n"
+            + json.dumps(context, ensure_ascii=False), "baker", validation={'hypothesis_count': count,
+                'parent_ids': context['available_parents'], 'leader_id': context['parent']['start']['node_id'],
+                'used_pipelines': [n['hypothesis']['pipeline'] for n in context['delta']['nodes'] + context['pending']]})
         return result.hypotheses
 
 

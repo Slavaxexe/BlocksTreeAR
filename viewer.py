@@ -173,6 +173,7 @@ const svg=(tag,attrs={},text)=>{const e=document.createElementNS(NS,tag);for(con
 const fmt=n=>typeof n==='number'&&Number.isFinite(n)?n.toFixed(6):'—';
 const families={dummy:'Dummy baseline',extra_trees:'ExtraTrees',hist_gradient_boosting:'HistGradientBoosting'};
 const statuses={completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
+const purposes={baseline:'baseline',improve:'улучшение',explore:'исследование'};
 const stops={node_limit:'Лимит нод',time_budget:'Лимит времени',llm_error:'Ошибка API / JSON',preparation_failed:'Ошибка подготовки',error:'Ошибка контроллера',max_experiments:'Лимит экспериментов'};
 const roles={problem:'Задача',data:'Данные',metric:'Метрика',output:'Формат ответа'};
 const extractionStatus=r=>({running:'Выполняется',ready:'Готово',partial:'Частично',failed:'Ошибка'}[r.report?.status]??'Нет итогового отчёта');
@@ -195,9 +196,9 @@ function architecture(){
  box(c,40,230,280,90,'04  Подготовка · Qwen',['Условие + инвентаризация файлов','Чтение, split, scorer → prepare.py'],'llm');
  box(c,420,230,280,90,'05  Исполнение Python',['Читаем реальные данные','Измеряем профиль; сохраняем split'],'cpu');
  box(c,800,230,280,90,'06  preparation.json',['Общие условия всех экспериментов','Профиль, split, метрика, проблемы']);
- box(c,40,420,280,90,'07  Baker · Qwen',['Baseline, затем по две гипотезы','Контекст + delta + выбранный родитель'],'llm');
+ box(c,40,420,280,90,'07  Baker · Qwen',['Improve лидера + explore альтернативы','История + pending + родители'],'llm');
  box(c,420,420,280,90,'08  start.json',['План Baker + ссылки на контекст','Сохраняется до реализации']);
- box(c,800,420,280,90,'09  Реализатор · Qwen',['experiment.py + заметки или отказ','Проверки / исправления: до 20 запросов'],'llm');
+ box(c,800,420,280,90,'09  Два исполнителя · Qwen',['Независимые код / проверки / запуск','До 20 запросов на каждую ноду'],'llm');
  box(c,420,590,280,90,'10  Отдельный процесс',['Fit → predictions → общий scorer','finish.json + предсказания'],'cpu');
  box(c,40,590,280,90,'11  delta.json · Python',['Изменения pipeline и реальные score','Обновление истории и best'],'cpu');
  edge(c,'M 40 635 H 18 V 465 H 40',true);
@@ -242,7 +243,9 @@ function render() {
     ['Источник гипотез', mode === 'offline' ? 'Фиксированная очередь' : mode === 'qwen' ? 'Qwen API' : 'Режим не записан'],
     ['Основная метрика', metric], ['Лучший score', fmt(r.best?.value)],
     ['Запуск', r.report?.status ? extractionStatus(r) : 'report.json ещё не записан'],
-    ['Остановка', stops[r.report?.stop_reason]??'Ещё не остановлен'], ['Нод', r.nodes.length]
+    ['Остановка', stops[r.report?.stop_reason]??'Ещё не остановлен'], ['Нод', r.nodes.length],
+    ['Исполнители', (r.report?.running_nodes?.length??0)+'/2'], ['В очереди', r.report?.queued_nodes?.length??0],
+    ['Бейкер', r.report?.planning?'Планирует':'—']
   ];
   $('summary').replaceChildren();
   for (const [label, value] of info) {
@@ -374,14 +377,14 @@ function drawTree(r) {
   }
   for (const n of nodes) {
     const p = positions.get(n.id), f = n.finish, best = r.best?.node_id === n.id;
-    const status = statuses[f?.status] ?? 'Нет finish';
+    const status = statuses[f?.status] ?? (r.report?.running_nodes?.includes(n.id)?'Выполняется':r.report?.queued_nodes?.includes(n.id)?'В очереди':'Нет finish');
     const duration = typeof f?.duration_seconds === 'number' ? ' · ' + f.duration_seconds.toFixed(2) + ' с' : '';
     const g = svg('g', {
       class: `tree-node ${f?.status??'pending'} ${n.id===selected?'selected':''} ${best?'best':''}`,
       role: 'button', tabindex: 0, 'aria-label': `${n.id}, ${status}, ${fmt(f?.value)}`, 'data-node': n.id
     });
     g.append(svg('rect', {x:p.x, y:p.y, width:240, height:110, rx:9, class:'box'}));
-    g.append(svg('text', {x:p.x+15, y:p.y+24, class:'caption'}, n.id + ' · ' + n.start.source));
+    g.append(svg('text', {x:p.x+15, y:p.y+24, class:'caption'}, n.id + ' · ' + (purposes[n.start.context?.purpose]??n.start.source)));
     if (best) g.append(svg('text', {x:p.x+189, y:p.y+24, class:'best-label'}, 'ЛИДЕР'));
     const model = n.start.hypothesis?.pipeline?.model;
     const label = families[model?.family] ?? model?.family ?? model?.name ?? model?.type ?? 'Описание модели в JSON';
@@ -400,6 +403,9 @@ function drawDetail(r) {
   const files = ['start', 'finish', ...(n.code?['code']:[]), ...(n.delta?['delta']:[])];
   if (!files.includes(jsonTab)) jsonTab = 'start';
   d.append(element('h2', '', n.id), element('small', '', `Родитель: ${n.start.parent_id ?? 'нет · baseline'}`));
+  if (n.start.context?.purpose) d.append(element('p', 'muted', 'Роль: '+(purposes[n.start.context.purpose]??n.start.context.purpose)));
+  const calls = r.report?.llm_calls?.filter(call=>call.node_id===n.id)??[];
+  if (calls.length) d.append(element('small', '', 'API-попыток реализатора: '+calls.length+'/20'));
   if (n.finish) d.append(element('p', 'metric', `${n.finish.metric?.name??'Метрика'}: ${fmt(n.finish.value)} · ${n.finish.evaluation_status??n.finish.status}`));
   d.append(element('h3', '', 'Гипотеза'), element('p', '', n.start.hypothesis?.rationale ?? '—'));
   d.append(element('small', '', n.start.hypothesis?.expected_effect ?? ''));

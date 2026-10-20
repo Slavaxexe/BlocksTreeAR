@@ -15,7 +15,7 @@ from openai import AsyncOpenAI
 import pandas as pd
 
 from alfa_agent.config import Settings
-from alfa_agent.contracts import Delta, Finish, Hypothesis, Metric, Preparation, Start
+from alfa_agent.contracts import Delta, Finish, Hypotheses, Hypothesis, Metric, Preparation, Start
 from alfa_agent.data import check_code, file_hash
 from alfa_agent.runner import Options, process, run, summarize
 from alfa_agent.storage import load
@@ -338,7 +338,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             output = (root / 'env.log').read_text()
             self.assertNotIn('secret-must-not-reach-worker', output)
             self.assertNotIn('OTHER_SECRET', output)
-            with self.assertRaises(TimeoutError):
+            with self.assertRaisesRegex(TimeoutError, 'time limit'):
                 await process(['-c', 'import time; time.sleep(5)'], root, root / 'timeout.log', time.monotonic()+5, .1)
 
     def test_code_interface_and_import_guard(self):
@@ -351,7 +351,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
 class TreeTests(unittest.IsolatedAsyncioTestCase):
     async def exercise(self, directory, *, blocked=False, stop_api=False, stop_time=False, max_nodes=4,
-                       wrong_batch=False):
+                       wrong_batch=False, repair_both=False, planning_race=False):
         path, answers = fixture(directory)
         root = directory / 'artifacts' / 'tree'
         plans, code = [], []
@@ -368,27 +368,45 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
                     '    return pd.DataFrame({column:model.predict(validation[["signal"]])}), pd.DataFrame({column:model.predict(test[["signal"]])})\n')
             else:
                 code.append(PROGRAM.replace('float(fit[column].mean())', value))
-        baker_calls, starts, wrong_sent = [], {}, False
-        def handler(request):
-            nonlocal wrong_sent
+        baker_calls, starts, requests, wrong_sent = [], {}, {}, False
+        gate, second_recorded, pair_ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        simultaneous, peak = 0, 0
+        if planning_race:
+            plans[2], code[2] = plans[1], code[1]
+            plans[1], code[1] = plans[3], code[3]
+            plans[3] = {**plans[3], 'pipeline': {**plans[3]['pipeline'], 'model': {'family': 'constant', 'value': '49.'}}}
+            code[3] = PROGRAM.replace('float(fit[column].mean())', '49.')
+        async def handler(request):
+            nonlocal wrong_sent, simultaneous, peak
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
             context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
             if title in {'Hypothesis', 'Hypotheses'}:
                 index = sum(baker_calls)
                 if index:
-                    self.assertEqual(context['delta'], json.loads((root / 'delta.json').read_text()))
-                    self.assertEqual(context['parent']['start']['node_id'], 'node_000' if index == 1 else 'node_001')
+                    measured = json.loads((root / 'delta.json').read_text())['nodes']
+                    expected = [{k:v for k,v in n.items() if k != 'comparisons'} for n in measured[:len(context['delta']['nodes'])]]
+                    self.assertEqual(context['delta']['nodes'], expected)
                     self.assertIn('code', context['parent'])
+                    if index == 3 and not repair_both:
+                        self.assertEqual(context['parent']['start']['node_id'], 'node_001')
+                        self.assertIn('node_002', [p['node_id'] for p in context['pending']])
+                        if planning_race:
+                            gate.set()
+                            await asyncio.wait_for(second_recorded.wait(), 8)
                 if stop_api and index == 3:
+                    gate.set()
                     return httpx.Response(503, json={'error': {'message': 'Unavailable'}})
                 count = min(2, context['remaining_nodes']) if index else 1
+                proposals = [{'purpose': 'improve' if offset == 0 else 'explore',
+                    'parent_id': context['parent']['start']['node_id'] if offset == 0 else 'node_000',
+                    'hypothesis': plans[index + offset]} for offset in range(count)] if index else []
                 if title == 'Hypotheses' and wrong_batch and not wrong_sent:
                     wrong_sent = True
-                    answer = {'hypotheses': plans[index:index + count - 1]}
+                    answer = {'hypotheses': proposals[:-1]}
                 else:
                     baker_calls.append(count)
-                    answer = {'hypotheses': plans[index:index + count]} if index else plans[index]
+                    answer = {'hypotheses': proposals} if index else plans[index]
             elif title == 'Program':
                 node_id = context['start']['node_id']
                 index = int(node_id.split('_')[1])
@@ -396,10 +414,31 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
                 starts[node_id] = saved
                 self.assertEqual(context['start'], json.loads(saved))
                 self.assertNotIn('delta', context)
-                batch_start = context['start']['context']['delta_nodes']
-                for sibling in range(batch_start, min(max_nodes, batch_start + (2 if batch_start else 1))):
-                    self.assertTrue((root / 'nodes' / f'node_{sibling:03d}' / 'start.json').exists())
+                if index in (1, 2):
+                    self.assertTrue((root / 'nodes/node_001/start.json').exists())
+                    self.assertTrue((root / 'nodes/node_002/start.json').exists())
+                state = json.loads((root / 'report.json').read_text())
+                self.assertLessEqual(len(state['running_nodes']), 2)
+                requests[node_id] = requests.get(node_id, 0) + 1
+                simultaneous += 1
+                peak = max(peak, simultaneous)
+                try:
+                    if index in (1, 2) and requests[node_id] == 1:
+                        if simultaneous == 2:
+                            pair_ready.set()
+                        await asyncio.wait_for(pair_ready.wait(), 8)
+                    if index == 2 and not repair_both:
+                        await gate.wait()  # This older sibling waits until node_003 has actually finished.
+                finally:
+                    simultaneous -= 1
                 answer = {'blocked_reason': 'Candidate failed', 'notes': ['Keep searching']} if blocked and index == 2 else {'code': code[index], 'notes': [f'Candidate {index}']}
+                if repair_both and index in (1, 2):
+                    if requests[node_id] == 1 and index == 1:
+                        answer = {'code': ''}
+                    elif requests[node_id] == 1:
+                        raise httpx.ConnectError('temporary disconnection', request=request)
+                    else:
+                        answer = {'code': 'COLUMNS = list()\n' + code[index]}
             else:
                 answer = answers[title]
             return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0,
@@ -413,6 +452,10 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
         offset = [0.]
         def record(*args):
             result = summarize(*args)
+            if result[0].node_id == 'node_003':
+                gate.set()
+            if result[0].node_id == 'node_002':
+                second_recorded.set()
             if stop_time and result[0].node_id == 'node_001':
                 offset[0] = 100.
             return result
@@ -422,6 +465,9 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
                                           Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         for node_id, saved in starts.items():
             self.assertEqual((root / 'nodes' / node_id / 'start.json').read_bytes(), saved)
+        self.assertGreaterEqual(peak, 2)
+        if repair_both:
+            self.assertEqual([requests['node_001'], requests['node_002']], [20, 20])
         return directory, report
 
     async def test_feedback_creates_branches_and_publishes_best_instead_of_latest(self):
@@ -429,11 +475,13 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             root, report = await self.exercise(Path(temporary))
             self.assertEqual((report.status, report.stop_reason, report.completed_nodes), ('ready', 'node_limit', 4), report.errors)
             delta = load(root / 'delta.json', Delta)
-            self.assertEqual([n.parent_id for n in delta.nodes], [None, 'node_000', 'node_000', 'node_001'])
+            by_id = {n.node_id:n for n in delta.nodes}
+            self.assertEqual([n.parent_id for n in sorted(delta.nodes, key=lambda n:n.node_id)], [None, 'node_000', 'node_000', 'node_001'])
+            self.assertLess([n.node_id for n in delta.nodes].index('node_003'), [n.node_id for n in delta.nodes].index('node_002'))
             self.assertEqual(delta.best_node_id, 'node_001')
-            self.assertEqual([round(n.result.value) for n in delta.nodes], [47, 7, 78, 28])
+            self.assertEqual([round(n.result.value) for n in sorted(delta.nodes, key=lambda n:n.node_id)], [47, 7, 78, 28])
             self.assertAlmostEqual(delta.nodes[1].comparisons[0].improvement, 40.)
-            self.assertEqual(len(delta.nodes[3].comparisons), 3)
+            self.assertEqual(len(by_id['node_002'].comparisons), 3)
             self.assertTrue(any(c.path == 'pipeline.model.family' for c in delta.nodes[1].comparisons[0].changes))
             for node in delta.nodes:
                 self.assertEqual(node.result.node_id, node.node_id)
@@ -447,9 +495,10 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             root, report = await self.exercise(Path(temporary), blocked=True)
             self.assertEqual((report.status, report.completed_nodes, report.failed_nodes), ('ready', 3, 1), report.errors)
             delta = load(root / 'delta.json', Delta)
-            self.assertEqual(delta.nodes[2].result.stage, 'implementation')
-            self.assertTrue(all(not c.comparable and c.improvement is None for c in delta.nodes[2].comparisons))
-            self.assertEqual(delta.nodes[3].parent_id, 'node_001')
+            failed = next(n for n in delta.nodes if n.node_id == 'node_002')
+            self.assertEqual(failed.result.stage, 'implementation')
+            self.assertTrue(all(not c.comparable and c.improvement is None for c in failed.comparisons))
+            self.assertEqual(next(n for n in delta.nodes if n.node_id == 'node_003').parent_id, 'node_001')
             self.assertEqual(delta.best_node_id, 'node_001')
 
     async def test_api_or_budget_stop_preserves_measured_winner(self):
@@ -472,11 +521,48 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(delta.nodes), 10)
             self.assertEqual(delta.best_node_id, 'node_001')
             self.assertFalse((root / 'nodes/node_010').exists())
-            self.assertEqual([load(root / 'nodes' / node.node_id / 'start.json', Start).context['delta_nodes']
-                              for node in delta.nodes], [0, 1, 1, 3, 3, 5, 5, 7, 7, 9])
+            starts = [load(root / 'nodes' / f'node_{index:03d}' / 'start.json', Start) for index in range(10)]
+            self.assertEqual([s.context['purpose'] for s in starts], ['baseline'] + ['improve', 'explore']*4 + ['improve'])
+            for index in (1, 3, 5, 7):
+                self.assertEqual(starts[index].context['delta_nodes'], starts[index+1].context['delta_nodes'])
+            self.assertEqual([starts[i].parent_id for i in (2, 4, 6, 8)], ['node_000']*4)
             calls = [call for call in report.llm_calls if call.role == 'baker']
             self.assertEqual(sum(call.status == 'completed' for call in calls), 6)
             self.assertEqual(sum(call.status == 'invalid_json' for call in calls), 1)
+
+    async def test_parallel_nodes_have_independent_twenty_request_budgets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, report = await self.exercise(Path(temporary), repair_both=True)
+            self.assertEqual((report.status, report.completed_nodes, report.failed_nodes), ('ready', 2, 2), report.errors)
+            for node_id in ('node_001', 'node_002'):
+                calls = [c for c in report.llm_calls if c.node_id == node_id]
+                self.assertEqual(len(calls), 20)
+            self.assertEqual(report.running_nodes, [])
+            self.assertEqual(report.queued_nodes, [])
+            self.assertFalse(report.planning)
+
+    async def test_results_are_merged_while_baker_uses_an_older_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, report = await self.exercise(Path(temporary), planning_race=True)
+            self.assertEqual((report.status, report.completed_nodes), ('ready', 4), report.errors)
+            delta = load(root / 'delta.json', Delta)
+            self.assertEqual(delta.best_node_id, 'node_002')
+            start = load(root / 'nodes/node_003/start.json', Start)
+            self.assertEqual((start.parent_id, start.context['delta_nodes']), ('node_001', 2))
+            self.assertEqual([n.node_id for n in delta.nodes], ['node_000','node_001','node_002','node_003'])
+
+    def test_proposal_roles_and_parents_are_validated_without_model_registry(self):
+        hypothesis = {'rationale': 'test', 'expected_effect': 'test',
+            'pipeline': {'data': {}, 'preprocessing': {}, 'model': {'custom': 'anything'}, 'training': {}}}
+        proposal = {'purpose': 'improve', 'parent_id': 'node_001', 'hypothesis': hypothesis}
+        context = {'hypothesis_count': 1, 'parent_ids': ['node_000','node_001'], 'leader_id': 'node_001'}
+        self.assertEqual(Hypotheses.model_validate_json(json.dumps({'hypotheses':[proposal]}), context=context).hypotheses[0].parent_id, 'node_001')
+        with self.assertRaisesRegex(ValueError, 'already evaluated or pending'):
+            Hypotheses.model_validate_json(json.dumps({'hypotheses':[proposal]}),
+                context={**context, 'used_pipelines': [hypothesis['pipeline']]})
+        for changes in ({'parent_id':'node_999'}, {'parent_id':'node_000'}, {'purpose':'explore'}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                Hypotheses.model_validate_json(json.dumps({'hypotheses':[{**proposal, **changes}]}), context=context)
 
     def test_comparisons_handle_maximization_missing_direction_and_different_preparation(self):
         hypothesis = Hypothesis(rationale='test', expected_effect='test', pipeline={'data': {}, 'preprocessing': {}, 'model': {}, 'training': {}})

@@ -7,6 +7,19 @@
           "title": "Role",
           "type": "string"
         },
+        "node_id": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Node Id"
+        },
         "attempt": {
           "title": "Attempt",
           "type": "integer"
@@ -151,6 +164,27 @@
       "minimum": 0,
       "title": "Failed Nodes",
       "type": "integer"
+    },
+    "running_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3}$",
+        "type": "string"
+      },
+      "title": "Running Nodes",
+      "type": "array"
+    },
+    "queued_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3}$",
+        "type": "string"
+      },
+      "title": "Queued Nodes",
+      "type": "array"
+    },
+    "planning": {
+      "default": false,
+      "title": "Planning",
+      "type": "boolean"
     }
   },
   "required": [

@@ -1,6 +1,7 @@
 """Bounded experiment tree: extraction → preparation → start / finish / delta → next plan."""
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version
@@ -26,7 +27,7 @@ IMPLEMENTATION_CALLS = 20
 @dataclass(frozen=True)
 class Options:
     time_budget: float = 600
-    experiment_timeout: float = 120
+    experiment_timeout: float = 240
     output_dir: Path | None = None
     max_nodes: int = 10
 
@@ -44,10 +45,12 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
                                                      stdout=stream, stderr=asyncio.subprocess.STDOUT)
         try:
             code = await asyncio.wait_for(child.wait(), remaining)
-        except (TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError) as error:
             if child.returncode is None:
                 child.kill()
             await child.wait()
+            if isinstance(error, TimeoutError):
+                raise TimeoutError(f'Process exceeded its {remaining:.1f}s time limit') from None
             raise
     if code:
         with log.open('rb') as stream:
@@ -136,8 +139,8 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                     raise
                 context.update(previous_code=program.code, execution_error=str(error)[-5000:], failed_stage=stage)
                 checkpoint(f'{start.node_id}: code repair after {stage}; saved start is unchanged')
-    except Exception as error:
-        message = str(error).replace(agents.settings.api_key, '[REDACTED]')[-5000:]
+    except (Exception, asyncio.CancelledError) as error:
+        message = (str(error) or 'Experiment cancelled').replace(agents.settings.api_key, '[REDACTED]')[-5000:]
         finish = Finish(node_id=start.node_id, status='timeout' if isinstance(error, TimeoutError) or time.monotonic() >= deadline else 'failed',
             stage=stage, metric=shared['preparation']['metric'], duration_seconds=0.,
             preparation_sha256=start.preparation_sha256, start_sha256=start_hash, code_sha256=code_hash, error=message)
@@ -161,9 +164,13 @@ async def run(task_path: Path, options: Options, settings: Settings):
     if report.status == 'failed':
         return directory, report
 
+    active, waiting, starts, planner = {}, deque(), {}, None
+
     def update(**changes):
         nonlocal report
-        report = report.model_copy(update={**changes, 'llm_calls': list(agents.calls)})
+        report = report.model_copy(update={**changes, 'llm_calls': list(agents.calls),
+            'running_nodes': [s.node_id for s in active.values()], 'queued_nodes': [s.node_id for s in waiting],
+            'planning': planner is not None})
         save(directory / 'report.json', report)
 
     delta, published, stop_reason = None, None, 'node_limit'
@@ -207,57 +214,94 @@ async def run(task_path: Path, options: Options, settings: Settings):
         def checkpoint(warning=None):
             update(warnings=report.warnings + ([warning] if warning else []))
 
-        while len(delta.nodes) < options.max_nodes:
-            if time.monotonic() >= deadline:
+        def parent_view(node_id):
+            node = directory / 'nodes' / node_id
+            return {'start': load(node / 'start.json', Start).model_dump(mode='json'),
+                    'finish': load(node / 'finish.json', Finish).model_dump(mode='json'),
+                    'code': (node / 'experiment.py').read_text() if (node / 'experiment.py').exists() else None}
+
+        def record(start, finish):
+            nonlocal delta, published
+            row, delta = summarize(delta, start, finish)
+            save(directory / 'nodes' / start.node_id / 'delta.json', row)
+            save(directory / 'delta.json', delta)
+            selected = delta.best_node_id or next((n.node_id for n in delta.nodes if n.result.status == 'completed'), None)
+            if selected is not None and selected != published:
+                result = next(n.result for n in delta.nodes if n.node_id == selected)
+                output_file = within(directory / 'nodes' / selected, result.submission_file)
+                atomic_bytes(within(task_path.parent, preparation.output.filename), output_file.read_bytes())
+                if delta.best_node_id:
+                    atomic_bytes(directory / 'best.json', json.dumps({'node_id': selected, 'value': result.value,
+                                 'submission_file': output_file.relative_to(directory).as_posix()}).encode())
+                published = selected
+            completed = sum(n.result.status == 'completed' for n in delta.nodes)
+            update(completed_nodes=completed, failed_nodes=len(delta.nodes) - completed,
+                   warnings=report.warnings + ([f'{start.node_id}: {finish.error}'] if finish.error else []))
+
+        planning_failed, snapshot = False, {}
+        while True:
+            expired = time.monotonic() >= deadline
+            if expired:
                 stop_reason = 'time_budget'
+                for task in [*active, *([planner] if planner else [])]:
+                    if not task.done():
+                        task.cancel()
+            while waiting and len(active) < 2:
+                start = waiting.popleft()
+                context = {**shared, **({'parent': parent_view(start.parent_id)} if start.parent_id else {})}
+                local = JSONAgents(settings, deadline, IMPLEMENTATION_CALLS, shared=agents, node_id=start.node_id)
+                task = asyncio.create_task(experiment(directory / 'nodes' / start.node_id, start, context, local, deadline, checkpoint))
+                active[task] = start
+            if (not expired and not planning_failed and planner is None and not waiting and len(active) < 2
+                    and len(starts) < options.max_nodes and (not starts or delta.nodes)):
+                finished = {n.node_id for n in delta.nodes}
+                snapshot = {**shared, 'remaining_nodes': options.max_nodes - len(starts),
+                    'experiment_timeout_seconds': options.experiment_timeout,
+                    'remaining_seconds': max(0., deadline - time.monotonic()),
+                    'delta': {**delta.model_dump(mode='json'),
+                              'nodes': [n.model_dump(mode='json', exclude={'comparisons'}) for n in delta.nodes]},
+                    'pending': [s.model_dump(mode='json') for key, s in starts.items() if key not in finished]}
+                if delta.nodes:
+                    leader = next((n for n in delta.nodes if n.node_id == delta.best_node_id), None)
+                    leader = leader or next((n for n in reversed(delta.nodes) if n.result.status == 'completed'), delta.nodes[-1])
+                    snapshot.update(parent=parent_view(leader.node_id),
+                        available_parents=[n.node_id for n in delta.nodes if n.result.status == 'completed'] or [leader.node_id])
+                planner = asyncio.create_task(agents.plan_next(snapshot, min(2, snapshot['remaining_nodes'])) if starts
+                                              else agents.plan_baseline(snapshot))
+            update(stage='search' if delta.nodes else 'baseline')
+            tasks = [*active, *([planner] if planner else [])]
+            if not tasks:
                 break
-            index = len(delta.nodes)
-            update(stage='baseline' if index == 0 else 'search')
-            parent, context = None, dict(shared)
-            if delta.nodes:
-                parent = next((n for n in delta.nodes if n.node_id == delta.best_node_id), None)
-                parent = parent or next((n for n in reversed(delta.nodes) if n.result.status == 'completed'), delta.nodes[-1])
-                parent_path = directory / 'nodes' / parent.node_id
-                context.update(delta=delta.model_dump(mode='json'), remaining_nodes=options.max_nodes - index,
-                    remaining_seconds=max(0., deadline - time.monotonic()),
-                    parent={'start': load(parent_path / 'start.json', Start).model_dump(mode='json'),
-                            'finish': parent.result.model_dump(mode='json'),
-                            'code': (parent_path / 'experiment.py').read_text() if (parent_path / 'experiment.py').exists() else None})
-            hypotheses = ([await agents.plan_baseline(context)] if parent is None else
-                          await agents.plan_next(context, min(2, options.max_nodes - index)))
-            starts = []
-            for offset, hypothesis in enumerate(hypotheses):
-                start = Start(node_id=f'node_{index + offset:03d}', parent_id=parent.node_id if parent else None,
-                    hypothesis=hypothesis, preparation_sha256=delta.preparation_sha256,
-                    context={'task': str(task_path), 'task_sha256': report.task_sha256, 'delta_nodes': index,
-                             'extraction': '../../extraction.json', 'extraction_sha256': file_hash(directory / 'extraction.json'),
-                             'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries']},
-                    outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
-                    timeout_seconds=float(options.experiment_timeout))
-                node = directory / 'nodes' / start.node_id
-                node.mkdir(parents=True)
-                save(node / 'start.json', start)
-                starts.append(start)
-            # History belongs to Baker; each implementer gets only its task, plan and parent reference.
-            implementation_context = {**shared, **({'parent': context['parent']} if parent else {})}
-            for start in starts:
-                node = directory / 'nodes' / start.node_id
-                finish = await experiment(node, start, implementation_context, agents, deadline, checkpoint)
-                row, delta = summarize(delta, start, finish)
-                save(node / 'delta.json', row)
-                save(directory / 'delta.json', delta)
-                selected = delta.best_node_id or next((n.node_id for n in delta.nodes if n.result.status == 'completed'), None)
-                if selected is not None and selected != published:
-                    result = next(n.result for n in delta.nodes if n.node_id == selected)
-                    output_file = within(directory / 'nodes' / selected, result.submission_file)
-                    atomic_bytes(within(task_path.parent, preparation.output.filename), output_file.read_bytes())
-                    if delta.best_node_id:
-                        atomic_bytes(directory / 'best.json', json.dumps({'node_id': selected, 'value': result.value,
-                                     'submission_file': output_file.relative_to(directory).as_posix()}).encode())
-                    published = selected
-                completed = sum(n.result.status == 'completed' for n in delta.nodes)
-                update(completed_nodes=completed, failed_nodes=len(delta.nodes) - completed,
-                       warnings=report.warnings + ([f'{start.node_id}: {finish.error}'] if finish.error else []))
+            done, _ = await asyncio.wait(tasks, timeout=None if expired else max(0., deadline - time.monotonic()),
+                                         return_when=asyncio.FIRST_COMPLETED)
+            # Only the controller merges results and publishes a winner; workers never write shared state.
+            for task in sorted((t for t in done if t in active), key=lambda t: active[t].node_id):
+                record(active.pop(task), task.result())
+            if planner in done:
+                try:
+                    result = planner.result()
+                    proposals = [(None, 'baseline', result)] if not starts else [(p.parent_id, p.purpose, p.hypothesis) for p in result]
+                    if time.monotonic() < deadline:
+                        for parent_id, purpose, hypothesis in proposals:
+                            start = Start(node_id=f'node_{len(starts):03d}', parent_id=parent_id, hypothesis=hypothesis,
+                                preparation_sha256=delta.preparation_sha256,
+                                context={'task': str(task_path), 'task_sha256': report.task_sha256, 'purpose': purpose,
+                                    'delta_nodes': len(snapshot['delta']['nodes']), 'extraction': '../../extraction.json',
+                                    'extraction_sha256': file_hash(directory / 'extraction.json'),
+                                    'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries']},
+                                outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
+                                timeout_seconds=float(options.experiment_timeout))
+                            node = directory / 'nodes' / start.node_id
+                            node.mkdir(parents=True)
+                            save(node / 'start.json', start)
+                            starts[start.node_id] = start
+                            waiting.append(start)
+                except (Exception, asyncio.CancelledError) as error:
+                    planning_failed = True
+                    stop_reason = 'time_budget' if time.monotonic() >= deadline else 'llm_error' if isinstance(error, QwenError) else 'error'
+                    if not isinstance(error, asyncio.CancelledError):
+                        update(errors=report.errors + [str(error).replace(settings.api_key, '[REDACTED]')[-5000:]])
+                planner = None
         update(status='ready' if delta.best_node_id and stop_reason == 'node_limit' else 'partial' if published else 'failed',
                stage='complete', stop_reason=stop_reason,
                checks=report.checks + ['saved_starts', 'recorded_finishes', 'computed_deltas'] + (['submission_written'] if published else []))
@@ -266,4 +310,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
         reason = ('preparation_failed' if delta is None else 'time_budget' if time.monotonic() >= deadline
                   else 'llm_error' if isinstance(error, QwenError) else 'error')
         update(status='partial' if published else 'failed', stop_reason=reason, errors=report.errors + [message])
+    finally:
+        tasks = [*active, *([planner] if planner else [])]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
     return directory, report
