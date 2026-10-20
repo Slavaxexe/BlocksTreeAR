@@ -41,8 +41,10 @@ class Sourced(Contract):
         for field, quotes in self.evidence.items():
             if not quotes or any(not q.strip() for q in quotes):
                 raise ValueError(f"{field}: expected nonempty source quotes")
-            if source is not None and any(normalize(q) not in normalize(source) for q in quotes):
-                raise ValueError(f"{field}: quote does not occur in the original Markdown")
+            missing = [q for q in quotes if source is not None and normalize(q) not in normalize(source)]
+            if missing:
+                raise ValueError(f"{field}: quotes do not occur in the original Markdown: {missing[:3]!r}. "
+                                 "Copy exact source substrings, preserving case and Markdown punctuation.")
             if field.endswith('_file') or field in {'target_column', 'target_columns', 'id_column', 'columns', 'class_labels', 'warnings'}:
                 items = values[field] if isinstance(values[field], list) else [values[field]]
                 if any(not any(normalize(str(item)) in normalize(q) for q in quotes) for item in items):

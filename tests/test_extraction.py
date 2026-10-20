@@ -60,6 +60,13 @@ def expected(name):
 
 
 class ExtractionTests(unittest.IsolatedAsyncioTestCase):
+    def test_bad_quote_diagnostic_identifies_the_case_mismatch(self):
+        with self.assertRaises(ValidationError) as caught:
+            ProblemFacts.model_validate({'warnings': ['missing values'], 'evidence': {'warnings': ['missing values']}},
+                context={'source': 'Missing values'})
+        self.assertIn("['missing values']", str(caught.exception))
+        self.assertIn('preserving case', str(caught.exception))
+
     async def test_proxy_markdown_wrapper_is_removed_but_unknown_fields_are_rejected(self):
         _, text, facts = expected('regression')
         for extra in (False, True):

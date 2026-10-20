@@ -177,6 +177,7 @@ class JSONAgents:
                       "Evidence values must be flat lists of strings, even for files/formats mapping fields. "
                       "If unstated, leave null or an empty collection; do not invent missing facts. "
                       "Use the shortest sufficient quotes. Keep reasoning brief. "
+                      "Copy quotes case-sensitively, including Markdown punctuation; never lowercase or paraphrase them. "
                       "Do not choose a model, preprocessing or validation split.\n"
                       + json.dumps({"task_text": text}, ensure_ascii=False))
             result = await self.ask(schema, prompt, role, source=text)
