@@ -1,4 +1,4 @@
-"""Platform entry: python solution.py task.md [--max-nodes 4] [--key-stdin]."""
+"""Platform entry: python solution.py task.md [--max-nodes 10] [--key-stdin]."""
 
 import sys
 from alfa_agent.__main__ import main as cli

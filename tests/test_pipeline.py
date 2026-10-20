@@ -90,7 +90,8 @@ def fixture(directory):
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def exercise(self, directory, *, repair=False, missing_metric=False, blocked=False, broken_metric=False,
-                       invalid_program=False, broken_code=False, execution_timeout=False):
+                       invalid_program=False, broken_code=False, execution_timeout=False, full_repair=False,
+                       json_failure=False, network_failure=False, ast_failure=False):
         path, answers = fixture(directory)
         if missing_metric:
             answers['PreparationDraft']['metric']['status'] = 'needs_implementation'
@@ -108,11 +109,16 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             answers['Program'] = {'code': ''}
         if broken_code:
             answers['Program']['code'] = PROGRAM.replace('value = float(fit[column].mean())', 'raise ValueError("cannot run")')
+        if ast_failure:
+            answers['Program']['code'] = 'COLUMNS = list()\n' + PROGRAM
         seen, saved_starts = [], []
         run_directory = directory / 'artifacts' / 'run'
         def handler(request):
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
+            if title == 'Program' and network_failure and title not in seen:
+                seen.append(title)
+                raise httpx.ConnectError('temporary disconnection', request=request)
             answer = answers[title]
             if title == 'Program':
                 saved = (run_directory / 'nodes/node_000/start.json').read_bytes()
@@ -123,10 +129,15 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('task_text', context)
                 self.assertIn('preparation_code', context)
                 self.assertEqual(context['start']['context']['installed_libraries'], context['installed_libraries'])
-            if title == 'Program' and repair and title not in seen:
+            if title == 'Program' and json_failure and title not in seen:
+                answer = {'code': ''}
+            elif title == 'Program' and repair and seen.count(title) < int(repair):
                 answer = {**answers['Program'], 'code': PROGRAM.replace('value = float(fit[column].mean())', 'raise ValueError("repair me")')}
             elif title == 'Program' and repair:
                 self.assertIn('repair me', body['messages'][-1]['content'])
+            if title == 'Program' and full_repair and seen.count(title):
+                self.assertEqual(context['failed_stage'], 'execution')
+                self.assertIn('full run failed', context['execution_error'])
             seen.append(title)
             return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0,
                 'model': 'model', 'choices': [{'index': 0, 'finish_reason': 'stop',
@@ -134,7 +145,17 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         def client(**kwargs):
             return AsyncOpenAI(api_key='fake-secret', base_url='https://qwen.example/v1', max_retries=0,
                                http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        full_attempts = 0
         async def launch(arguments, *args):
+            nonlocal full_attempts
+            if '--check' in arguments and (broken_code or execution_timeout):
+                if broken_code:
+                    raise ValueError('cannot run')
+                return
+            if full_repair and '--start' in arguments:
+                full_attempts += 1
+                if full_attempts == 1:
+                    raise ValueError('full run failed')
             if execution_timeout and '--start' in arguments:
                 raise TimeoutError('Experiment time limit')
             return await process(arguments, *args)
@@ -175,9 +196,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_code_repair_preserves_the_already_saved_start(self):
         with tempfile.TemporaryDirectory() as temporary:
-            (root, report), seen = await self.exercise(Path(temporary), repair=True)
+            (root, report), seen = await self.exercise(Path(temporary), repair=3)
             self.assertEqual(report.status, 'ready', report.errors)
-            self.assertEqual(seen.count('Program'), 2)
+            self.assertEqual(seen.count('Program'), 4)
             self.assertTrue(any('code repair' in warning for warning in report.warnings))
             self.assertNotIn('repair me', (root / 'nodes/node_000/experiment.py').read_text())
 
@@ -216,16 +237,44 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(seen.count('Program'), 2)
             self.assertIsNone(finish.code_sha256)
 
-    async def test_failed_check_records_attempted_code_and_stops_after_one_repair(self):
+    async def test_request_cap_includes_json_repairs_and_records_last_attempted_code(self):
         with tempfile.TemporaryDirectory() as temporary:
-            (root, report), seen = await self.exercise(Path(temporary), broken_code=True)
+            (root, report), seen = await self.exercise(Path(temporary), broken_code=True, json_failure=True)
             self.assertEqual(report.status, 'failed')
             node = root / 'nodes/node_000'
             finish = load(node / 'finish.json', Finish)
             self.assertEqual((finish.status, finish.stage), ('failed', 'check'))
             self.assertEqual(finish.code_sha256, file_hash(node / 'experiment.py'))
-            self.assertEqual(seen.count('Program'), 2)
+            self.assertEqual(seen.count('Program'), 20)
+            self.assertEqual(sum(call.role == 'implementer' for call in report.llm_calls), 20)
+            self.assertEqual(sum(call.status == 'invalid_json' for call in report.llm_calls), 1)
             self.assertFalse((root / 'best.json').exists())
+
+    async def test_full_execution_error_can_be_repaired_in_the_same_node(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), full_repair=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertEqual(seen.count('Program'), 2)
+            self.assertEqual(load(root / 'nodes/node_000/finish.json', Finish).stage, 'execution')
+
+    async def test_transient_connection_error_uses_one_bounded_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), network_failure=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertEqual(seen.count('Program'), 2)
+            calls = [call for call in report.llm_calls if call.role == 'implementer']
+            self.assertEqual([call.status for call in calls], ['api_error', 'completed'])
+
+    async def test_rejected_source_and_actionable_check_error_are_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), ast_failure=True)
+            self.assertEqual(report.status, 'failed')
+            node = root / 'nodes/node_000'
+            finish = load(node / 'finish.json', Finish)
+            self.assertEqual((finish.stage, seen.count('Program')), ('check', 20))
+            self.assertEqual(finish.code_sha256, file_hash(node / 'experiment.py'))
+            self.assertIn('COLUMNS = list()', (node / 'experiment.py').read_text())
+            self.assertIn('Move computed values inside a function', (node / 'execution.log').read_text())
 
     async def test_execution_timeout_has_phase_plan_hash_and_code_hash(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -293,6 +342,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 await process(['-c', 'import time; time.sleep(5)'], root, root / 'timeout.log', time.monotonic()+5, .1)
 
     def test_code_interface_and_import_guard(self):
+        check_code(PROGRAM.replace('    column = ', '    columns = [name for name in fit.columns]\n    column = '), ('fit_predict',))
         for code in ('def fit_predict(:\n    pass', 'import subprocess\n' + PROGRAM, 'print("top-level execution")\n' + PROGRAM,
                      PROGRAM.replace('fit_predict', 'wrong_function')):
             with self.subTest(code=code[:30]), self.assertRaises(ValueError):
@@ -300,12 +350,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TreeTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, directory, *, blocked=False, stop_api=False, stop_time=False):
+    async def exercise(self, directory, *, blocked=False, stop_api=False, stop_time=False, max_nodes=4,
+                       wrong_batch=False):
         path, answers = fixture(directory)
         root = directory / 'artifacts' / 'tree'
         plans, code = [], []
-        for index, (family, value) in enumerate((('constant', 'float(fit[column].mean())'),
-                                                ('linear', None), ('constant', '0.'), ('constant', '50.'))):
+        candidates = [('constant', 'float(fit[column].mean())'), ('linear', None), ('constant', '0.'),
+                      ('constant', '50.')] + [('constant', f'{50 + i}.') for i in range(4, max_nodes)]
+        for index, (family, value) in enumerate(candidates):
             plans.append({**answers['Hypothesis'], 'pipeline': {**answers['Hypothesis']['pipeline'],
                           'model': {'family': family, 'value': value}}})
             if index == 1:
@@ -316,27 +368,37 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
                     '    return pd.DataFrame({column:model.predict(validation[["signal"]])}), pd.DataFrame({column:model.predict(test[["signal"]])})\n')
             else:
                 code.append(PROGRAM.replace('float(fit[column].mean())', value))
-        baker_calls, starts = [], {}
+        baker_calls, starts, wrong_sent = [], {}, False
         def handler(request):
+            nonlocal wrong_sent
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
             context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
-            if title == 'Hypothesis':
-                index = len(baker_calls)
+            if title in {'Hypothesis', 'Hypotheses'}:
+                index = sum(baker_calls)
                 if index:
                     self.assertEqual(context['delta'], json.loads((root / 'delta.json').read_text()))
                     self.assertEqual(context['parent']['start']['node_id'], 'node_000' if index == 1 else 'node_001')
                     self.assertIn('code', context['parent'])
-                baker_calls.append(index)
-                if stop_api and index == 2:
+                if stop_api and index == 3:
                     return httpx.Response(503, json={'error': {'message': 'Unavailable'}})
-                answer = plans[index]
+                count = min(2, context['remaining_nodes']) if index else 1
+                if title == 'Hypotheses' and wrong_batch and not wrong_sent:
+                    wrong_sent = True
+                    answer = {'hypotheses': plans[index:index + count - 1]}
+                else:
+                    baker_calls.append(count)
+                    answer = {'hypotheses': plans[index:index + count]} if index else plans[index]
             elif title == 'Program':
                 node_id = context['start']['node_id']
                 index = int(node_id.split('_')[1])
                 saved = (root / 'nodes' / node_id / 'start.json').read_bytes()
                 starts[node_id] = saved
                 self.assertEqual(context['start'], json.loads(saved))
+                self.assertNotIn('delta', context)
+                batch_start = context['start']['context']['delta_nodes']
+                for sibling in range(batch_start, min(max_nodes, batch_start + (2 if batch_start else 1))):
+                    self.assertTrue((root / 'nodes' / f'node_{sibling:03d}' / 'start.json').exists())
                 answer = {'blocked_reason': 'Candidate failed', 'notes': ['Keep searching']} if blocked and index == 2 else {'code': code[index], 'notes': [f'Candidate {index}']}
             else:
                 answer = answers[title]
@@ -356,7 +418,7 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             return result
         with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), patch('alfa_agent.runner.summarize', side_effect=record), \
              patch('alfa_agent.runner.time', SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])):
-            directory, report = await run(path, Options(time_budget=60, experiment_timeout=12, output_dir=root, max_nodes=4),
+            directory, report = await run(path, Options(time_budget=90, experiment_timeout=12, output_dir=root, max_nodes=max_nodes),
                                           Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         for node_id, saved in starts.items():
             self.assertEqual((root / 'nodes' / node_id / 'start.json').read_bytes(), saved)
@@ -367,7 +429,7 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             root, report = await self.exercise(Path(temporary))
             self.assertEqual((report.status, report.stop_reason, report.completed_nodes), ('ready', 'node_limit', 4), report.errors)
             delta = load(root / 'delta.json', Delta)
-            self.assertEqual([n.parent_id for n in delta.nodes], [None, 'node_000', 'node_001', 'node_001'])
+            self.assertEqual([n.parent_id for n in delta.nodes], [None, 'node_000', 'node_000', 'node_001'])
             self.assertEqual(delta.best_node_id, 'node_001')
             self.assertEqual([round(n.result.value) for n in delta.nodes], [47, 7, 78, 28])
             self.assertAlmostEqual(delta.nodes[1].comparisons[0].improvement, 40.)
@@ -396,10 +458,25 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
                 root, report = await self.exercise(Path(temporary), **{mode: True})
                 self.assertEqual(report.status, 'partial', report.errors)
                 self.assertEqual(report.stop_reason, 'llm_error' if mode == 'stop_api' else 'time_budget')
-                self.assertEqual(report.completed_nodes, 2)
+                self.assertEqual(report.completed_nodes, 3 if mode == 'stop_api' else 2)
+                self.assertEqual(len(load(root / 'delta.json', Delta).nodes), 3)
                 best = json.loads((root / 'best.json').read_text())
                 self.assertEqual(best['node_id'], 'node_001')
                 self.assertEqual((Path(temporary) / 'result.tsv').read_bytes(), (root / best['submission_file']).read_bytes())
+
+    async def test_ten_node_cap_batches_and_final_single_hypothesis(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, report = await self.exercise(Path(temporary), max_nodes=10, wrong_batch=True)
+            self.assertEqual((report.status, report.completed_nodes, report.failed_nodes), ('ready', 10, 0), report.errors)
+            delta = load(root / 'delta.json', Delta)
+            self.assertEqual(len(delta.nodes), 10)
+            self.assertEqual(delta.best_node_id, 'node_001')
+            self.assertFalse((root / 'nodes/node_010').exists())
+            self.assertEqual([load(root / 'nodes' / node.node_id / 'start.json', Start).context['delta_nodes']
+                              for node in delta.nodes], [0, 1, 1, 3, 3, 5, 5, 7, 7, 9])
+            calls = [call for call in report.llm_calls if call.role == 'baker']
+            self.assertEqual(sum(call.status == 'completed' for call in calls), 6)
+            self.assertEqual(sum(call.status == 'invalid_json' for call in calls), 1)
 
     def test_comparisons_handle_maximization_missing_direction_and_different_preparation(self):
         hypothesis = Hypothesis(rationale='test', expected_effect='test', pipeline={'data': {}, 'preprocessing': {}, 'model': {}, 'training': {}})

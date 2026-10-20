@@ -20,6 +20,7 @@ from .data import check_code, file_hash, inventory, within
 from .storage import atomic_bytes, load, save
 
 ENTRY = "\nif __name__ == '__main__':\n    from alfa_agent.worker import main\n    main(fit_predict)\n"
+IMPLEMENTATION_CALLS = 20
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,7 @@ class Options:
     time_budget: float = 600
     experiment_timeout: float = 120
     output_dir: Path | None = None
-    max_nodes: int = 4
+    max_nodes: int = 10
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -93,49 +94,51 @@ def summarize(delta: Delta, start: Start, finish: Finish) -> tuple[NodeDelta, De
 
 
 async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents, deadline: float, checkpoint) -> Finish:
-    node.mkdir(parents=True)
-    save(node / 'start.json', start)
     start_hash, started = file_hash(node / 'start.json'), time.monotonic()
     checkpoint()
     code_hash, notes, stage = None, [], 'implementation'
+    request_limit = min(agents.max_calls, agents.requests + IMPLEMENTATION_CALLS)
     try:
         preparation_path = node.parent.parent / 'preparation.json'
         context = {**shared, 'start': load(node / 'start.json', Start).model_dump(mode='json'),
                    'preparation_code': (node.parent.parent / 'prepare.py').read_text()}
-        for attempt in range(2):
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Run time budget exhausted')
             stage = 'implementation'
-            program = await agents.implement(context)
+            program = await agents.implement(context, request_limit=request_limit)
             notes = list(dict.fromkeys(notes + program.notes))
             if program.blocked_reason:
                 raise ValueError('Implementation blocked: ' + program.blocked_reason)
             stage = 'check'
             try:
-                check_code(program.code, ('fit_predict',))
                 atomic_bytes(node / start.implementation, (program.code + ENTRY).encode())
                 code_hash = file_hash(node / start.implementation)
+                check_code(program.code, ('fit_predict',))
                 await process(['-m', 'alfa_agent.worker', '--check', str(node), '--preparation', str(preparation_path)],
                               node, node / 'execution.log', deadline, min(45, start.timeout_seconds))
+                if file_hash(node / 'start.json') != start_hash or file_hash(preparation_path) != start.preparation_sha256:
+                    raise ValueError('Saved plan or preparation changed during implementation')
+                stage = 'execution'
+                await process([str(node / start.implementation), '--start', str(node / 'start.json'),
+                               '--start-sha256', start_hash, '--code-sha256', code_hash], node,
+                              node / 'execution.log', deadline, start.timeout_seconds)
+                finish = load(node / 'finish.json', Finish)
+                if (finish.node_id, finish.code_sha256, finish.preparation_sha256, finish.start_sha256) != (
+                        start.node_id, code_hash, start.preparation_sha256, start_hash):
+                    raise ValueError('Finish does not match its recorded node, plan, code and preparation')
+                if finish.status != 'completed':
+                    raise ValueError(finish.error or 'Experiment failed')
                 break
             except (ValueError, OSError, TimeoutError) as error:
-                if attempt:
+                atomic_bytes(node / 'execution.log', str(error).encode())
+                if agents.requests >= request_limit or time.monotonic() >= deadline:
                     raise
-                context.update(previous_code=program.code, execution_error=str(error)[-5000:])
-                checkpoint(f'{start.node_id}: one code repair; saved start is unchanged')
-        if file_hash(node / 'start.json') != start_hash or file_hash(preparation_path) != start.preparation_sha256:
-            raise ValueError('Saved plan or preparation changed during implementation')
-        stage = 'execution'
-        await process([str(node / start.implementation), '--start', str(node / 'start.json'),
-                       '--start-sha256', start_hash, '--code-sha256', code_hash], node,
-                      node / 'execution.log', deadline, start.timeout_seconds)
-        finish = load(node / 'finish.json', Finish)
-        if (finish.node_id, finish.code_sha256, finish.preparation_sha256, finish.start_sha256) != (
-                start.node_id, code_hash, start.preparation_sha256, start_hash):
-            raise ValueError('Finish does not match its recorded node, plan, code and preparation')
-        if finish.status != 'completed':
-            raise ValueError(finish.error or 'Experiment failed')
+                context.update(previous_code=program.code, execution_error=str(error)[-5000:], failed_stage=stage)
+                checkpoint(f'{start.node_id}: code repair after {stage}; saved start is unchanged')
     except Exception as error:
         message = str(error).replace(agents.settings.api_key, '[REDACTED]')[-5000:]
-        finish = Finish(node_id=start.node_id, status='timeout' if isinstance(error, TimeoutError) else 'failed',
+        finish = Finish(node_id=start.node_id, status='timeout' if isinstance(error, TimeoutError) or time.monotonic() >= deadline else 'failed',
             stage=stage, metric=shared['preparation']['metric'], duration_seconds=0.,
             preparation_sha256=start.preparation_sha256, start_sha256=start_hash, code_sha256=code_hash, error=message)
     finish = finish.model_copy(update={'notes': notes, 'duration_seconds': time.monotonic() - started})
@@ -151,7 +154,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         raise ValueError('max_nodes must be an integer between 1 and 1000')
     task_path = task_path.resolve()
     deadline = time.monotonic() + options.time_budget
-    agents = JSONAgents(settings, deadline, max_calls=12 + 6 * options.max_nodes)
+    agents = JSONAgents(settings, deadline, max_calls=12 + (IMPLEMENTATION_CALLS + 2) * options.max_nodes)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     directory = (options.output_dir or Path('artifacts') / f'{task_path.parent.name}-{stamp}-{uuid4().hex[:6]}').resolve()
     report = await extract_task(task_path, directory, settings, agents=agents)
@@ -204,10 +207,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
         def checkpoint(warning=None):
             update(warnings=report.warnings + ([warning] if warning else []))
 
-        for index in range(options.max_nodes):
+        while len(delta.nodes) < options.max_nodes:
             if time.monotonic() >= deadline:
                 stop_reason = 'time_budget'
                 break
+            index = len(delta.nodes)
             update(stage='baseline' if index == 0 else 'search')
             parent, context = None, dict(shared)
             if delta.nodes:
@@ -219,31 +223,41 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     parent={'start': load(parent_path / 'start.json', Start).model_dump(mode='json'),
                             'finish': parent.result.model_dump(mode='json'),
                             'code': (parent_path / 'experiment.py').read_text() if (parent_path / 'experiment.py').exists() else None})
-            hypothesis = await (agents.plan_baseline(context) if parent is None else agents.plan_next(context))
-            node_id = f'node_{index:03d}'
-            start = Start(node_id=node_id, parent_id=parent.node_id if parent else None,
-                hypothesis=hypothesis, preparation_sha256=delta.preparation_sha256,
-                context={'task': str(task_path), 'task_sha256': report.task_sha256,
-                         'extraction': '../../extraction.json', 'extraction_sha256': file_hash(directory / 'extraction.json'),
-                         'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries']},
-                outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
-                timeout_seconds=float(options.experiment_timeout))
-            finish = await experiment(directory / 'nodes' / node_id, start, context, agents, deadline, checkpoint)
-            row, delta = summarize(delta, start, finish)
-            save(directory / 'nodes' / node_id / 'delta.json', row)
-            save(directory / 'delta.json', delta)
-            selected = delta.best_node_id or next((n.node_id for n in delta.nodes if n.result.status == 'completed'), None)
-            if selected is not None and selected != published:
-                result = next(n.result for n in delta.nodes if n.node_id == selected)
-                output_file = within(directory / 'nodes' / selected, result.submission_file)
-                atomic_bytes(within(task_path.parent, preparation.output.filename), output_file.read_bytes())
-                if delta.best_node_id:
-                    atomic_bytes(directory / 'best.json', json.dumps({'node_id': selected, 'value': result.value,
-                                 'submission_file': output_file.relative_to(directory).as_posix()}).encode())
-                published = selected
-            completed = sum(n.result.status == 'completed' for n in delta.nodes)
-            update(completed_nodes=completed, failed_nodes=len(delta.nodes) - completed,
-                   warnings=report.warnings + ([f'{node_id}: {finish.error}'] if finish.error else []))
+            hypotheses = ([await agents.plan_baseline(context)] if parent is None else
+                          await agents.plan_next(context, min(2, options.max_nodes - index)))
+            starts = []
+            for offset, hypothesis in enumerate(hypotheses):
+                start = Start(node_id=f'node_{index + offset:03d}', parent_id=parent.node_id if parent else None,
+                    hypothesis=hypothesis, preparation_sha256=delta.preparation_sha256,
+                    context={'task': str(task_path), 'task_sha256': report.task_sha256, 'delta_nodes': index,
+                             'extraction': '../../extraction.json', 'extraction_sha256': file_hash(directory / 'extraction.json'),
+                             'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries']},
+                    outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
+                    timeout_seconds=float(options.experiment_timeout))
+                node = directory / 'nodes' / start.node_id
+                node.mkdir(parents=True)
+                save(node / 'start.json', start)
+                starts.append(start)
+            # History belongs to Baker; each implementer gets only its task, plan and parent reference.
+            implementation_context = {**shared, **({'parent': context['parent']} if parent else {})}
+            for start in starts:
+                node = directory / 'nodes' / start.node_id
+                finish = await experiment(node, start, implementation_context, agents, deadline, checkpoint)
+                row, delta = summarize(delta, start, finish)
+                save(node / 'delta.json', row)
+                save(directory / 'delta.json', delta)
+                selected = delta.best_node_id or next((n.node_id for n in delta.nodes if n.result.status == 'completed'), None)
+                if selected is not None and selected != published:
+                    result = next(n.result for n in delta.nodes if n.node_id == selected)
+                    output_file = within(directory / 'nodes' / selected, result.submission_file)
+                    atomic_bytes(within(task_path.parent, preparation.output.filename), output_file.read_bytes())
+                    if delta.best_node_id:
+                        atomic_bytes(directory / 'best.json', json.dumps({'node_id': selected, 'value': result.value,
+                                     'submission_file': output_file.relative_to(directory).as_posix()}).encode())
+                    published = selected
+                completed = sum(n.result.status == 'completed' for n in delta.nodes)
+                update(completed_nodes=completed, failed_nodes=len(delta.nodes) - completed,
+                       warnings=report.warnings + ([f'{start.node_id}: {finish.error}'] if finish.error else []))
         update(status='ready' if delta.best_node_id and stop_reason == 'node_limit' else 'partial' if published else 'failed',
                stage='complete', stop_reason=stop_reason,
                checks=report.checks + ['saved_starts', 'recorded_finishes', 'computed_deltas'] + (['submission_written'] if published else []))

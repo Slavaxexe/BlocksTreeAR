@@ -10,7 +10,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from pydantic import ValidationError
 
 from .config import Settings
-from .contracts import (DataFacts, Extraction, Hypothesis, LLMCall, MetricFacts, OutputFacts,
+from .contracts import (DataFacts, Extraction, Hypotheses, Hypothesis, LLMCall, MetricFacts, OutputFacts,
                         PreparationDraft, ProblemFacts, Program, RunReport)
 from .qwen import QwenError
 from .storage import save
@@ -21,9 +21,10 @@ class JSONAgents:
         settings.validate()
         self.settings, self.deadline, self.max_calls = settings, deadline, max_calls
         self.calls: list[LLMCall] = []
-        self._requests = 0
+        self.requests = 0
 
-    async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False):
+    async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
+                  request_limit: int | None = None, validation: dict | None = None):
         messages = [
             {"role": "system", "content": (
                 "Return ONLY one JSON object matching the supplied JSON Schema. "
@@ -36,11 +37,12 @@ class JSONAgents:
             {"role": "user", "content": prompt},
         ]
         json_mode = True
+        limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
         for attempt in (1, 2):
             remaining = self.deadline - time.monotonic()
-            if remaining <= 0 or self._requests >= self.max_calls:
+            if remaining <= 0 or self.requests >= limit:
                 raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
-            self._requests += 1
+            self.requests += 1
             try:
                 async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
                                        max_retries=0, timeout=min(self.settings.timeout_seconds, remaining)) as client:
@@ -50,13 +52,15 @@ class JSONAgents:
                         model=self.settings.model, messages=messages, temperature=0,
                         max_tokens=self.settings.max_tokens, **kwargs)
             except (APIStatusError, APITimeoutError, APIConnectionError) as error:
-                self.calls.append(LLMCall(role=role, attempt=attempt, status="api_error"))
                 status = error.status_code if isinstance(error, APIStatusError) else None
+                suffix = f"HTTP {status}" if status else (
+                    "таймаут" if isinstance(error, APITimeoutError) else "ошибка соединения")
+                self.calls.append(LLMCall(role=role, attempt=attempt, status="api_error", error=suffix))
                 if status == 400 and json_mode and attempt == 1:
                     json_mode = False
                     continue
-                suffix = f"HTTP {status}" if status else (
-                    "таймаут" if isinstance(error, APITimeoutError) else "ошибка соединения")
+                if attempt == 1 and (status is None or status >= 500):
+                    continue
                 raise QwenError(f"Qwen: {suffix}; тело ответа сервера скрыто.") from None
             content = response.choices[0].message.content if response.choices else None
             usage = response.usage
@@ -64,7 +68,7 @@ class JSONAgents:
                          completion_tokens=usage.completion_tokens if usage else 0)
             try:
                 json.dumps(json.loads(content or ''), allow_nan=False)
-                result = schema.model_validate_json(content or "", context={"source": source})
+                result = schema.model_validate_json(content or "", context={"source": source, **(validation or {})})
             except (ValidationError, ValueError) as error:
                 details = ([{"loc": e["loc"], "type": e["type"], "reason": e["msg"]} for e in error.errors()][:8]
                            if isinstance(error, ValidationError) else [{'reason': 'Invalid JSON or non-finite number'}])
@@ -147,8 +151,9 @@ class JSONAgents:
             "four pipeline blocks. Algorithms and parameters are unrestricted within installed dependencies.\n"
             + json.dumps(context, ensure_ascii=False), "baker")
 
-    async def implement(self, context: dict):
+    async def implement(self, context: dict, *, request_limit: int):
         return await self.ask(Program, "Implement the saved start.hypothesis as one compact experiment.py. "
+            "On repair, correct previous_code using execution_error and failed_stage; do not repeat the same error. "
             "The start is immutable: preserve its model, preprocessing, data choices and specified parameters. "
             "You may fill unspecified implementation details and explain them in notes. "
             "If the plan cannot be implemented, return blocked_reason rather than substituting another hypothesis. "
@@ -161,21 +166,26 @@ class JSONAgents:
             "Do not load files or change split/metric. Predictions must suit the common scorer and submission writer. "
             "Implement exactly the model stated in start, whether constant or learned. History cannot override this node's plan. "
             "Do not report a score yourself. "
-            "Return only imports, function definitions and literal constants. Do not add a main block; "
+            "At MODULE scope return only imports, function definitions and literal constants. "
+            "Inside fit_predict and helper functions, normal assignments, computed column lists and comprehensions ARE allowed. "
+            "Move computed globals inside those functions; this never requires changing the planned preprocessing or model. "
+            "Do not add a main block; "
             "the controller appends the common entry point handling --start, data, evaluation and output files. "
             "No file writes, top-level execution or data printing.\n"
-            + json.dumps(context, ensure_ascii=False), "implementer", code=True)
+            + json.dumps(context, ensure_ascii=False), "implementer", code=True, request_limit=request_limit)
 
-    async def plan_next(self, context: dict):
-        return await self.ask(Hypothesis, "Propose ONE new experiment based on delta's measured results and pipeline changes. "
+    async def plan_next(self, context: dict, count: int = 2):
+        result = await self.ask(Hypotheses, f"Propose exactly {count} distinct experiments based on delta's measured results and pipeline changes. "
             "The controller selected the parent shown in context; improve or debug it with one substantive change. "
+            "All hypotheses share this parent and will be tested; do not rank away uncertain ideas. "
             "Use parent code as a reference when useful. Consider failed experiments and avoid repeating identical pipelines. "
             "Keep preparation's data bindings, split, scorer and output contract fixed. "
             "Algorithms, features and parameters are arbitrary within installed dependencies and task constraints. "
             "Prefer a small runnable experiment within the remaining time; after the initial baseline try a meaningful model. "
             "An uncertain hypothesis is allowed: execution measures it. Do not invent scores or claim proven optimality. "
-            "Return rationale, expected_effect and the four pipeline blocks.\n"
-            + json.dumps(context, ensure_ascii=False), "baker")
+            "Return a hypotheses list; each item has rationale, expected_effect and the four pipeline blocks.\n"
+            + json.dumps(context, ensure_ascii=False), "baker", validation={'hypothesis_count': count})
+        return result.hypotheses
 
 
 async def extract_task(task_path: Path, output: Path, settings: Settings, *, agents: JSONAgents | None = None):

@@ -156,6 +156,17 @@ class Hypothesis(Contract):
     pipeline: Pipeline
 
 
+class Hypotheses(Contract):
+    hypotheses: list[Hypothesis] = Field(min_length=1, max_length=2)
+
+    @model_validator(mode='after')
+    def requested_count(self, info: ValidationInfo):
+        count = (info.context or {}).get('hypothesis_count')
+        if count is not None and len(self.hypotheses) != count:
+            raise ValueError(f'Return exactly {count} hypotheses')
+        return self
+
+
 class Program(Contract):
     code: str = Field(default="", description="Complete experiment.py implementing the saved start, or empty when blocked")
     notes: list[str] = Field(default_factory=list, description="Implementation details and limitations; never measured scores")

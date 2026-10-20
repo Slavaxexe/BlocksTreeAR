@@ -82,7 +82,11 @@ def check_code(code: str, functions: tuple[str, ...]):
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             continue
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            ast.literal_eval(node.value)
+            try:
+                ast.literal_eval(node.value)
+            except (ValueError, TypeError):
+                raise ValueError(f'Line {node.lineno}: top-level assignments must be literal constants. '
+                                 'Move computed values inside a function. Computations and comprehensions are allowed there.') from None
             continue
         raise ValueError('Generated files must contain imports, functions and literal constants only')
 

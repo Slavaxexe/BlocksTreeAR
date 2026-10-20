@@ -163,7 +163,7 @@ nav{flex-wrap:wrap}
 <header><div><h1>Как работает ML-агент</h1><small>Условие → подготовка → эксперименты → delta → новые гипотезы</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel" hidden><p class="muted">Текущий путь до первого baseline. Состояния и JSON конкретного запуска — во вкладке «Извлечение».</p><div class="legend"><span><i class="dot"></i>Детерминированный Python</span><span><i class="dot llm"></i>Вызов Qwen API</span><span><i class="dot cpu"></i>Локальное обучение на CPU</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" viewBox="0 0 1120 820" role="img" aria-label="Текущая архитектура: извлечение, подготовка, генерация кода и первый baseline"></svg></div><p class="footnote">Qwen пишет prepare.py и experiment.py. Общая обвязка измеряет профиль, фиксирует split и вычисляет score. Цикл улучшения гипотез ещё не подключён.</p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">Цикл от условия до дерева экспериментов. Состояния и JSON конкретного запуска — во вкладках «Извлечение» и «Эксперименты».</p><div class="legend"><span><i class="dot"></i>Детерминированный Python</span><span><i class="dot llm"></i>Вызов Qwen API</span><span><i class="dot cpu"></i>Локальное обучение на CPU</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" viewBox="0 0 1120 820" role="img" aria-label="Текущая архитектура: извлечение, подготовка, пары гипотез и дерево экспериментов"></svg></div><p class="footnote">Qwen пишет prepare.py и experiment.py. Общая обвязка измеряет профиль, фиксирует split и вычисляет score. После baseline Baker предлагает по две гипотезы; до 10 нод и до 20 API-запросов реализации на ноду.</p></section>
 <section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><p id="tree-legend" class="legend"></p><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Граф сохранённых JSON"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранного блока"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
@@ -195,9 +195,9 @@ function architecture(){
  box(c,40,230,280,90,'04  Подготовка · Qwen',['Условие + инвентаризация файлов','Чтение, split, scorer → prepare.py'],'llm');
  box(c,420,230,280,90,'05  Исполнение Python',['Читаем реальные данные','Измеряем профиль; сохраняем split'],'cpu');
  box(c,800,230,280,90,'06  preparation.json',['Общие условия всех экспериментов','Профиль, split, метрика, проблемы']);
- box(c,40,420,280,90,'07  Baker · Qwen',['Baseline, затем новая гипотеза','Контекст + delta + выбранный родитель'],'llm');
+ box(c,40,420,280,90,'07  Baker · Qwen',['Baseline, затем по две гипотезы','Контекст + delta + выбранный родитель'],'llm');
  box(c,420,420,280,90,'08  start.json',['План Baker + ссылки на контекст','Сохраняется до реализации']);
- box(c,800,420,280,90,'09  Реализатор · Qwen',['experiment.py + заметки или отказ','Короткая проверка; план неизменен'],'llm');
+ box(c,800,420,280,90,'09  Реализатор · Qwen',['experiment.py + заметки или отказ','Проверки / исправления: до 20 запросов'],'llm');
  box(c,420,590,280,90,'10  Отдельный процесс',['Fit → predictions → общий scorer','finish.json + предсказания'],'cpu');
  box(c,40,590,280,90,'11  delta.json · Python',['Изменения pipeline и реальные score','Обновление истории и best'],'cpu');
  edge(c,'M 40 635 H 18 V 465 H 40',true);
@@ -307,7 +307,7 @@ function drawExtractionDetail(r) {
   d.append(element('small', 'mono', (key in roles?r.block_directory:r.directory)+'/'+(key === 'result' ? 'extraction.json' : key+'.json')));
   if (key === 'result' || key === 'preparation' || key === 'delta') {
     d.append(element('p', '', key==='result' ? 'extraction.json объединяет ответы с evidence. report.json хранит этап, ошибки и попытки API.'
-      : key==='delta' ? 'Python сравнил планы и измеренные score. Baker получает эту историю для следующей гипотезы.'
+      : key==='delta' ? 'Python сравнил планы и измеренные score. Baker получает эту историю для следующей пары гипотез.'
       : 'Qwen предложил чтение, split и scorer в prepare.py. Python измерил профиль и сохранил общие условия экспериментов.'));
     if (key === 'delta') {
       const button = element('button', '', 'Открыть дерево экспериментов'); button.onclick = () => showTab('tree'); d.append(button);
