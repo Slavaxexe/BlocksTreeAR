@@ -15,6 +15,59 @@ from .contracts import (DataFacts, Extraction, Hypotheses, Hypothesis, LLMCall, 
 from .qwen import QwenError
 from .storage import save
 
+BAKER_ATTEMPTS = 10
+
+
+def runtime_contract(preparation):
+    validation, profile = preparation.get('validation', {}), preparation.get('profile', {})
+    rows = {'fit': validation.get('fit_rows'), 'validation': validation.get('validation_rows'),
+            'test': profile.get('test', {}).get('rows')}
+    return {'entrypoint': 'fit_predict(fit, validation, test, preparation)',
+        'fit': 'Full training DataFrame: features AND target_columns; all train columns are available.',
+        'validation': 'DataFrame with target_columns removed; preserve supplied row order.',
+        'test': 'Test DataFrame; preserve supplied row order.',
+        'returns': 'Two prediction DataFrames compatible with score/write_submission in preparation_code.',
+        'rows': rows, 'rows_source': 'preparation.json: measured profile and fixed split',
+        'smoke_rows': {key: min(limit, rows[key]) if rows[key] is not None else None
+                       for key, limit in (('fit', 200), ('validation', 50), ('test', 50))}}
+
+
+def implementation_context(context):
+    """Keep the current plan authoritative; ancestor refusals are not execution facts."""
+    keys = ('task_text', 'preparation', 'preparation_code', 'installed_libraries',
+            'previous_code', 'execution_error', 'failed_stage', 'last_refusal', 'requests_left')
+    result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
+              **{key: context[key] for key in keys if key in context}}
+    if context.get('parent'):
+        parent = context['parent']
+        result['parent_reference'] = {'node_id': parent['start']['node_id'],
+            'pipeline': parent['start']['hypothesis']['pipeline'], 'code': parent['code']}
+    return result
+
+
+def baker_context(context):
+    """Lossless pipeline overrides avoid repeating shared blocks and full experiment records."""
+    parent = context['parent']
+    base = parent['start']['hypothesis']['pipeline']
+    def row(node):
+        result = node.get('result', {})
+        error = result.get('error')
+        return {'node_id': node['node_id'], 'parent_id': node['parent_id'],
+            'pipeline_changes': {k: v for k, v in node['hypothesis']['pipeline'].items()
+                                 if json.dumps(v, sort_keys=True) != json.dumps(base[k], sort_keys=True)},
+            'status': result.get('status', 'pending'), 'score': result.get('value'),
+            'duration_seconds': result.get('duration_seconds'), 'stage': result.get('stage'),
+            'source': f"nodes/{node['node_id']}/finish.json" if result else f"nodes/{node['node_id']}/start.json",
+            'error': error.splitlines()[-1][-1000:] if error else None,
+            'error_source': ('model_claim' if error.startswith('Implementation blocked:') else
+                             'runtime' if result.get('stage') in ('check', 'execution') else 'controller') if error else None}
+    keys = ('task_text', 'preparation', 'installed_libraries', 'remaining_nodes', 'remaining_seconds',
+            'experiment_timeout_seconds', 'available_parents')
+    return {**{k: context[k] for k in keys if k in context}, 'runtime_contract': runtime_contract(context['preparation']),
+        'parent': {'node_id': parent['start']['node_id'], 'pipeline': base, 'code': parent['code'],
+                   'score': parent['finish']['value']},
+        'history': [row(n) for n in context['delta']['nodes']], 'pending': [row(n) for n in context['pending']]}
+
 
 class JSONAgents:
     def __init__(self, settings: Settings, deadline: float, max_calls: int = 20, *, shared=None, node_id=None):
@@ -26,7 +79,8 @@ class JSONAgents:
         self.requests = 0
 
     async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
-                  request_limit: int | None = None, validation: dict | None = None):
+                  request_limit: int | None = None, validation: dict | None = None,
+                  attempts: int = 3, repairs: int = 1, refresh=None):
         messages = [
             {"role": "system", "content": (
                 "Return ONLY one JSON object matching the supplied JSON Schema. "
@@ -38,12 +92,17 @@ class JSONAgents:
             )},
             {"role": "user", "content": prompt},
         ]
-        json_mode = True
+        json_mode, invalid, feedback = True, 0, None
         limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
-        for attempt in (1, 2):
+        for attempt in range(1, attempts + 1):
             remaining = self.deadline - time.monotonic()
             if remaining <= 0 or self.requests >= limit or self.budget['requests'] >= self.budget['limit']:
                 raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
+            if refresh is not None:
+                prompt, validation = refresh()
+                if validation.get('restart'):
+                    messages[2:] = []
+                messages[1]['content'] = (f'PREVIOUS RESPONSE REJECTED: {feedback}\n\n' if feedback else '') + prompt
             self.requests += 1
             self.budget['requests'] += 1
             try:
@@ -61,11 +120,14 @@ class JSONAgents:
                 status = error.status_code if isinstance(error, APIStatusError) else None
                 suffix = f"HTTP {status}" if status else (
                     "таймаут" if isinstance(error, APITimeoutError) else "ошибка соединения")
+                if status is None and error.__cause__ is not None:
+                    suffix += ' / ' + type(error.__cause__).__name__
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
                 if status == 400 and json_mode and attempt == 1:
                     json_mode = False
                     continue
-                if attempt == 1 and (status is None or status >= 500):
+                if attempt < attempts and (status is None or status >= 500):
+                    await asyncio.sleep(min(2 ** attempt, 4, max(0., self.deadline - time.monotonic())))
                     continue
                 raise QwenError(f"Qwen: {suffix}; тело ответа сервера скрыто.") from None
             content = response.choices[0].message.content if response.choices else None
@@ -78,14 +140,20 @@ class JSONAgents:
             except (ValidationError, ValueError) as error:
                 details = ([{"loc": e["loc"], "type": e["type"], "reason": e["msg"]} for e in error.errors()][:8]
                            if isinstance(error, ValidationError) else [{'reason': 'Invalid JSON or non-finite number'}])
-                reason = json.dumps(details, ensure_ascii=False)
-                self.calls.append(LLMCall(status="invalid_json", error=reason, **stats))
-                if attempt == 2:
-                    raise QwenError(f"Qwen: роль {role} дважды нарушила JSON-контракт. {reason}") from None
-                messages += [{"role": "assistant", "content": (content or "")[:20000]},
-                             {"role": "user", "content": "Correct this JSON. Validation errors: " + json.dumps(details)}]
+                if (validation or {}).get('rejected'):
+                    details = {p: r['error'] for p, r in validation['rejected'].items()}
+                feedback = json.dumps(details, ensure_ascii=False)
+                self.calls.append(LLMCall(status="invalid_json", error=feedback, **stats))
+                invalid += 1
+                if invalid > repairs or attempt == attempts:
+                    raise QwenError(f"Qwen: роль {role} не вернула валидный JSON-контракт. {feedback}") from None
+                # Keep the last rejected answer and specific error; retries must not inflate the context.
+                messages[2:] = [{"role": "assistant", "content": (content or "")[:20000]},
+                                {"role": "user", "content": "Correct this JSON using the latest context above. Validation errors: " + feedback}]
             else:
-                self.calls.append(LLMCall(status="completed", **stats))
+                rejected = {p: r['error'] for p, r in (validation or {}).get('rejected', {}).items()}
+                self.calls.append(LLMCall(status='invalid_json' if rejected else 'completed',
+                                         error=json.dumps(rejected, ensure_ascii=False) if rejected else None, **stats))
                 return result
         raise QwenError("Qwen не вернул валидный контракт.")
 
@@ -155,10 +223,12 @@ class JSONAgents:
             "Its purpose is to exercise the complete workflow. Use preparation's "
             "fixed validation and metric. Describe data selection, preprocessing, model and training in the "
             "four pipeline blocks. Algorithms and parameters are unrestricted within installed dependencies.\n"
-            + json.dumps(context, ensure_ascii=False), "baker")
+            + json.dumps({**context, 'runtime_contract': runtime_contract(context['preparation'])}, ensure_ascii=False),
+            "baker", attempts=BAKER_ATTEMPTS, repairs=BAKER_ATTEMPTS - 1)
 
     async def implement(self, context: dict, *, request_limit: int):
         return await self.ask(Program, "Implement the saved start.hypothesis as one compact experiment.py. "
+            "CURRENT NODE: only context.start defines your assignment; parent_reference is optional reference code. "
             "On repair, correct previous_code using execution_error and failed_stage; do not repeat the same error. "
             "The start is immutable: preserve its model, preprocessing, data choices and specified parameters. "
             "You may fill unspecified implementation details and explain them in notes. "
@@ -169,6 +239,11 @@ class JSONAgents:
             "Define fit_predict(fit, validation, test, preparation) returning TWO pandas DataFrames: "
             "validation predictions and test predictions, in the supplied row order. "
             "fit contains training targets; validation has target columns removed. preparation is a dict. "
+            "runtime_contract describes the actual inputs supplied later by the controller. "
+            "You can write code using these frames without seeing raw data rows now. "
+            "last_refusal is an UNVERIFIED model claim, not a runtime error: reconsider it against the contract, "
+            "measured profile and current start, and attempt the implementation when possible. "
+            "Handle unseen categories and degenerate smoke samples within the saved plan when possible. "
             "Do not load files or change split/metric. Predictions must suit the common scorer and submission writer. "
             "Implement exactly the model stated in start, whether constant or learned. History cannot override this node's plan. "
             "Do not report a score yourself. "
@@ -178,16 +253,25 @@ class JSONAgents:
             "Do not add a main block; "
             "the controller appends the common entry point handling --start, data, evaluation and output files. "
             "No file writes, top-level execution or data printing.\n"
-            + json.dumps(context, ensure_ascii=False), "implementer", code=True, request_limit=request_limit)
+            + json.dumps(implementation_context(context), ensure_ascii=False), "implementer", code=True, request_limit=request_limit)
 
-    async def plan_next(self, context: dict, count: int = 2):
-        result = await self.ask(Hypotheses, f"Propose exactly {count} experiments: first improve, then explore if two are requested. "
+    async def plan_next(self, context, count: int = 2, *, rejections=None):
+        prompt = ("Return exactly the requested_purposes, one proposal per purpose, in that order. "
             "The improve proposal extends the selected leader in parent with one substantive change. "
             "The explore proposal tests a DIFFERENT model family or a substantially different pipeline, not small tuning of the leader. "
             "It may revive a previously losing branch; one bad result does not disqualify a family forever. "
             "Choose each parent_id from available_parents; improve must use parent's node_id. "
-            "For the first pair after the constant baseline, propose two different nonconstant approaches. "
+            "When both purposes are requested after the constant baseline, propose two different nonconstant approaches. "
             "Consider pending plans as already scheduled: avoid duplicating them or previous pipelines. "
+            "Each proposal.pipeline must differ from EVERY pipeline in history and pending. "
+            "Changing only rationale or expected_effect does not make a new pipeline. "
+            "History and pending store pipeline_changes: replace those whole blocks in parent.pipeline to reconstruct each plan. "
+            "Omitted blocks are identical to parent.pipeline. Scores and duration_seconds are measured; duration includes code generation. "
+            "History is scoped evidence from the referenced files: error_source=model_claim is an unverified refusal, "
+            "not proof that a plan is impossible. Runtime failures describe that execution, not a permanent ban on a family. "
+            "Use profile missing/distinct counts, observed errors and time costs to justify the next experiment; do not invent diagnostics. "
+            "If correction[purpose].action is new_direction, abandon that candidate: for explore choose a different model family "
+            "or substantially different preprocessing; for improve choose a different substantive change to the leader. "
             "Use parent code as a reference when useful. All accepted proposals will be tested. "
             "Keep preparation's data bindings, split, scorer and output contract fixed. "
             "The executor receives labeled fit rows and UNLABELED validation/test rows; do not require refitting on full labeled train. "
@@ -197,11 +281,49 @@ class JSONAgents:
             "An uncertain hypothesis is allowed: execution measures it. Do not invent scores or claim proven optimality. "
             "Each execution must fit experiment_timeout_seconds; remaining_seconds is the whole run's budget. "
             "Duration_seconds includes code generation and checks, not just training. "
-            "Return hypotheses entries containing purpose, parent_id and hypothesis (rationale, expected_effect, four pipeline blocks).\n"
-            + json.dumps(context, ensure_ascii=False), "baker", validation={'hypothesis_count': count,
-                'parent_ids': context['available_parents'], 'leader_id': context['parent']['start']['node_id'],
-                'used_pipelines': [n['hypothesis']['pipeline'] for n in context['delta']['nodes'] + context['pending']]})
-        return result.hypotheses
+            "Return hypotheses entries containing purpose, parent_id and hypothesis (rationale, expected_effect, four pipeline blocks).\n")
+        purposes, previous = ['improve', 'explore'][:count], {}
+        rejections = rejections if rejections is not None else {}
+        request_limit = min(self.max_calls, self.requests + BAKER_ATTEMPTS)
+        def remember():
+            for purpose, failure in previous.get('rejected', {}).items():
+                proposal = failure['proposal'] or {}
+                pipeline = proposal.get('hypothesis', {}).get('pipeline') if isinstance(proposal.get('hypothesis'), dict) else None
+                fingerprint = hashlib.sha256(json.dumps(pipeline or proposal, sort_keys=True).encode()).hexdigest()
+                last = rejections.get(purpose, {})
+                repeats = last.get('repeats', 0) + 1 if last.get('fingerprint') == fingerprint else 1
+                rejections[purpose] = {'pipeline': pipeline, 'error': failure['error'], 'repeats': repeats,
+                    'fingerprint': fingerprint, 'action': 'new_direction' if repeats >= 2 else 'repair'}
+            previous.get('rejected', {}).clear()
+        def refresh():
+            nonlocal previous
+            remember()
+            current = context() if callable(context) else context
+            corrections = {p: {k: v for k, v in rejections[p].items() if k != 'fingerprint'} for p in purposes if p in rejections}
+            payload = {**baker_context(current), 'requested_purposes': purposes,
+                       'correction': corrections, 'requests_left': request_limit - self.requests}
+            previous = {'accept_partial': True, 'purposes': purposes, 'rejected': {},
+                'restart': any(c['action'] == 'new_direction' for c in corrections.values()),
+                'parent_ids': current['available_parents'],
+                'leader_id': current['parent']['start']['node_id'],
+                'used_pipelines': {n['node_id']: n['hypothesis']['pipeline'] for n in current['delta']['nodes'] + current['pending']}}
+            errors = {p: {'error': c['error'], 'action': c['action']} for p, c in corrections.items()}
+            feedback = 'REJECTED PROPOSALS: ' + json.dumps(errors, ensure_ascii=False) + '\n' if errors else ''
+            return feedback + prompt + json.dumps(payload, ensure_ascii=False), previous
+        try:
+            while purposes:
+                attempts = request_limit - self.requests
+                if attempts <= 0:
+                    raise QwenError('Baker: исчерпаны 10 запросов; не приняты: ' + ', '.join(purposes))
+                result = await self.ask(Hypotheses, '', 'baker', refresh=refresh, request_limit=request_limit,
+                                       attempts=attempts, repairs=attempts - 1)
+                remember()
+                for proposal in result.hypotheses:
+                    purposes.remove(proposal.purpose)
+                    rejections.pop(proposal.purpose, None)
+                yield result.hypotheses
+        finally:
+            remember()
 
 
 async def extract_task(task_path: Path, output: Path, settings: Settings, *, agents: JSONAgents | None = None):

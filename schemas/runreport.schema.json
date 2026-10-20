@@ -142,6 +142,7 @@
             "time_budget",
             "llm_error",
             "preparation_failed",
+            "baseline_failed",
             "error"
           ],
           "type": "string"

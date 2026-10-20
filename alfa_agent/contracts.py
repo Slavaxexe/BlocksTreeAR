@@ -161,25 +161,55 @@ class Proposal(Contract):
     parent_id: NodeID
     hypothesis: Hypothesis
 
+    def check(self, context):
+        if 'parent_ids' in context and self.parent_id not in context['parent_ids']:
+            raise ValueError('Parent must be one of the available completed nodes')
+        if self.purpose == 'improve' and context.get('leader_id', self.parent_id) != self.parent_id:
+            raise ValueError('The improve proposal must extend the selected leader')
+        duplicates = [f'{self.purpose}={node_id}' for node_id, pipeline in context.get('used_pipelines', {}).items()
+                      if self.hypothesis.pipeline.model_dump() == pipeline]
+        if duplicates:
+            raise ValueError('Duplicate pipelines: ' + ', '.join(duplicates) +
+                             '. Change the pipeline, not only rationale or expected_effect')
+
 
 class Hypotheses(Contract):
     hypotheses: list[Proposal] = Field(min_length=1, max_length=2)
 
+    @model_validator(mode='before')
+    @classmethod
+    def accept_individually(cls, data, info: ValidationInfo):
+        context = info.context or {}
+        if not context.get('accept_partial') or not isinstance(data, dict) or not isinstance(data.get('hypotheses'), list):
+            return data
+        accepted, used = [], dict(context.get('used_pipelines', {}))
+        for purpose in context['purposes']:
+            entries = [p for p in data['hypotheses'] if isinstance(p, dict) and p.get('purpose') == purpose]
+            try:
+                if len(entries) != 1:
+                    raise ValueError(f'Return exactly one {purpose} proposal')
+                proposal = Proposal.model_validate(entries[0])
+                proposal.check({**context, 'used_pipelines': used})
+            except ValueError as error:
+                context['rejected'][purpose] = {'error': str(error), 'proposal': entries[0] if entries else None}
+            else:
+                accepted.append(proposal)
+                used[f'accepted_{purpose}'] = proposal.hypothesis.pipeline.model_dump()
+        return {**data, 'hypotheses': accepted}
+
     @model_validator(mode='after')
     def requested_count(self, info: ValidationInfo):
         context = info.context or {}
+        if context.get('accept_partial'):
+            return self
         count = context.get('hypothesis_count')
         if count is not None and len(self.hypotheses) != count:
             raise ValueError(f'Return exactly {count} hypotheses')
-        if [p.purpose for p in self.hypotheses] != ['improve', 'explore'][:len(self.hypotheses)]:
+        purposes = context.get('purposes', ['improve', 'explore'][:len(self.hypotheses)])
+        if [p.purpose for p in self.hypotheses] != purposes:
             raise ValueError('Return improve first, then explore if two proposals were requested')
         for proposal in self.hypotheses:
-            if 'parent_ids' in context and proposal.parent_id not in context['parent_ids']:
-                raise ValueError('Parent must be one of the available completed nodes')
-            if proposal.purpose == 'improve' and context.get('leader_id', proposal.parent_id) != proposal.parent_id:
-                raise ValueError('The improve proposal must extend the selected leader')
-            if proposal.hypothesis.pipeline.model_dump() in context.get('used_pipelines', []):
-                raise ValueError('Pipeline already evaluated or pending; propose a different one')
+            proposal.check(context)
         if len(self.hypotheses) == 2 and self.hypotheses[0].hypothesis.pipeline == self.hypotheses[1].hypothesis.pipeline:
             raise ValueError('The two proposals must have different pipelines')
         return self
@@ -294,7 +324,7 @@ class RunReport(Contract):
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     llm_calls: list[LLMCall] = Field(default_factory=list)
-    stop_reason: Literal["node_limit", "time_budget", "llm_error", "preparation_failed", "error"] | None = None
+    stop_reason: Literal["node_limit", "time_budget", "llm_error", "preparation_failed", "baseline_failed", "error"] | None = None
     completed_nodes: int = Field(default=0, ge=0)
     failed_nodes: int = Field(default=0, ge=0)
     running_nodes: list[NodeID] = Field(default_factory=list)

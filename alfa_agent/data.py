@@ -52,9 +52,15 @@ def profile(tables: dict) -> dict:
     for role, frame in tables.items():
         if not isinstance(frame, pd.DataFrame):
             raise ValueError(f"load_data must return DataFrames, invalid role: {role}")
-        result[role] = {'rows': len(frame), 'columns': {
-            str(column): {'dtype': str(frame[column].dtype), 'missing': int(frame[column].isna().sum())}
-            for column in frame.columns}}
+        columns = {}
+        for column in frame.columns:
+            series = frame[column]
+            try:
+                distinct = int(series.nunique())
+            except TypeError:  # Structured cells may be unhashable; profiling must still support them.
+                distinct = None
+            columns[str(column)] = {'dtype': str(series.dtype), 'missing': int(series.isna().sum()), 'distinct': distinct}
+        result[role] = {'rows': len(frame), 'columns': columns}
     return result
 
 
