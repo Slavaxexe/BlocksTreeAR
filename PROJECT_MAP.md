@@ -16,7 +16,7 @@ AlfaHakaton/
 │   ├── contracts.py         Pydantic-контракты фактов, подготовки, плана, кода, start / finish / report
 │   ├── agents.py            Четыре extractor’а, preparer, baker, реализатор; bounded JSON-repair
 │   ├── data.py              Инвентаризация, профиль таблиц, пути, хеши и интерфейс генерируемого кода
-│   ├── runner.py            Один сквозной запуск, исправления до start, subprocess / таймер, публикация
+│   ├── runner.py            План до реализации, bounded repair, subprocess / таймер, публикация
 │   ├── worker.py            Исполнение prepare.py, smoke-test, модель, общий scorer, запись finish
 │   └── storage.py           Атомарная запись, сериализация и загрузка контрактов
 ├── tests/
@@ -41,7 +41,7 @@ AlfaHakaton/
 │   ├── TASK_BRIEF.md        Требования организаторов из исходного PDF
 │   └── ...                 Источники, инвентаризация данных, настройка API, интерфейс vendor baseline
 ├── vendor/                  Неизменённый baseline организаторов и их requirements
-├── research_notes/, reports/ Исследовательские заметки и оценка исходной идеи
+├── history/                 Исторические research_notes / reports и первая проверка API
 ├── .env.example             Имена настроек без ключа
 ├── pyproject.toml, uv.lock  Зависимости и зафиксированное окружение
 └── README.md                Запуск и поведение
@@ -52,7 +52,8 @@ AlfaHakaton/
 submission исключены из git. Данные в каждую ноду не копируются.
 
 `solution.py` → CLI baseline → `runner.run()` → extractor’ы → prepare.py через
-worker → baker / реализатор → experiment.py через общий worker → finish / output.
+worker → baker → start.json → реализатор → проверка → experiment.py через worker → finish / output.
+Start неизменен; finish хранит хеши плана / кода, заметки и этап возможного отказа.
 `viewer.py` независимо читает известные JSON и два известных исходника; CSV,
 .env, API и выполнение кода ему не нужны. Конкретные загрузчик и scorer создаются
 под условие; в контроллере не зашиты публичные target / имена файлов / метрики.

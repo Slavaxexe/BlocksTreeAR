@@ -196,8 +196,8 @@ function architecture(){
  box(c,420,230,280,90,'05  Исполнение Python',['Читаем реальные данные','Измеряем профиль; сохраняем split'],'cpu');
  box(c,800,230,280,90,'06  preparation.json',['Общие условия всех экспериментов','Профиль, split, метрика, проблемы']);
  box(c,40,420,280,90,'07  Baker · Qwen',['План простейшего baseline','Данные, preprocessing, модель, fit'],'llm');
- box(c,420,420,280,90,'08  Реализатор · Qwen',['Один experiment.py','Короткая проверка на части данных'],'llm');
- box(c,800,420,280,90,'09  start.json',['План + ссылки + хеш исходника','После записи start код фиксируется']);
+ box(c,420,420,280,90,'08  start.json',['План Baker + ссылки на контекст','Сохраняется до реализации']);
+ box(c,800,420,280,90,'09  Реализатор · Qwen',['experiment.py + заметки или отказ','Короткая проверка; план неизменен'],'llm');
  box(c,420,590,280,90,'10  Отдельный процесс',['Fit → predictions → общий scorer','finish.json + предсказания'],'cpu');
  box(c,40,590,280,90,'11  Готовый baseline',['Файл ответа рядом с условием','Best — только при вычисленном score']);
 }
@@ -286,14 +286,15 @@ function drawExtraction(r) {
     'preparation.json', p?.status??'Файл ещё не записан', p?.metric?.name??''],
     p?.status==='blocked'?'failed':p?.status==='ready'?'completed':p?.status==='partial'?'partial':'pending');
   card('node_000', 500, 410, 215, 'node_000 · Baseline', [
-    n ? 'start + experiment.py' : 'Start ещё не записан', f ? statuses[f.status]??f.status : 'Finish ещё не записан',
+    n ? n.code ? 'start + experiment.py' : 'Start сохранён · кода ещё нет' : 'Start ещё не записан',
+    f ? (statuses[f.status]??f.status)+(f.stage?' · '+f.stage:'') : 'Finish ещё не записан',
     f?.value !== null && f?.value !== undefined ? 'Score '+fmt(f.value) : 'Score не вычислен'], f?.status??'pending');
 }
 function drawExtractionDetail(r) {
   const d = $('detail'), key = selected, report = r.report; d.replaceChildren();
   if (key === 'node_000') {
     if (r.nodes.some(n=>n.id===key)) { drawDetail(r); return; }
-    d.append(element('h2', '', 'Baseline'), element('p', '', 'start.json появится после генерации кода и короткой проверки запуска.')); return;
+    d.append(element('h2', '', 'Baseline'), element('p', '', 'Baker сохранит start.json до реализации. Затем появятся код и результат либо причина отказа.')); return;
   }
   d.append(element('h2', '', key === 'result' ? 'Извлечение и сборка' : key==='preparation'?'Подготовка данных':roles[key]+' · '+key+'.json'));
   d.append(element('small', 'mono', (key in roles?r.block_directory:r.directory)+'/'+(key === 'result' ? 'extraction.json' : key+'.json')));
@@ -392,6 +393,11 @@ function drawDetail(r) {
   d.append(element('h3', '', 'Гипотеза'), element('p', '', n.start.hypothesis?.rationale ?? '—'));
   d.append(element('small', '', n.start.hypothesis?.expected_effect ?? ''));
   if (n.finish?.error) d.append(element('p', 'error-text', n.finish.error));
+  if (n.finish?.stage) d.append(element('p', 'muted', 'Этап результата: '+({implementation:'Реализация',check:'Проверка кода',execution:'Запуск'}[n.finish.stage]??n.finish.stage)));
+  if (n.finish?.notes?.length) {
+    const list = element('ul', 'changes'); for (const note of n.finish.notes) list.append(element('li', '', note));
+    d.append(element('h3', '', 'Заметки реализатора'), list);
+  }
   const comparisons = n.delta?.comparisons ?? [];
   if (comparisons.length) d.append(element('h3', '', 'Сравнения'));
   for (const row of comparisons) {

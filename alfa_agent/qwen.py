@@ -43,8 +43,7 @@ def ask_qwen(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                # max_tokens follows the baseline's compatible chat interface.
-                # Support by the organizer's actual endpoint still needs a live check.
+                # The organizer's endpoint uses this compatible chat interface.
                 max_tokens=settings.max_tokens,
             )
     except APITimeoutError:

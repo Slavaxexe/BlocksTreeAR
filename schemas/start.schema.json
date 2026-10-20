@@ -25,26 +25,6 @@
       "title": "Hypothesis",
       "type": "object"
     },
-    "Implementation": {
-      "additionalProperties": false,
-      "properties": {
-        "file": {
-          "default": "experiment.py",
-          "title": "File",
-          "type": "string"
-        },
-        "sha256": {
-          "pattern": "^[a-f0-9]{64}$",
-          "title": "Sha256",
-          "type": "string"
-        }
-      },
-      "required": [
-        "sha256"
-      ],
-      "title": "Implementation",
-      "type": "object"
-    },
     "Pipeline": {
       "additionalProperties": false,
       "properties": {
@@ -78,8 +58,8 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": 2,
-      "default": 2,
+      "const": 3,
+      "default": 3,
       "title": "Schema Version",
       "type": "integer"
     },
@@ -118,11 +98,18 @@
       "title": "Preparation Sha256",
       "type": "string"
     },
+    "context": {
+      "description": "Source references, hashes and installed libraries; shared data is not duplicated",
+      "title": "Context",
+      "type": "object"
+    },
     "hypothesis": {
       "$ref": "#/$defs/Hypothesis"
     },
     "implementation": {
-      "$ref": "#/$defs/Implementation"
+      "default": "experiment.py",
+      "title": "Implementation",
+      "type": "string"
     },
     "outputs": {
       "additionalProperties": {
@@ -140,7 +127,6 @@
   "required": [
     "preparation_sha256",
     "hypothesis",
-    "implementation",
     "outputs",
     "timeout_seconds"
   ],

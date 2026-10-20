@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from .agents import JSONAgents, extract_task
 from .config import Settings
-from .contracts import Extraction, Finish, Implementation, Preparation, Start
+from .contracts import Extraction, Finish, Preparation, Start
 from .data import check_code, file_hash, inventory, within
 from .storage import atomic_bytes, load, save
 
@@ -69,6 +69,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
         report = report.model_copy(update={**changes, 'llm_calls': list(agents.calls)})
         save(directory / 'report.json', report)
 
+    start, node, code_hash, start_hash = None, None, None, None
+    finished = False
+    notes, stage, started = [], 'implementation', time.monotonic()
     try:
         extraction = load(directory / 'extraction.json', Extraction)
         update(status='running', stage='preparation')
@@ -100,18 +103,34 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 context.update(previous_code=draft.code, execution_error=str(error)[-5000:])
                 update(warnings=report.warnings + ['Preparation required one code repair'])
         update(stage='baseline', checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
-        shared = {'extraction': extraction.model_dump(mode='json'), 'preparation': preparation.model_dump(mode='json'),
+        shared = {'task_text': task_path.read_text(encoding='utf-8'),
+                  'extraction': extraction.model_dump(mode='json'), 'preparation': preparation.model_dump(mode='json'),
                   'installed_libraries': {name: version(name) for name in ('numpy', 'pandas', 'scipy', 'scikit-learn')}}
         hypothesis = await agents.plan_baseline(shared)
         node = directory / 'nodes' / 'node_000'
         node.mkdir(parents=True)
-        context = {**shared, 'hypothesis': hypothesis.model_dump(mode='json'),
+        start = Start(hypothesis=hypothesis, preparation_sha256=file_hash(directory / 'preparation.json'),
+            context={'task': str(task_path), 'task_sha256': report.task_sha256,
+                     'extraction': '../../extraction.json', 'extraction_sha256': file_hash(directory / 'extraction.json'),
+                     'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries']},
+            outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
+            timeout_seconds=float(options.experiment_timeout))
+        save(node / 'start.json', start)
+        start_hash, started = file_hash(node / 'start.json'), time.monotonic()
+        update(checks=report.checks + ['saved_start'])
+        context = {**shared, 'start': load(node / 'start.json', Start).model_dump(mode='json'),
                    'preparation_code': (directory / 'prepare.py').read_text()}
         for attempt in range(2):
+            stage = 'implementation'
             program = await agents.implement(context)
+            notes = list(dict.fromkeys(notes + program.notes))
+            if program.blocked_reason:
+                raise ValueError('Implementation blocked: ' + program.blocked_reason)
+            stage = 'check'
             try:
                 check_code(program.code, ('fit_predict',))
-                atomic_bytes(node / 'experiment.py', (program.code + ENTRY).encode())
+                atomic_bytes(node / start.implementation, (program.code + ENTRY).encode())
+                code_hash = file_hash(node / start.implementation)
                 await process(['-m', 'alfa_agent.worker', '--check', str(node),
                                '--preparation', str(directory / 'preparation.json')], node,
                               node / 'execution.log', deadline, min(45, options.experiment_timeout))
@@ -120,28 +139,21 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 if attempt:
                     raise
                 context.update(previous_code=program.code, execution_error=str(error)[-5000:])
-                update(warnings=report.warnings + ['Baseline required one code repair before start'])
-        start = Start(hypothesis=program.hypothesis, preparation_sha256=file_hash(directory / 'preparation.json'),
-            implementation=Implementation(sha256=file_hash(node / 'experiment.py')),
-            outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
-            timeout_seconds=float(options.experiment_timeout))
-        save(node / 'start.json', start)
-        started = time.monotonic()
-        try:
-            await process([str(node / 'experiment.py'), '--start', str(node / 'start.json')], node,
-                          node / 'execution.log', deadline, options.experiment_timeout)
-            finish = load(node / 'finish.json', Finish)
-            if finish.code_sha256 != start.implementation.sha256 or finish.preparation_sha256 != start.preparation_sha256:
-                raise ValueError('Finish does not match its recorded code and preparation')
-            if finish.status != 'completed':
-                raise ValueError(finish.error or 'Experiment failed')
-        except (ValueError, OSError, TimeoutError) as error:
-            finish = Finish(status='timeout' if isinstance(error, TimeoutError) else 'failed',
-                metric=preparation.metric, duration_seconds=time.monotonic() - started,
-                preparation_sha256=start.preparation_sha256, code_sha256=start.implementation.sha256,
-                error=str(error)[-5000:])
-            save(node / 'finish.json', finish)
-            raise
+                update(warnings=report.warnings + ['Baseline required one code repair; saved start is unchanged'])
+        if file_hash(node / 'start.json') != start_hash or file_hash(directory / 'preparation.json') != start.preparation_sha256:
+            raise ValueError('Saved plan or preparation changed during implementation')
+        stage = 'execution'
+        await process([str(node / start.implementation), '--start', str(node / 'start.json'),
+                       '--start-sha256', start_hash, '--code-sha256', code_hash], node,
+                      node / 'execution.log', deadline, options.experiment_timeout)
+        finish = load(node / 'finish.json', Finish)
+        if (finish.code_sha256, finish.preparation_sha256, finish.start_sha256) != (code_hash, start.preparation_sha256, start_hash):
+            raise ValueError('Finish does not match its recorded plan, code and preparation')
+        if finish.status != 'completed':
+            raise ValueError(finish.error or 'Experiment failed')
+        finish = finish.model_copy(update={'notes': notes, 'duration_seconds': time.monotonic() - started})
+        save(node / 'finish.json', finish)
+        finished = True
         output_file = within(node, finish.submission_file)
         atomic_bytes(within(task_path.parent, preparation.output.filename), output_file.read_bytes())
         if finish.value is not None and preparation.metric.direction is not None:
@@ -153,5 +165,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
         update(status='ready' if finish.evaluation_status == 'completed' else 'partial', stage='complete',
                checks=report.checks + ['code_smoke_test', 'executed_baseline', 'submission_written'])
     except Exception as error:
-        update(status='failed', errors=report.errors + [str(error).replace(settings.api_key, '[REDACTED]')[-5000:]])
+        message = str(error).replace(settings.api_key, '[REDACTED]')[-5000:]
+        if start_hash is not None and not finished:
+            save(node / 'finish.json', Finish(status='timeout' if isinstance(error, TimeoutError) else 'failed',
+                stage=stage, metric=preparation.metric, duration_seconds=time.monotonic() - started,
+                preparation_sha256=start.preparation_sha256, start_sha256=start_hash,
+                code_sha256=code_hash, notes=notes, error=message))
+        update(status='failed', errors=report.errors + [message])
     return directory, report

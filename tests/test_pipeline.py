@@ -83,14 +83,14 @@ def fixture(directory):
         'Hypothesis': {'rationale': 'Constant baseline', 'expected_effect': 'Exercise the workflow',
             'pipeline': {'data': {'source': 'preparation'}, 'preprocessing': {},
                          'model': {'family': 'constant', 'strategy': 'mean'}, 'training': {}}},
-        'Program': {'code': PROGRAM},
+        'Program': {'code': PROGRAM, 'notes': ['The target name is taken from preparation.']},
     }
-    answers['Program']['hypothesis'] = answers['Hypothesis']
     return path, answers
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, directory, *, repair=False, missing_metric=False, revise_plan=False, broken_metric=False):
+    async def exercise(self, directory, *, repair=False, missing_metric=False, blocked=False, broken_metric=False,
+                       invalid_program=False, broken_code=False, execution_timeout=False):
         path, answers = fixture(directory)
         if missing_metric:
             answers['PreparationDraft']['metric']['status'] = 'needs_implementation'
@@ -101,18 +101,31 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             answers['PreparationDraft']['code'] = PREPARE.replace(
                 'return float(np.mean(np.abs(reference[column].to_numpy() - predictions[column].to_numpy())) + 7)',
                 'raise ValueError("invalid metric definition")')
-        if revise_plan:
+        if blocked:
             answers['Hypothesis'] = {**answers['Hypothesis'], 'pipeline': {**answers['Hypothesis']['pipeline'], 'model': {'family': 'unavailable_model'}}}
-        seen = []
+            answers['Program'] = {'blocked_reason': 'The planned model is unavailable.', 'notes': ['No model substitution was made.']}
+        if invalid_program:
+            answers['Program'] = {'code': ''}
+        if broken_code:
+            answers['Program']['code'] = PROGRAM.replace('value = float(fit[column].mean())', 'raise ValueError("cannot run")')
+        seen, saved_starts = [], []
         run_directory = directory / 'artifacts' / 'run'
         def handler(request):
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
             answer = answers[title]
+            if title == 'Program':
+                saved = (run_directory / 'nodes/node_000/start.json').read_bytes()
+                saved_starts.append(saved)
+                self.assertTrue(all(value == saved for value in saved_starts))
+                context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
+                self.assertEqual(context['start'], json.loads(saved))
+                self.assertIn('task_text', context)
+                self.assertIn('preparation_code', context)
+                self.assertEqual(context['start']['context']['installed_libraries'], context['installed_libraries'])
             if title == 'Program' and repair and title not in seen:
                 answer = {**answers['Program'], 'code': PROGRAM.replace('value = float(fit[column].mean())', 'raise ValueError("repair me")')}
             elif title == 'Program' and repair:
-                self.assertFalse((run_directory / 'nodes/node_000/start.json').exists())
                 self.assertIn('repair me', body['messages'][-1]['content'])
             seen.append(title)
             return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0,
@@ -121,7 +134,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         def client(**kwargs):
             return AsyncOpenAI(api_key='fake-secret', base_url='https://qwen.example/v1', max_retries=0,
                                http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-        with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+        async def launch(arguments, *args):
+            if execution_timeout and '--start' in arguments:
+                raise TimeoutError('Experiment time limit')
+            return await process(arguments, *args)
+        with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), patch('alfa_agent.runner.process', side_effect=launch):
             result = await run(path, Options(time_budget=40, experiment_timeout=12, output_dir=run_directory),
                                Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         return result, seen
@@ -141,7 +158,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             node = root / 'nodes/node_000'
             start, finish = load(node / 'start.json', Start), load(node / 'finish.json', Finish)
             self.assertEqual(start.preparation_sha256, file_hash(root / 'preparation.json'))
-            self.assertEqual(start.implementation.sha256, file_hash(node / 'experiment.py'))
+            self.assertEqual(start.schema_version, 3)
+            self.assertEqual(start.implementation, 'experiment.py')
+            self.assertEqual(finish.start_sha256, file_hash(node / 'start.json'))
+            self.assertEqual(finish.code_sha256, file_hash(node / 'experiment.py'))
+            self.assertEqual(finish.notes, ['The target name is taken from preparation.'])
             self.assertAlmostEqual(finish.value, 47.)  # Fit mean=31; validation target mean=71; +7.
             self.assertEqual(finish.evaluation_status, 'completed')
             submission = pd.read_csv(node / 'result.tsv', sep='\t', dtype={'record': str})
@@ -152,7 +173,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((root / 'nodes/node_001').exists())
             self.assertNotIn('fake-secret', (root / 'report.json').read_text())
 
-    async def test_code_repair_happens_before_final_start_and_is_bounded(self):
+    async def test_code_repair_preserves_the_already_saved_start(self):
         with tempfile.TemporaryDirectory() as temporary:
             (root, report), seen = await self.exercise(Path(temporary), repair=True)
             self.assertEqual(report.status, 'ready', report.errors)
@@ -172,13 +193,49 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((root / 'nodes/node_000/result.tsv').is_file())
             self.assertFalse((root / 'best.json').exists())
 
-    async def test_start_records_realizer_plan_instead_of_unimplemented_baker_proposal(self):
+    async def test_blocked_implementation_preserves_baker_plan_and_records_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
-            (root, report), _ = await self.exercise(Path(temporary), revise_plan=True)
-            self.assertEqual(report.status, 'ready', report.errors)
-            start = load(root / 'nodes/node_000/start.json', Start)
-            self.assertEqual(start.hypothesis.pipeline.model['family'], 'constant')
-            self.assertNotIn('unavailable_model', start.model_dump_json())
+            (root, report), seen = await self.exercise(Path(temporary), blocked=True)
+            self.assertEqual(report.status, 'failed')
+            node = root / 'nodes/node_000'
+            start, finish = load(node / 'start.json', Start), load(node / 'finish.json', Finish)
+            self.assertEqual(start.hypothesis.pipeline.model['family'], 'unavailable_model')
+            self.assertEqual((finish.status, finish.stage), ('failed', 'implementation'))
+            self.assertIn('unavailable', finish.error)
+            self.assertIsNone(finish.code_sha256)
+            self.assertEqual(finish.notes, ['No model substitution was made.'])
+            self.assertEqual(seen.count('Program'), 1)
+            self.assertFalse((node / 'experiment.py').exists())
+
+    async def test_invalid_implementation_response_still_has_finish(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), invalid_program=True)
+            self.assertEqual(report.status, 'failed')
+            finish = load(root / 'nodes/node_000/finish.json', Finish)
+            self.assertEqual(finish.stage, 'implementation')
+            self.assertEqual(seen.count('Program'), 2)
+            self.assertIsNone(finish.code_sha256)
+
+    async def test_failed_check_records_attempted_code_and_stops_after_one_repair(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), broken_code=True)
+            self.assertEqual(report.status, 'failed')
+            node = root / 'nodes/node_000'
+            finish = load(node / 'finish.json', Finish)
+            self.assertEqual((finish.status, finish.stage), ('failed', 'check'))
+            self.assertEqual(finish.code_sha256, file_hash(node / 'experiment.py'))
+            self.assertEqual(seen.count('Program'), 2)
+            self.assertFalse((root / 'best.json').exists())
+
+    async def test_execution_timeout_has_phase_plan_hash_and_code_hash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), _ = await self.exercise(Path(temporary), execution_timeout=True)
+            self.assertEqual(report.status, 'failed')
+            node = root / 'nodes/node_000'
+            finish = load(node / 'finish.json', Finish)
+            self.assertEqual((finish.status, finish.stage), ('timeout', 'execution'))
+            self.assertEqual(finish.start_sha256, file_hash(node / 'start.json'))
+            self.assertEqual(finish.code_sha256, file_hash(node / 'experiment.py'))
 
     async def test_changed_inputs_are_rejected_without_touching_completed_result(self):
         from alfa_agent.worker import smoke
@@ -193,6 +250,25 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, 'Input files changed'):
                 smoke(root / 'nodes/node_000', root / 'preparation.json')
             self.assertEqual(finish_path.read_bytes(), original)
+
+    async def test_execution_rejects_plan_or_code_changed_after_the_check(self):
+        from alfa_agent.worker import evaluate
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), _ = await self.exercise(Path(temporary))
+            self.assertEqual(report.status, 'ready', report.errors)
+            node = root / 'nodes/node_000'
+            start_path, code_path = node / 'start.json', node / 'experiment.py'
+            start_bytes, code_bytes = start_path.read_bytes(), code_path.read_bytes()
+            hashes = {'start_sha256': file_hash(start_path), 'code_sha256': file_hash(code_path)}
+            for path, content, message in ((start_path, start_bytes + b'\n', 'Saved plan changed'),
+                                           (code_path, code_bytes + b'\n# changed\n', 'Experiment source changed')):
+                with self.subTest(path=path.name):
+                    path.write_bytes(content)
+                    result = evaluate(start_path, lambda *args: self.fail('Changed artifacts must not execute'), **hashes)
+                    self.assertEqual(result.status, 'failed')
+                    self.assertIn(message, result.error)
+                    start_path.write_bytes(start_bytes)
+                    code_path.write_bytes(code_bytes)
 
     async def test_metric_exception_keeps_real_predictions_without_fake_score(self):
         with tempfile.TemporaryDirectory() as temporary:

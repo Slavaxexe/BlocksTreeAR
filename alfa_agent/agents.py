@@ -141,16 +141,18 @@ class JSONAgents:
         return await self.ask(Hypothesis, "Propose only the simplest runnable baseline for this task. "
             "Prefer constant predictions (training mean, most frequent class, or appropriate prior probabilities). "
             "Do not propose ensembles or tune accuracy for the initial baseline. "
+            "Treat it as a reference; do not claim metric optimality without justification, especially for custom metrics. "
             "Its purpose is to exercise the complete workflow. Use preparation's "
             "fixed validation and metric. Describe data selection, preprocessing, model and training in the "
             "four pipeline blocks. Algorithms and parameters are unrestricted within installed dependencies.\n"
             + json.dumps(context, ensure_ascii=False), "baker")
 
     async def implement(self, context: dict):
-        return await self.ask(Program, "Implement this baseline plan as one compact experiment.py. "
-            "Return the ACTUALLY implemented hypothesis alongside the source. If the proposed model is "
-            "unavailable or unsuitable, explicitly revise hypothesis to match the code; never label one "
-            "algorithm as another. Prefer under 80 lines; use preparation's bindings/profile rather than "
+        return await self.ask(Program, "Implement the saved start.hypothesis as one compact experiment.py. "
+            "The start is immutable: preserve its model, preprocessing, data choices and specified parameters. "
+            "You may fill unspecified implementation details and explain them in notes. "
+            "If the plan cannot be implemented, return blocked_reason rather than substituting another hypothesis. "
+            "Do not rewrite start or return a revised hypothesis. Prefer under 80 lines; use preparation's bindings/profile rather than "
             "duplicating large column lists. "
             "Only stdlib, numpy, pandas, scipy and sklearn; no internet, installation or subprocesses. "
             "Define fit_predict(fit, validation, test, preparation) returning TWO pandas DataFrames: "

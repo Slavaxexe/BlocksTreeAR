@@ -135,6 +135,19 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(snapshot['runs'][0]['id'], 'run-new')
         self.assertIsNone(snapshot['runs'][0]['extraction'])
 
+    def test_saved_v3_plan_is_visible_before_code_and_with_implementation_failure(self):
+        self.write(self.node / 'start.json', {'schema_version': 3, 'node_id': 'node_000',
+                   'implementation': 'experiment.py', 'hypothesis': {'rationale': 'Saved Baker plan'}})
+        planned = collect(self.root)['runs'][0]['nodes'][0]
+        self.assertIsNone(planned['code'])
+        self.assertIsNone(planned['finish'])
+        self.write(self.node / 'finish.json', {'schema_version': 3, 'status': 'failed',
+                   'stage': 'implementation', 'notes': ['Missing dependency'], 'error': 'Plan cannot be implemented'})
+        failed = collect(self.root)['runs'][0]['nodes'][0]
+        self.assertEqual(failed['start'], planned['start'])
+        self.assertEqual(failed['finish']['stage'], 'implementation')
+        self.assertEqual(failed['finish']['notes'], ['Missing dependency'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -3,6 +3,7 @@
 import argparse
 import io
 from pathlib import Path
+import sys
 import time
 import tempfile
 
@@ -89,19 +90,23 @@ def smoke(directory: Path, preparation_path: Path):
             raise ValueError('Smoke test produced no nonempty output file')
 
 
-def evaluate(start_path: Path, fit_predict) -> Finish:
+def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=None) -> Finish:
     start = load(start_path, Start)
     directory = start_path.parent.resolve()
     started = time.monotonic()
     preparation_path = within(directory.parent.parent, str((directory / start.preparation).resolve()))
     preparation = load(preparation_path, Preparation)
+    start_sha256 = start_sha256 or file_hash(start_path)
+    code_sha256 = code_sha256 or file_hash(within(directory, start.implementation))
     common = dict(node_id=start.node_id, metric=preparation.metric,
-                  preparation_sha256=start.preparation_sha256, code_sha256=start.implementation.sha256)
+                  preparation_sha256=start.preparation_sha256, start_sha256=start_sha256, code_sha256=code_sha256)
     try:
+        if file_hash(start_path) != start_sha256:
+            raise ValueError('Saved plan changed before execution')
         if file_hash(preparation_path) != start.preparation_sha256:
             raise ValueError('Preparation changed after start')
-        if file_hash(within(directory, start.implementation.file)) != start.implementation.sha256:
-            raise ValueError('Experiment source changed after start')
+        if file_hash(within(directory, start.implementation)) != code_sha256:
+            raise ValueError('Experiment source changed after its check')
         reader, config, tables, reference, valid_predictions, test_predictions = predict(
             preparation, preparation_path.parent, fit_predict)
         validation_file = within(directory, start.outputs['validation'])
@@ -145,9 +150,12 @@ def main(fit_predict=None):
             smoke(args.check.resolve(), args.preparation.resolve())
     else:
         parser.add_argument('--start', type=Path, required=True)
+        parser.add_argument('--start-sha256')
+        parser.add_argument('--code-sha256')
         args = parser.parse_args()
-        result = evaluate(args.start.resolve(), fit_predict)
+        result = evaluate(args.start.resolve(), fit_predict, start_sha256=args.start_sha256, code_sha256=args.code_sha256)
         if result.status != 'completed':
+            print(result.error, file=sys.stderr)
             raise SystemExit(1)
 
 

@@ -1,1 +1,1 @@
-"""Connection starter for the hackathon's Qwen endpoint."""
+"""Source-backed task extraction and one generated ML baseline."""

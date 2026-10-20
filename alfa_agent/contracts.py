@@ -157,38 +157,44 @@ class Hypothesis(Contract):
 
 
 class Program(Contract):
-    hypothesis: Hypothesis = Field(description="The implemented hypothesis, including any explicit changes needed for runnable code")
-    code: str = Field(min_length=1, description="Complete experiment.py source; code belongs only in this field")
+    code: str = Field(default="", description="Complete experiment.py implementing the saved start, or empty when blocked")
+    notes: list[str] = Field(default_factory=list, description="Implementation details and limitations; never measured scores")
+    blocked_reason: str | None = None
 
-
-class Implementation(Contract):
-    file: str = "experiment.py"
-    sha256: SHA256
+    @model_validator(mode="after")
+    def code_or_reason(self):
+        if not self.code.strip() and not (self.blocked_reason or '').strip():
+            raise ValueError('Return implementation code or explain why the saved plan cannot be implemented')
+        return self
 
 
 class Start(Contract):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     node_id: NodeID = "node_000"
     parent_id: NodeID | None = None
     source: Literal["qwen"] = "qwen"
     preparation: str = "../../preparation.json"
     preparation_sha256: SHA256
+    context: dict[str, Any] = Field(default_factory=dict, description="Source references, hashes and installed libraries; shared data is not duplicated")
     hypothesis: Hypothesis
-    implementation: Implementation
+    implementation: str = "experiment.py"
     outputs: dict[str, str]
     timeout_seconds: float = Field(gt=0)
 
 
 class Finish(Contract):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     node_id: NodeID = "node_000"
     status: Literal["completed", "failed", "timeout"]
+    stage: Literal["implementation", "check", "execution"] = "execution"
     metric: Metric
     value: float | None = None
     evaluation_status: Literal["completed", "unavailable", "failed"] = "unavailable"
     duration_seconds: float = Field(ge=0)
     preparation_sha256: SHA256
-    code_sha256: SHA256
+    start_sha256: SHA256
+    code_sha256: SHA256 | None = None
+    notes: list[str] = Field(default_factory=list)
     validation_file: str | None = None
     submission_file: str | None = None
     error: str | None = None
@@ -197,6 +203,8 @@ class Finish(Contract):
     def consistent_result(self):
         if self.status == 'completed' and (not self.submission_file or not self.validation_file):
             raise ValueError('Completed execution requires prediction files')
+        if self.status == 'completed' and (self.stage != 'execution' or self.code_sha256 is None):
+            raise ValueError('Completed execution requires the executed source hash and execution stage')
         if (self.evaluation_status == 'completed') != (self.value is not None):
             raise ValueError('Only completed evaluation can have a score')
         if self.status != 'completed' and (self.value is not None or not self.error):

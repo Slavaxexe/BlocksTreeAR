@@ -1,6 +1,5 @@
 """Validated, atomic artifacts; interrupted writes never become valid nodes."""
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,10 +12,6 @@ def canonical(value) -> str:
     if isinstance(value, Contract):
         value = value.model_dump(mode="json")
     return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
-
-
-def fingerprint(value) -> str:
-    return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
 def atomic_bytes(path: Path, content: bytes) -> None:
