@@ -3,10 +3,34 @@
 import ast
 import hashlib
 import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 import sys
 
 import pandas as pd
+
+
+# Distribution names and import roots from the organizers' ML requirements.
+ML_LIBRARIES = {
+    'numpy': 'numpy', 'scipy': 'scipy', 'pandas': 'pandas', 'polars': 'polars',
+    'pyarrow': 'pyarrow', 'joblib': 'joblib', 'threadpoolctl': 'threadpoolctl',
+    'scikit-learn': 'sklearn', 'catboost': 'catboost', 'lightgbm': 'lightgbm',
+    'xgboost': 'xgboost', 'imbalanced-learn': 'imblearn', 'category-encoders': 'category_encoders',
+    'feature-engine': 'feature_engine', 'statsmodels': 'statsmodels', 'optuna': 'optuna',
+    'torch': 'torch', 'autogluon.tabular': 'autogluon', 'lightautoml': 'lightautoml',
+    'flaml': 'flaml', 'matplotlib': 'matplotlib', 'seaborn': 'seaborn', 'tqdm': 'tqdm',
+    'psutil': 'psutil', 'cloudpickle': 'cloudpickle',
+}
+
+
+def installed_libraries():
+    result = {}
+    for distribution in ML_LIBRARIES:
+        try:
+            result[distribution] = version(distribution)
+        except PackageNotFoundError:
+            continue
+    return result
 
 
 def within(root: Path, relative: str) -> Path:
@@ -70,7 +94,8 @@ def check_code(code: str, functions: tuple[str, ...]):
         raise ValueError('Missing required functions: ' + ', '.join(sorted(set(functions) - names)))
     allowed = {'math', 'statistics', 'collections', 'itertools', 'functools', 'pathlib', 'csv', 'json',
                're', 'datetime', 'typing', 'io', 'zipfile', 'gzip', 'random', 'dataclasses', 'copy',
-               'enum', 'abc', 'types', 'warnings', 'numbers', 'numpy', 'pandas', 'scipy', 'sklearn', 'joblib'}
+               'enum', 'abc', 'types', 'warnings', 'numbers', 'time', 'tempfile', 'os', '__future__'}
+    allowed.update(ML_LIBRARIES.values())
     for node in ast.walk(tree):
         imports = [a.name for a in node.names] if isinstance(node, ast.Import) else (
             [node.module or ''] if isinstance(node, ast.ImportFrom) else [])

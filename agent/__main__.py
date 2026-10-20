@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--parallel", type=int, default=3, help="Одновременных нод: по умолчанию 2 improve и 1 explore.")
     parser.add_argument("--parallel-agents", type=int, default=8, help="Одновременных обращений к Qwen для всех ролей.")
     parser.add_argument("--max-llm-calls", type=int, default=80, help="Лимит всех запросов Qwen, включая повторы.")
+    parser.add_argument("--max-code-attempts", type=int, default=5,
+                        help="Версий кода на блок: первая и исправления; по умолчанию 5.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
     args = parser.parse_args(argv)
     if args.command == "ask" and not args.prompt:
@@ -46,7 +48,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout,
                     output_dir=output, max_experiments=args.max_experiments if args.command == "search" else 1,
-                    parallel=args.parallel, parallel_agents=args.parallel_agents, max_llm_calls=args.max_llm_calls)
+                    parallel=args.parallel, parallel_agents=args.parallel_agents, max_llm_calls=args.max_llm_calls,
+                    max_code_attempts=args.max_code_attempts)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")

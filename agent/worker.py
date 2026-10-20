@@ -57,7 +57,8 @@ def prepare(directory: Path):
     save(path, prepared)
 
 
-def predict(preparation: Preparation, root: Path, fit_predict, *, small=False):
+def predict(preparation: Preparation, root: Path, fit_predict, *, small=False, time_budget=240, facts_path=None):
+    started = time.monotonic()
     source = Path(preparation.task_directory)
     if input_hashes(source, preparation.data.files) != preparation.source_hashes:
         raise ValueError('Input files changed after preparation')
@@ -77,10 +78,22 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False):
         test = tables['test']
     reference = train.iloc[valid].reset_index(drop=True)
     validation_input = reference.drop(columns=preparation.data.target_columns)
+    if facts_path is not None:
+        # These are measured input facts, separate for smoke and full execution.
+        save(facts_path, {'code_sha256': implementation_hash(facts_path.parent),
+             'fit_rows': len(fit), 'validation_rows': len(valid), 'test_rows': len(test),
+             'fit_target_unique_counts': {column: int(train[column].iloc[fit].nunique())
+                                          for column in preparation.data.target_columns}})
+    metadata = preparation_view(preparation)
+    # Leave time for prediction, scoring and saving the final files after AutoML search.
+    training_budget = max(1., time_budget * 0.8)
+    metadata['runtime'] = {'time_budget_seconds': training_budget, 'deadline': started + training_budget,
+                           'num_cpus': 2, 'num_gpus': 0, 'is_smoke_check': small,
+                           'work_directory': str(Path.cwd())}
     with threadpool_limits(limits=2):
         auxiliary = {role: frame.copy() for role, frame in tables.items() if role not in {'train', 'test'}}
         valid_predictions, test_predictions = fit_predict(train.iloc[fit].copy(), validation_input.copy(), test.copy(),
-                                                         preparation_view(preparation), auxiliary)
+                                                         metadata, auxiliary)
     if any(not isinstance(frame, pd.DataFrame) for frame in (valid_predictions, test_predictions)):
         raise ValueError('fit_predict must return two DataFrames')
     if len(valid_predictions) != len(valid) or len(test_predictions) != len(test):
@@ -88,10 +101,12 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False):
     return reader, config, tables, reference, valid_predictions.reset_index(drop=True), test_predictions.reset_index(drop=True)
 
 
-def smoke(directory: Path, preparation_path: Path):
+def smoke(directory: Path, preparation_path: Path, time_budget=45):
     preparation = load(preparation_path, Preparation)
     program = module(directory / 'experiment.py', file_hash(directory / 'experiment.py'))
-    reader, config, tables, _, _, predictions = predict(preparation, preparation_path.parent, program.fit_predict, small=True)
+    reader, config, tables, _, _, predictions = predict(
+        preparation, preparation_path.parent, program.fit_predict, small=True, time_budget=time_budget,
+        facts_path=directory / 'smoke_inputs.json')
     with tempfile.TemporaryDirectory() as temporary:
         destination = within(Path(temporary), preparation.output.filename)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +115,7 @@ def smoke(directory: Path, preparation_path: Path):
             raise ValueError('Smoke test produced no nonempty output file')
 
 
-def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=None) -> Finish:
+def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=None, time_budget=None) -> Finish:
     start = load(start_path, Start)
     directory = start_path.parent.resolve()
     started = time.monotonic()
@@ -118,7 +133,8 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
         if implementation_hash(directory) != code_sha256:
             raise ValueError('Assembled source changed after its check')
         reader, config, tables, reference, valid_predictions, test_predictions = predict(
-            preparation, preparation_path.parent, fit_predict)
+            preparation, preparation_path.parent, fit_predict, time_budget=time_budget or start.timeout_seconds,
+            facts_path=directory / 'execution_inputs.json')
         validation_file = within(directory, start.outputs['validation'])
         atomic_bytes(validation_file, valid_predictions.to_csv(index=False).encode())
         submission_file = within(directory, start.outputs['submission'])
@@ -149,6 +165,7 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
 
 def main(fit_predict=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument('--time-budget', type=float)
     if fit_predict is None:
         stage = parser.add_mutually_exclusive_group(required=True)
         stage.add_argument('--prepare', type=Path)
@@ -158,13 +175,14 @@ def main(fit_predict=None):
         if args.prepare:
             prepare(args.prepare.resolve())
         else:
-            smoke(args.check.resolve(), args.preparation.resolve())
+            smoke(args.check.resolve(), args.preparation.resolve(), time_budget=args.time_budget or 45)
     else:
         parser.add_argument('--start', type=Path, required=True)
         parser.add_argument('--start-sha256')
         parser.add_argument('--code-sha256')
         args = parser.parse_args()
-        result = evaluate(args.start.resolve(), fit_predict, start_sha256=args.start_sha256, code_sha256=args.code_sha256)
+        result = evaluate(args.start.resolve(), fit_predict, start_sha256=args.start_sha256,
+                          code_sha256=args.code_sha256, time_budget=args.time_budget)
         if result.status != 'completed':
             print(result.error, file=sys.stderr)
             raise SystemExit(1)

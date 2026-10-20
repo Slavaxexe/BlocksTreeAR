@@ -19,8 +19,8 @@ class Settings:
     api_key: str = field(repr=False)
     base_url: str
     model: str
-    timeout_seconds: float = 90
-    max_tokens: int = 6144
+    timeout_seconds: float | None = None
+    max_tokens: int | None = None
 
     @classmethod
     def from_env(
@@ -33,16 +33,16 @@ class Settings:
         values = dict(dotenv_values(path, encoding="utf-8", interpolate=False))
         values.update(os.environ if environ is None else environ)
         try:
-            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "90")
-            max_tokens = int(values.get("QWEN_MAX_TOKENS") or "6144")
+            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "0")
+            max_tokens = int(values.get("QWEN_MAX_TOKENS") or "0")
         except (ValueError, TypeError):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS и QWEN_MAX_TOKENS должны быть числами.") from None
         return cls(
             api_key=(values.get("OPENAI_API_KEY") or "").strip(),
             base_url=(values.get("OPENAI_BASE_URL") or "").strip(),
             model=(values.get("OPENAI_MODEL") or "").strip(),
-            timeout_seconds=timeout,
-            max_tokens=max_tokens,
+            timeout_seconds=timeout if timeout else None,
+            max_tokens=max_tokens if max_tokens else None,
         )
 
     def validate(self) -> None:
@@ -68,9 +68,9 @@ class Settings:
             valid_url = False
         if not valid_url:
             raise ConfigurationError("OPENAI_BASE_URL: нужен HTTPS base URL без логина, пароля и query-параметров.")
-        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+        if self.timeout_seconds is not None and (not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть конечным положительным числом.")
-        if self.max_tokens <= 0:
+        if self.max_tokens is not None and self.max_tokens <= 0:
             raise ConfigurationError("QWEN_MAX_TOKENS должен быть положительным целым числом.")
 
     def public_status(self) -> dict:

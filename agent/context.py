@@ -38,7 +38,12 @@ def execution_contract(preparation):
                            'target_columns': [], 'row_order': 'fixed'},
             'test': {'type': 'DataFrame', 'rows': preparation.profile['test']['rows'],
                      'target_columns': [], 'row_order': 'fixed'},
-            'preparation': 'Fixed compact metadata, not a recipe to execute again',
+            'preparation': {'metadata': 'Fixed compact metadata, not a recipe to execute again',
+                            'runtime': {'time_budget_seconds': 'Total budget for training/search in this invocation',
+                                        'deadline': 'time.monotonic() deadline; compute remaining time before each fit',
+                                        'num_cpus': 2, 'num_gpus': 0,
+                                        'is_smoke_check': 'True for the small preliminary check',
+                                        'work_directory': 'Current node directory; persist model files here'}},
             'auxiliary': 'Other already loaded named input tables, without full train or validation labels',
         },
         'fixed': ['input_files', 'outer_split', 'validation_and_test_order', 'scorer', 'submission_writer'],
@@ -48,7 +53,7 @@ def execution_contract(preparation):
 
 def result_view(finish):
     return finish.model_dump(exclude={'schema_version', 'metric', 'preparation_sha256', 'start_sha256',
-                                     'code_sha256', 'validation_file', 'submission_file'})
+                                     'code_sha256', 'validation_file', 'submission_file', 'notes'})
 
 
 def history_view(row):

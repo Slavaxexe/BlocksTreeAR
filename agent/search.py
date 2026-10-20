@@ -87,7 +87,7 @@ class Search:
                 'pending': self.pending(), 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
                 'experiment_timeout_seconds': self.options.experiment_timeout}
             save(self.directory / 'planning' / node_id / 'idea.json', record)
-            client = JSONAgents(self.agents.settings, self.agents.deadline, 2, shared=self.agents, node_id=node_id)
+            client = JSONAgents(self.agents.settings, self.agents.deadline, 3, shared=self.agents, node_id=node_id)
             task = asyncio.create_task(client.plan_node(context, idea, self.catalog))
             self.planners[task] = record
             occupied.append(idea.purpose)

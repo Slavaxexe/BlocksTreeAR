@@ -3,7 +3,6 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from importlib.metadata import version
 import json
 import math
 import os
@@ -18,7 +17,7 @@ from .assembly import BlockError, assemble, block_catalog, initialize, sources
 from .config import Settings
 from .context import execution_contract, history_view, preparation_view, requirements
 from .contracts import Delta, Extraction, Finish, NodeDelta, Preparation, Start
-from .data import check_code, file_hash, inventory, within
+from .data import check_code, file_hash, installed_libraries, inventory, within
 from .qwen import QwenError
 from .search import Search
 from .storage import atomic_bytes, load, save
@@ -33,6 +32,7 @@ class Options:
     parallel: int = 3
     parallel_agents: int = 8
     max_llm_calls: int = 80
+    max_code_attempts: int = 5
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -42,6 +42,11 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
     env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
            'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1',
            'OMP_NUM_THREADS': '2', 'OPENBLAS_NUM_THREADS': '2', 'MKL_NUM_THREADS': '2'}
+    # Some ML libraries need the user/temp directories even without API credentials.
+    for name in ('HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA'):
+        if name in os.environ:
+            env[name] = os.environ[name]
+    env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_DATASETS_OFFLINE='1')
     # Windows needs SystemRoot for system libraries used by asyncio and sklearn.
     if os.name == 'nt':
         env['SystemRoot'] = os.environ['SystemRoot']
@@ -107,10 +112,13 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
     started, start_hash = time.monotonic(), file_hash(node / 'start.json')
     target, stage, code_hash, notes = None, 'assembly', None, []
     attempts, clients, writers = {}, {}, []
+    execution_state = None
+    max_code_attempts = start.context.get('max_code_attempts', 5)
     block_states = {b.name: {'stage': 'queued' if b.name in start.assembly.write_blocks else 'reused',
                              'attempt': 0} for b in start.assembly.blocks}
     context = {**shared, 'node_id': start.node_id, 'hypothesis': start.hypothesis.model_dump(),
-               'assembly': start.assembly.model_dump(), 'purpose': start.purpose}
+               'assembly': start.assembly.model_dump(), 'purpose': start.purpose,
+               'experiment_timeout_seconds': start.timeout_seconds}
 
     def block_update(name, **values):
         block_states[name].update(values)
@@ -120,14 +128,15 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
         spec = next(b for b in start.assembly.blocks if b.name == name)
         path = node / 'modules' / f'{name}.py'
         if name not in clients:
-            clients[name] = JSONAgents(agents.settings, deadline, 6, shared=agents,
+            clients[name] = JSONAgents(agents.settings, deadline, max_code_attempts * 3, shared=agents,
                                       node_id=start.node_id, block=name)
-        while attempts.get(name, 0) < 3:
+        while attempts.get(name, 0) < max_code_attempts:
             attempt = attempts[name] = attempts.get(name, 0) + 1
             attempt_dir = node / 'attempts' / name / f'{attempt:02d}'
             request = {**context, 'target_block': spec.model_dump(),
                        'previous_code': path.read_text(encoding='utf-8') if path.exists() else None,
-                       'execution_error': error, 'failed_stage': failed_stage}
+                       'execution_error': error, 'failed_stage': failed_stage,
+                       'remaining_run_seconds': max(0., deadline - time.monotonic())}
             save(attempt_dir / 'request.json', {'block': name, 'stage': failed_stage, 'execution_error': error})
             block_update(name, stage='implementation', attempt=attempt)
             agents.log('block_generation_started', node_id=start.node_id, block=name, attempt=attempt,
@@ -154,13 +163,13 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 error, failed_stage = str(problem)[-5000:], 'implementation'
                 save(attempt_dir / 'error.json', {'stage': failed_stage, 'block': name, 'kind': 'code',
                      'error': error, 'traceback': traceback.format_exc()})
-                if attempt == 3 or time.monotonic() >= deadline:
+                if attempt == max_code_attempts or time.monotonic() >= deadline:
                     raise BlockError(name, error) from problem
                 continue
             block_update(name, stage='ready')
             agents.log('block_code_saved', node_id=start.node_id, block=name, attempt=attempt)
             return
-        raise BlockError(name, 'Block exhausted its three code versions')
+        raise BlockError(name, f'Block exhausted its {max_code_attempts} code versions')
 
     async def write_block(name, error=None, failed_stage=None):
         try:
@@ -178,6 +187,10 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
 
     def execution_update(status):
         execution_state[stage] = status
+        if status == 'running':
+            stage_started[stage] = time.monotonic()
+        else:
+            execution_state['duration_seconds'][stage] = time.monotonic() - stage_started[stage]
         save(log_dir / 'status.json', execution_state)
         agents.log('execution_stage', node_id=start.node_id, execution=execution, stage=stage, status=status)
 
@@ -194,8 +207,9 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
         while True:
             execution += 1
             log_dir = node / 'executions' / f'{execution:02d}'
+            stage_started = {}
             execution_state = {'number': execution, 'assembly': 'not_started',
-                               'check': 'not_started', 'execution': 'not_started'}
+                               'check': 'not_started', 'execution': 'not_started', 'duration_seconds': {}}
             try:
                 stage = 'assembly'
                 checkpoint(stage=stage, block=None)
@@ -211,14 +225,16 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 checkpoint(stage=stage)
                 execution_update('running')
                 await process(['-m', 'agent.worker', '--check', str(node),
-                               '--preparation', str(node.parent.parent / 'preparation.json')],
+                               '--preparation', str(node.parent.parent / 'preparation.json'),
+                               '--time-budget', str(min(45, start.timeout_seconds, deadline - time.monotonic()))],
                               node, log_dir / 'smoke.log', deadline, min(45, start.timeout_seconds))
                 execution_update('completed')
                 stage = 'execution'
                 checkpoint(stage=stage)
                 execution_update('running')
                 await process([str(node / 'experiment.py'), '--start', str(node / 'start.json'),
-                               '--start-sha256', start_hash, '--code-sha256', code_hash],
+                               '--start-sha256', start_hash, '--code-sha256', code_hash,
+                               '--time-budget', str(min(start.timeout_seconds, deadline - time.monotonic()))],
                               node, log_dir / 'execution.log', deadline, start.timeout_seconds)
                 finish = load(node / 'finish.json', Finish)
                 if (finish.node_id, finish.code_sha256, finish.preparation_sha256, finish.start_sha256) != (
@@ -248,7 +264,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 if attempts.get(target, 0):
                     save(node / 'attempts' / target / f'{attempts[target]:02d}' / 'error.json', detail)
                 block_update(target, stage='failed')
-                if attempts.get(target, 0) >= 3 or time.monotonic() >= deadline:
+                if attempts.get(target, 0) >= max_code_attempts or time.monotonic() >= deadline:
                     raise
                 failed_stage, stage, code_hash = stage, 'implementation', None
                 checkpoint(stage=stage, block=target)
@@ -257,7 +273,11 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
         target = getattr(error, 'block', None) or target
         agents.log('experiment_failed', node_id=start.node_id, block=target, stage=stage,
                    error_type=type(error).__name__, traceback=traceback.format_exc())
-        message = (str(error) or 'Experiment cancelled').replace(agents.settings.api_key, '[REDACTED]')[-5000:]
+        if execution_state is not None and execution_state.get(stage) == 'running':
+            execution_update('interrupted')
+        message = str(error) or ('Run time budget exhausted' if time.monotonic() >= deadline
+                                 else 'Experiment cancelled')
+        message = message.replace(agents.settings.api_key, '[REDACTED]')[-5000:]
         finish = Finish(node_id=start.node_id,
             status='timeout' if isinstance(error, TimeoutError) or time.monotonic() >= deadline else 'failed',
             stage=stage, failed_block=target, metric=shared['preparation']['metric'], duration_seconds=0.,
@@ -280,8 +300,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
     if not 0 < options.time_budget <= 10800 or not 0 < options.experiment_timeout <= 10800:
         raise ValueError('Time budgets must be finite, positive and at most three hours')
     if (not 1 <= options.max_experiments <= 1000 or options.parallel < 1
-            or options.parallel_agents < 1 or options.max_llm_calls < 1):
-        raise ValueError('Use 1..1000 experiments and positive parallel / LLM call limits')
+            or options.parallel_agents < 1 or options.max_llm_calls < 1 or options.max_code_attempts < 1):
+        raise ValueError('Use 1..1000 experiments and positive parallel, LLM call and code attempt limits')
     task_path = task_path.resolve()
     deadline = time.monotonic() + options.time_budget
     agents = JSONAgents(settings, deadline, max_calls=options.max_llm_calls, parallel_agents=options.parallel_agents)
@@ -350,8 +370,20 @@ async def run(task_path: Path, options: Options, settings: Settings):
         context['repair_attempts'] = []
         for path in sorted((node / 'attempts').rglob('error.json')):
             error = json.loads(path.read_text(encoding='utf-8'))
-            context['repair_attempts'].append({key: error.get(key) for key in ('block', 'stage', 'error')})
-        local = JSONAgents(settings, deadline, 2, shared=agents, node_id=row.node_id)
+            # Keep the exception message and phase, not a full traceback from an old version.
+            message = error.get('error', '').strip().splitlines()
+            context['repair_attempts'].append({'block': error.get('block'), 'stage': error.get('stage'),
+                'attempt': int(path.parent.name), 'error': message[-1][:700] if message else ''})
+        context['execution_stages'] = [json.loads(path.read_text(encoding='utf-8'))
+                                       for path in sorted((node / 'executions').glob('*/status.json'))]
+        context['input_facts'] = {}
+        for phase in ('smoke', 'execution'):
+            path = node / f'{phase}_inputs.json'
+            if path.exists():
+                facts = json.loads(path.read_text(encoding='utf-8'))
+                if facts['code_sha256'] == row.result.code_sha256:
+                    context['input_facts'][phase] = {k: v for k, v in facts.items() if k != 'code_sha256'}
+        local = JSONAgents(settings, deadline, 3, shared=agents, node_id=row.node_id)
         return await local.analyze(context)
 
     agents.on_activity = update
@@ -359,7 +391,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
         extraction = load(directory / 'extraction.json', Extraction)
         update(status='running', stage='preparation')
         context = {'task_text': task_path.read_text(encoding='utf-8'), 'task_directory': str(task_path.parent),
-                   'extraction': requirements(extraction), 'inventory': inventory(task_path.parent)}
+                   'extraction': requirements(extraction), 'inventory': inventory(task_path.parent),
+                   'installed_libraries': installed_libraries()}
         for attempt in range(3):
             draft = await agents.prepare(context)
             try:
@@ -383,7 +416,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 update(warnings=report.warnings + [f'Preparation required code repair {attempt + 1}/2'])
         shared = {'requirements': requirements(extraction, prepared=True), 'preparation': preparation_view(preparation),
                   'execution_contract': execution_contract(preparation),
-                  'installed_libraries': {name: version(name) for name in ('numpy', 'pandas', 'scipy', 'scikit-learn')}}
+                  'installed_libraries': context['installed_libraries']}
         delta = Delta(preparation_sha256=file_hash(directory / 'preparation.json'), metric=preparation.metric)
         save_delta()
         update(checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
@@ -445,7 +478,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     hypothesis=proposal.hypothesis, assembly=proposal.assembly,
                     preparation_sha256=delta.preparation_sha256,
                     context={'task': str(task_path), 'task_sha256': report.task_sha256, 'source_hashes': hashes,
-                             'analysis_revision': revision, 'installed_libraries': shared['installed_libraries']},
+                             'analysis_revision': revision, 'installed_libraries': shared['installed_libraries'],
+                             'max_code_attempts': options.max_code_attempts},
                     outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
                     timeout_seconds=float(options.experiment_timeout))
                 node = directory / 'nodes' / node_id

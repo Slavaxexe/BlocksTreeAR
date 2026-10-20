@@ -194,7 +194,7 @@ nav{flex-wrap:wrap}
 <header><div><h1>Поиск ML-решений</h1><small>3 ноды: 2 улучшения + 1 исследование · до 8 агентов Qwen</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel" hidden><p class="muted">Baker предлагает короткие идеи. Планировщики нод параллельно готовят сборки; каждый готовый план сразу передаётся агентам блоков. Общая подготовка фиксирует условия сравнения.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Baker, очередь идей, планировщики нод, агенты блоков и анализатор"></svg></div><p class="footnote">На каждый блок: первая версия и до двух исправлений, включая ошибки полного запуска. Исправляется только проблемный блок. Лимит 8 общий для реализаторов, планировщиков нод, Baker, анализаторов и извлечения.</p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">Baker предлагает короткие идеи. Планировщики нод параллельно готовят сборки; каждый готовый план сразу передаётся агентам блоков. Общая подготовка фиксирует условия сравнения.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Baker, очередь идей, планировщики нод, агенты блоков и анализатор"></svg></div><p class="footnote">По умолчанию на блок: первая версия и до четырёх исправлений, включая ошибки полного запуска. Исправляется только проблемный блок. Лимит 8 общий для реализаторов, планировщиков нод, Baker, анализаторов и извлечения.</p></section>
 <section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><div id="ideas-overview" class="assembly-overview" hidden></div><p id="tree-legend" class="legend"></p><div id="assembly-overview" class="assembly-overview" hidden></div><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Основные предки и источники модулей"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранной ноды"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
@@ -478,7 +478,8 @@ function drawTree(r) {
     g.append(svg('text', {x:p.x+15, y:p.y+24, class:'caption'}, n.id + ' · ' + (purposes[n.start.purpose??n.start.context?.purpose]??n.start.source)));
     if (best) g.append(svg('text', {x:p.x+189, y:p.y+24, class:'best-label'}, 'ЛИДЕР'));
     const model = n.start.hypothesis?.pipeline?.model;
-    const label = families[model?.family] ?? model?.family ?? model?.name ?? model?.type ?? 'Описание модели в JSON';
+    const label = [model?.algorithm, model?.name, model?.framework, families[model?.family], model?.family, model?.type]
+      .find(value => typeof value === 'string' && value.trim()) ?? 'Модель не указана';
     g.append(svg('text', {x:p.x+15, y:p.y+46, class:'title'}, String(label).slice(0, 30)));
     g.append(svg('text', {x:p.x+15, y:p.y+73, class:'score'}, fmt(f?.value)));
     g.append(svg('text', {x:p.x+15, y:p.y+95, class:'caption'}, status + duration));
@@ -508,7 +509,7 @@ function drawAssembly(r){
    element('small','', 'Выход: '+b.provides.join(', ')));
   const progress=r.report?.node_states?.[n.id]?.blocks?.[b.name];
   if(progress){const label=progress.stage==='implementation'?(agents.has(b.name)?'Агент пишет код':'Ожидает места для Qwen'):(phases[progress.stage]??progress.stage);
-   card.append(element('small','',label+(progress.attempt?' · версия '+progress.attempt+'/3':'')));}
+   card.append(element('small','',label+(progress.attempt?' · версия '+progress.attempt+'/'+(n.start.context?.max_code_attempts??3):'')));}
   if(b.source_node){const button=element('button','',(edited||repaired.has(b.name)?'Основа: ':'Из ')+b.source_node);button.onclick=()=>{selected=b.source_node;render()};card.append(button);}
   else card.append(element('small','','Создан в этой ноде'));
   chain.append(card);
@@ -526,7 +527,7 @@ function drawDetail(r) {
   const purpose=n.start.purpose??n.start.context?.purpose;
   if (purpose) d.append(element('p', 'muted', 'Роль: '+(purposes[purpose]??purpose)));
   const calls = r.report?.llm_calls?.filter(call=>call.node_id===n.id&&call.role==='implementer')??[];
-  if (calls.length) d.append(element('small', '', 'Запросов реализаторов: '+calls.length+' · версий блоков: '+(n.attempts?.length??0)+' · до 3 на каждый блок'));
+  if (calls.length) d.append(element('small', '', 'Запросов реализаторов: '+calls.length+' · версий блоков: '+(n.attempts?.length??0)+' · до '+(n.start.context?.max_code_attempts??3)+' на каждый блок'));
   if (n.finish) d.append(element('p', 'metric', `${n.finish.metric?.name??'Метрика'}: ${fmt(n.finish.value)} · ${n.finish.evaluation_status??n.finish.status}`));
   d.append(element('h3', '', 'Гипотеза'), element('p', '', n.start.hypothesis?.rationale ?? '—'));
   d.append(element('small', '', n.start.hypothesis?.expected_effect ?? ''));
