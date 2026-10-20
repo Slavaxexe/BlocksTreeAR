@@ -12,10 +12,10 @@
 
 Пути указаны относительно каталога этого Markdown-файла:
 
-- `regression/participants/train.csv` — 53 308 строк с признаками и таргетом.
-- `regression/participants/test.csv` — 22 449 строк с признаками без таргета.
-- `regression/participants/data_dictionary.csv` — описание признаков.
-- `regression/participants/sample_submission.csv` — шаблон ответа.
+- `train.csv` — 53 308 строк с признаками и таргетом.
+- `test.csv` — 22 449 строк с признаками без таргета.
+- `data_dictionary.csv` — описание признаков.
+- `sample_submission.csv` — шаблон ответа.
   Нули в шаблоне не являются правильными ответами.
 
 В `train.csv` 64 столбца: 62 входных признака, идентификатор `id` и таргет

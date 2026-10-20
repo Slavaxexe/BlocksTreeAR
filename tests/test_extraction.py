@@ -24,7 +24,7 @@ CLASSES = ['Normal', 'Generic', 'Exploits', 'Fuzzers', 'DoS', 'Reconnaissance', 
 
 def expected(name):
     """Manually specified facts for the two public tasks; never supplied to real Qwen."""
-    path = ROOT / 'data' / name / 'task.local.md'
+    path = ROOT / 'tests' / 'fixtures' / name / 'task.local.md'
     text = path.read_text(encoding='utf-8')
     line = lambda needle: next(row for row in text.splitlines() if needle in row)
     classification = name == 'classification'

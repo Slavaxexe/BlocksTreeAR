@@ -19,3 +19,15 @@ data/**/submission.csv
 *.zip
 .playwright-cli/
 output/playwright/
+
+# Local datasets and organizer/reference materials are not source code.
+data/
+baseline/
+evaluation/
+Info/assignment.pdf
+Info/datasets.md
+Info/sources.json
+Info/task.md
+Info/api_parallelism.md
+tools/check_api_parallelism.py
+tests/test_practice.py
