@@ -77,7 +77,8 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False, t
         task_type = (extraction.problem.task_type or '').lower()
         if 'class' in task_type and len(preparation.data.target_columns) == 1:
             target = train.iloc[fit][preparation.data.target_columns[0]]
-            representatives = np.flatnonzero(~target.duplicated().to_numpy())
+            # Inner CV/holdout needs multiple examples, not a single representative.
+            representatives = np.flatnonzero(target.groupby(target, dropna=False).cumcount().to_numpy() < 3)
             positions = np.unique(np.concatenate((representatives, np.arange(min(200, len(fit))))))
             fit = fit[positions]
         else:

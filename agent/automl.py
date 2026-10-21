@@ -76,13 +76,18 @@ def _fit_flaml(x, y, metric, classification, runtime, seed):
     model = AutoML()
     smoke = bool(runtime.get('is_smoke_check'))
     budget = min(5., _remaining(runtime)) if smoke else _remaining(runtime)
+    # Three folds plus an unconditional full refit can exceed the process deadline
+    # on multiclass data even when the search itself respects its time budget.
+    validation_options = ({'eval_method': 'holdout', 'split_type': 'stratified', 'split_ratio': 0.2,
+                           'retrain_full': 'budget', 'train_time_limit': min(30., budget / 3)}
+                          if classification else
+                          {'eval_method': 'cv', 'split_type': _splitter(y, False, seed), 'retrain_full': True})
     model.fit(X_train=x, y_train=y, task='classification' if classification else 'regression',
               metric=metric, time_budget=budget,
               estimator_list=['lgbm'] if smoke else ['lgbm', 'catboost', 'xgboost', 'extra_tree'],
               n_jobs=int(runtime.get('num_cpus', 2)),
               mem_thres=int(float(runtime.get('memory_limit_gb', 6)) * 1024 ** 3),
-              eval_method='cv', split_type=_splitter(y, classification, seed),
-              retrain_full=True, model_history=False, seed=seed, verbose=1)
+              **validation_options, model_history=False, seed=seed, verbose=1)
     return model, {'best_estimator': model.best_estimator, 'best_config': model.best_config,
                    'inner_best_loss': float(model.best_loss)}
 
@@ -103,7 +108,8 @@ def _fit_autogluon(x, y, metric, classification, runtime, seed):
     path = Path(runtime.get('work_directory', '.')) / f'autogluon_{uuid4().hex}'
     model = TabularPredictor(label=label, eval_metric=metric,
                             problem_type=('binary' if y.nunique() == 2 else 'multiclass')
-                            if classification else 'regression', path=str(path), verbosity=1)
+                            if classification else 'regression', path=str(path), verbosity=1,
+                            learner_kwargs={'label_count_threshold': 1})
     smoke = bool(runtime.get('is_smoke_check'))
     # AutoGluon spends several seconds constructing its learner/feature pipeline.
     # A five-second fit budget can expire before the first tiny model starts.
