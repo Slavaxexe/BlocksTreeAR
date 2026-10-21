@@ -111,8 +111,9 @@ class JSONAgents:
                                        max_retries=0, timeout=min(self.settings.timeout_seconds, remaining)) as client:
                     response = await client.chat.completions.create(
                         model=self.settings.model, messages=messages, temperature=0,
-                        max_tokens=self.settings.max_tokens, extra_body={"reasoning_effort": "none",
-                            "chat_template_kwargs": {"enable_thinking": False}})
+                        max_tokens=self.settings.max_tokens,
+                        extra_body={"reasoning_effort": "medium" if role == "implementer" else "none",
+                            "chat_template_kwargs": {"enable_thinking": role == "implementer"}})
             except asyncio.CancelledError:
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
                 raise

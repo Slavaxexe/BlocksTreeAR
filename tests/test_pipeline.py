@@ -122,6 +122,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         def handler(request):
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
+            self.assertEqual(body['reasoning_effort'], 'medium' if title == 'Program' else 'none')
+            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': title == 'Program'})
+            self.assertNotIn('response_format', body)
             if title == 'Program' and seen.count(title) < int(network_failure):
                 seen.append(title)
                 raise httpx.ConnectError('temporary disconnection', request=request)
@@ -481,6 +484,8 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             nonlocal wrong_sent, rejected, simultaneous, peak
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
+            self.assertEqual(body['reasoning_effort'], 'medium' if title == 'Program' else 'none')
+            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': title == 'Program'})
             context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
             if title in {'Hypothesis', 'Hypotheses'}:
                 self.assertEqual(context['allowed_libraries'], LIBRARIES)
@@ -901,6 +906,9 @@ def handler(request):
     body=json.loads(request.content)
     assert body['model']=='qwen/qwen3.8-27b'
     title=json.loads(body['messages'][0]['content'].split('Schema: ',1)[1])['title']
+    assert body['reasoning_effort']==('medium' if title=='Program' else 'none')
+    assert body['chat_template_kwargs']=={'enable_thinking':title=='Program'}
+    assert body['temperature']==0 and body['max_tokens']==32768 and 'response_format' not in body
     context=json.loads(body['messages'][1]['content'].rsplit('\\n',1)[1])
     if title=='Hypotheses':
         count=sum(1 for _ in Path('artifacts').glob('*/nodes/*/start.json'))
