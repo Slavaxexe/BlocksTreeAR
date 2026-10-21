@@ -37,10 +37,13 @@ class ConfigurationTests(unittest.TestCase):
             Settings("test-secret", "", "qwen-model").validate()
 
     def test_plain_http_credentials_and_query_are_rejected(self):
-        for url in ["http://remote.example/v1", "https://user:secret@qwen.example/v1",
+        for url in ["ftp://remote.example/v1", "https://user:secret@qwen.example/v1",
                     "https://qwen.example/v1?token=secret", "not-a-url"]:
             with self.subTest(url=url), self.assertRaises(ConfigurationError):
                 Settings("test-secret", url, "qwen-model").validate()
+
+    def test_platform_internal_http_proxy_is_supported(self):
+        Settings('fake', 'http://llm-proxy:8000/v1', 'model').validate()
 
     def test_invalid_numeric_limits_are_rejected(self):
         for timeout, tokens in [(0, 10), (float("nan"), 10), (float("inf"), 10), (10, 0)]:

@@ -192,6 +192,21 @@
       "title": "Queued Nodes",
       "type": "array"
     },
+    "planning_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3,}$",
+        "type": "string"
+      },
+      "title": "Planning Nodes",
+      "type": "array"
+    },
+    "queued_ideas": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Queued Ideas",
+      "type": "array"
+    },
     "analyzing_nodes": {
       "items": {
         "pattern": "^node_[0-9]{3,}$",
@@ -206,12 +221,12 @@
       "type": "boolean"
     },
     "max_parallel_nodes": {
-      "default": 4,
+      "default": 3,
       "title": "Max Parallel Nodes",
       "type": "integer"
     },
     "max_parallel_agents": {
-      "default": 16,
+      "default": 8,
       "title": "Max Parallel Agents",
       "type": "integer"
     },

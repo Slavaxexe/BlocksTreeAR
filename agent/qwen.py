@@ -41,16 +41,14 @@ def ask_qwen(
             max_retries=0,
             http_client=http_client,
         ) as client:
-            limits = {'max_tokens': settings.max_tokens} if settings.max_tokens is not None else {}
+            kwargs = {'max_tokens': settings.max_tokens} if settings.max_tokens is not None else {}
             response = client.chat.completions.create(
                 model=settings.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                # max_tokens follows the baseline's compatible chat interface.
-                # Support by the organizer's actual endpoint still needs a live check.
-                **limits,
+                **kwargs,
             )
     except APITimeoutError:
         raise QwenError("Qwen не ответил до истечения таймаута. Повторный запрос автоматически не отправлялся.") from None

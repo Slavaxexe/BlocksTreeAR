@@ -59,15 +59,14 @@ class Settings:
                 bool(url.hostname)
                 and not url.username and not url.password
                 and not url.query and not url.fragment
-                and (url.scheme == "https" or (
-                    url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
-                ))
+                # The platform may expose its injected proxy on an internal HTTP host.
+                and url.scheme in {"https", "http"}
             )
             url.port  # Also validate an explicitly supplied port.
         except ValueError:
             valid_url = False
         if not valid_url:
-            raise ConfigurationError("OPENAI_BASE_URL: нужен HTTPS base URL без логина, пароля и query-параметров.")
+            raise ConfigurationError("OPENAI_BASE_URL: нужен HTTP(S) base URL без логина, пароля и query-параметров.")
         if self.timeout_seconds is not None and (not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть конечным положительным числом.")
         if self.max_tokens is not None and self.max_tokens <= 0:

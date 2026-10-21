@@ -1,7 +1,6 @@
 """Stateless Qwen roles with bounded repair and locally validated JSON."""
 
 import asyncio
-from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -13,8 +12,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from pydantic import ValidationError
 
 from .config import Settings
-from .contracts import (Analysis, DataFacts, Extraction, LLMCall, MetricFacts, OutputFacts,
-                        PreparationDraft, ProblemFacts, Program, Proposal, Proposals, RunReport)
+from .contracts import (Analysis, DataFacts, Extraction, Ideas, LLMCall, MetricFacts, NodePlan, OutputFacts,
+                        PreparationDraft, ProblemFacts, Program, RunReport)
 from .qwen import QwenError, QwenTemporaryError
 from .storage import append_event, fingerprint, save
 
@@ -23,7 +22,7 @@ NODE_RULES = (
     "Shared preparation is ALREADY FINISHED; execution_contract describes the actual ready inputs. "
     "The worker supplies fit (with targets), validation/test (WITHOUT targets), metadata and auxiliary tables. "
     "Do not plan or implement input loading, profiling, a new outer split, a scorer or a submission writer. "
-    "Do not read files or reconstruct full train. Do not request or invent validation/test labels. "
+    "Do not read input data files or reconstruct full train. Do not request or invent validation/test labels. "
     "Operate directly on supplied state keys; avoid alias-only setup blocks. Do not mutate shared inputs; "
     "return transformed data under new keys. Your work is features, model fitting and prediction. "
     "Internal folds, cross-validation or resampling WITHIN fit are allowed; the fixed outer validation/test "
@@ -32,20 +31,36 @@ NODE_RULES = (
     "If transformed tables contain features only, the fitting block must read targets from original fit "
     "and list fit in requires, or receive explicitly provided aligned targets from an earlier block. "
     "If a transformation changes fit rows/order, it must also provide the correspondingly aligned targets. "
+    "Use any installed_libraries package, including boosting, AutoML, optimization and neural networks. "
+    "AutoML may own preprocessing, fitting and internal tuning in one block; avoid redundant preprocessing. "
+    "Its internal folds must stay within fit. No downloads or pretrained models. "
+    "Use preparation.runtime for remaining training time, CPU limits and the node work directory. "
+    "For supported single-target tabular tasks, a built-in adapter is available: "
+    "from agent.automl import run_automl; run_automl(state, engine='flaml' or 'autogluon', "
+    "task_type=..., prediction_type=..., class_labels=...) returns prediction DataFrames in a state update dict. "
+    "It handles fit-only inner validation and runtime limits. Use it for ordinary AutoML candidates; "
+    "write custom model code when the hypothesis needs behavior outside its supported contract. "
     "Before finalizing an assembly, trace where every supervised fitting block gets both features and targets; "
     "never describe a target as removed by its producer and present for its consumer. "
 )
 
 
+def json_text(content):
+    text = (content or '').strip()
+    lines = text.splitlines()
+    # Remove only a complete outer fence; Python code inside JSON stays untouched.
+    if (len(lines) >= 3 and lines[0].strip().lower() in {'```', '```json'}
+            and lines[-1].strip() == '```'):
+        text = '\n'.join(lines[1:-1]).strip()
+    return text
+
+
+# Compatibility for callers of the max branch JSON helper.
+response_json = json_text
+
+
 def plan_key(plan):
     return fingerprint({'pipeline': plan.hypothesis.pipeline.model_dump(), 'assembly': plan.assembly.model_dump()})
-
-
-@dataclass(frozen=True)
-class PlannedBatch:
-    proposals: list[Proposal]
-    rejected: list[dict]
-    error: str | None = None
 
 
 class JSONAgents:
@@ -85,12 +100,12 @@ class JSONAgents:
         return min(self.max_calls - self.requests, self.budget['limit'] - self.budget['requests'])
 
     async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
-                  validation: dict | None = None):
+                  validation: dict | None = None, thinking: bool | None = None):
         # Waiting for another agent must consume the run deadline, not its HTTP timeout or call budget.
         self.log('agent_queued', role=role)
         try:
-            await asyncio.wait_for(self.slots.acquire(),
-                                  None if math.isinf(self.deadline) else max(0., self.deadline - time.monotonic()))
+            remaining = max(0., self.deadline - time.monotonic())
+            await asyncio.wait_for(self.slots.acquire(), remaining if math.isfinite(remaining) else None)
         except TimeoutError:
             raise QwenError('Исчерпан лимит времени в очереди обращений к Qwen.') from None
         token = object()
@@ -98,7 +113,7 @@ class JSONAgents:
             self.root.active[token] = {'role': role, 'node_id': self.node_id, 'block': self.block}
             if self.root.on_activity:
                 self.root.on_activity()
-            return await self._ask(schema, prompt, role, source=source, code=code, validation=validation)
+            return await self._ask(schema, prompt, role, source=source, code=code, validation=validation, thinking=thinking)
         except (Exception, asyncio.CancelledError):
             self.log('agent_failed', role=role, traceback=traceback.format_exc())
             raise
@@ -108,7 +123,7 @@ class JSONAgents:
             if self.root.on_activity:
                 self.root.on_activity()
 
-    async def _ask(self, schema, prompt: str, role: str, *, source=None, code=False, validation=None):
+    async def _ask(self, schema, prompt: str, role: str, *, source=None, code=False, validation=None, thinking=None):
         messages = [
             {"role": "system", "content": (
                 "Return ONLY one JSON object matching the supplied JSON Schema. "
@@ -122,7 +137,9 @@ class JSONAgents:
         ]
         # Some compatible reasoning backends produce JSON-shaped reasoning instead
         # of the requested program under json_object grammar constraints.
-        json_mode = not code
+        thinking = role in {'baker', 'analyzer'} if thinking is None else thinking
+        reasoning_effort = 'medium' if thinking else 'low'
+        json_mode = not code and not thinking
         max_tokens = self.settings.max_tokens
         invalid_responses = 0
         network_retries = 0
@@ -139,14 +156,14 @@ class JSONAgents:
             self.record(Path('llm') / f'{request_id:04d}.request.json', {
                 'role': role, 'node_id': self.node_id, 'block': self.block, 'attempt': attempt,
                 'model': self.settings.model, 'messages': messages, 'json_mode': json_mode,
-                'timeout_seconds': timeout, 'max_tokens': max_tokens})
+                'timeout_seconds': timeout, 'max_tokens': max_tokens,
+                'thinking': thinking, 'reasoning_effort': reasoning_effort})
             self.log('api_started', role=role, request_id=request_id, attempt=attempt)
             try:
                 async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
                                        max_retries=0, timeout=timeout) as client:
-                    kwargs = {"extra_body": {
-                        "enable_thinking": False, "reasoning_effort": "low",
-                        "chat_template_kwargs": {"enable_thinking": False, "reasoning_effort": "low"}}}
+                    thinking_options = {"enable_thinking": thinking, "reasoning_effort": reasoning_effort}
+                    kwargs = {"extra_body": {**thinking_options, "chat_template_kwargs": thinking_options}}
                     if json_mode:
                         kwargs['response_format'] = {"type": "json_object"}
                     if max_tokens is not None:
@@ -187,24 +204,29 @@ class JSONAgents:
             self.record(Path('llm') / f'{request_id:04d}.response.json', {
                 'content': content, 'finish_reason': finish_reason,
                 'usage': usage.model_dump() if usage else None, **stats})
+            document = json_text(content)
+            if document != (content or '').strip():
+                self.log('api_json_unwrapped', role=role, request_id=request_id)
             try:
                 if finish_reason == 'length':
                     raise ValueError('Token limit reached')
-                json.dumps(json.loads(content or ''), allow_nan=False)
-                result = schema.model_validate_json(content or "", context={"source": source, **(validation or {})})
+                json.dumps(json.loads(document), allow_nan=False)
+                result = schema.model_validate_json(document, context={"source": source, **(validation or {})})
             except (ValidationError, ValueError) as error:
                 invalid_responses += 1
                 details = ([{"loc": e["loc"], "type": e["type"], "reason": e["msg"]} for e in error.errors()][:8]
                            if isinstance(error, ValidationError) else [{'reason': (
                                'Response reached max_tokens before completion' if finish_reason == 'length'
-                               else 'Empty response' if not content else 'Invalid JSON or non-finite number')}])
+                               else 'Empty response' if not document else str(error))}])
                 reason = json.dumps(details, ensure_ascii=False)
                 self.calls.append(LLMCall(status="invalid_json", error=reason, **stats))
                 self.log('api_invalid_json', role=role, request_id=request_id, errors=details,
                          duration_seconds=time.monotonic() - started)
                 if invalid_responses == 2 or attempt == 3:
                     raise QwenError(f"Qwen: роль {role} дважды нарушила JSON-контракт. {reason}") from None
-                if not content or finish_reason == 'length':
+                if code:
+                    thinking, reasoning_effort = True, 'medium'
+                if not document or finish_reason == 'length':
                     # An empty/truncated answer is not a JSON document that can be repaired.
                     # Regenerate from the original task, leaving room for provider reasoning.
                     if finish_reason == 'length' and max_tokens is not None:
@@ -289,8 +311,8 @@ class JSONAgents:
     async def prepare(self, context: dict):
         prompt = (
             "Prepare this NEW task without assuming public dataset names, CSV, a particular target or metric. "
-            "Use the extracted requirements and available file inventory. Only installed Python stdlib, numpy, "
-            "pandas, scipy and sklearn are available; no internet, installation, pretrained models or subprocesses. "
+            "Use the extracted requirements and file inventory. Use Python stdlib and packages listed in "
+            "installed_libraries; no internet, installation, pretrained models or direct subprocess calls. "
             "Choose validation to match what the task asks the model to predict. A date or group-like "
             "column alone does not require a time or group split. Inspect the actual train table inside "
             "make_split as needed to avoid leakage and account for class balance. Choose the outer split "
@@ -323,23 +345,47 @@ class JSONAgents:
             + json.dumps(context, ensure_ascii=False))
         return await self.ask(PreparationDraft, prompt, "preparer", code=True)
 
-    async def plan_baseline(self, context: dict):
-        result = await self.ask(Proposals, NODE_RULES + "Return exactly one baseline proposal, purpose=baseline, parent_id=null. "
-            "Design a simple trainable solution and bootstrap its reusable modules now: no saved blocks exist yet. "
-            "Use meaningful boundaries such as transformations and model fitting/prediction where appropriate; "
-            "do not pack independently reusable stages into one whole-solution block or create empty pass-throughs. "
-            "There is no fixed module count or predefined stage registry; keep jointly trained components together. "
-            "Return an ORDERED assembly.blocks list. All blocks have source_node=null and must appear in "
-            "assembly.write_blocks. A separate implementer will write each listed block IN PARALLEL, before any "
-            "block runs. Specify compatible types, shapes, feature ordering and object APIs in descriptions so "
-            "agents can agree without seeing each other's code. Every module defines run(state) -> dict updates. "
-            "Initial keys are fit, validation, test, preparation, auxiliary. Each requires key must already exist; "
-            "earlier blocks add their provides keys. Final keys are validation_predictions and test_predictions, "
-            "pandas DataFrames in original row order. Learn from fit only; validation/test have no targets. "
-            "Honor installed_libraries, remaining_seconds and experiment_timeout_seconds; keep this first solution simple. "
-            "Describe the intended algorithm in hypothesis and exact state interfaces in assembly. Do not write code.\n"
-            + json.dumps(context, ensure_ascii=False), 'baker', validation={'baseline': True, 'count': 1, 'catalog': {}})
-        return result.proposals[0]
+    async def propose_ideas(self, context: dict):
+        prompt = (
+            "Suggest exactly the requested purposes in their given order. Return short, concrete ML hypotheses, "
+            "not assembly plans or code. Each idea states one coherent change, affected block names and its "
+            "expected effect. Include relevant algorithm choices or parameter values in change. "
+            "Use measured results and analyzer findings; avoid previous, queued or rejected ideas. "
+            "Improve extends leader_id; explore tests a different direction using an available parent. "
+            "For baseline, use parent_id=null and suggest a simple trainable starting solution. "
+            "The separate node planner defines module interfaces; do not describe requires/provides or repeat "
+            "saved block specifications here. Shared data loading, outer split, metric and output are already fixed. "
+            "Use any package in installed_libraries, including FLAML, AutoGluon, LightAutoML, boosting and "
+            "neural networks when available. AutoML with internal fit-only tuning is a valid hypothesis; "
+            "keep tightly coupled preprocessing and training together. Select methods for this task and budget, "
+            "rather than always using sklearn or always using AutoML. Do not invent scores.\n"
+        )
+        result = await self.ask(Ideas, prompt + json.dumps(context, ensure_ascii=False, separators=(',', ':')),
+            'baker', validation={'purposes': context['purposes'], 'parents': context['available_parents'],
+                                 'leader': context['leader_id']})
+        return result.ideas
+
+    async def plan_node(self, context: dict, idea, catalog):
+        prompt = (NODE_RULES +
+            "You are the node planner. Turn ONE supplied idea into a complete, compatible module assembly. "
+            "Preserve its intent and parent; use the current findings and saved module catalog. "
+            "Return order (all block names in execution order), reuse (name/source_node references only) and "
+            "write (complete Block specifications for only the new or changed modules). Python copies saved "
+            "interfaces for reuse; do not repeat them. Each block appears exactly once in reuse or write. "
+            "A written block may reference saved source_node for editing or use null for a new implementation. "
+            "Use meaningful reusable boundaries, while keeping jointly trained components together. "
+            "For baseline, create the first reusable blocks; all blocks must be in write with source_node=null. "
+            "A separate implementer writes each requested block in parallel. Specify compatible types, shapes, "
+            "column order and object APIs in written block descriptions. Trace the feature and target flow. "
+            "Each run(state) returns declared provides keys. Initial state keys are fit, validation, test, "
+            "preparation, auxiliary. Final outputs are validation_predictions and test_predictions DataFrames "
+            "in original row order. Optional blocks may be omitted; there are no fixed module slots. "
+            "Describe concrete algorithms and parameters in hypothesis.pipeline, not only in its rationale. "
+            "Honor installed libraries and time limits. Do not write code or invent scores.\n")
+        plan = await self.ask(NodePlan, prompt + json.dumps(context, ensure_ascii=False, separators=(',', ':')),
+            'node_planner', validation={'idea': idea, 'catalog': catalog,
+                'parents': [idea.parent_id], 'leader': idea.parent_id})
+        return plan.proposal(idea, catalog)
 
     async def implement(self, context: dict):
         return await self.ask(Program, NODE_RULES + "Write ONLY the requested target_block module, defining run(state) -> dict. "
@@ -349,7 +395,8 @@ class JSONAgents:
             "descriptions for input/output types, shapes, column order and object APIs exactly. Do not import "
             "sibling modules or depend on their private helpers; communicate only through the declared state. "
             "state initially holds fit, validation, test, preparation, auxiliary, then previous blocks' outputs. "
-            "preparation has EXACTLY the JSON structure supplied in this context. auxiliary contains other named "
+            "preparation is a dict with the supplied metadata plus runtime fields described in execution_contract. "
+            "auxiliary contains other named "
             "input tables (sample/dictionary/etc.), excluding full labeled train and test. "
             "Return a dict of updates, including every provides key. Values may be arrays, models, functions, "
             "tables or nested objects; intermediate names and the internal algorithm are unrestricted. "
@@ -362,13 +409,26 @@ class JSONAgents:
             "Inside run(state), raise a clear ValueError on failure; never return model=None or a blocked_reason "
             "state update to hide failure. Do not include speculative reasoning as long code comments. "
             "Final validation_predictions and test_predictions must be pandas DataFrames in original row order. "
-            "Use only installed stdlib, numpy, pandas, scipy, sklearn and joblib; no network, installation, "
-            "subprocesses or file access. Do not alter shared preparation, split, metric or submission writer. "
+            "Use stdlib and packages listed in installed_libraries. No network, installation, pretrained models "
+            "or direct subprocess calls. Do not load task files or alter shared preparation, split, metric or writer. "
+            "AutoML may tune and validate internally using fit only. Use preparation.runtime.deadline minus "
+            "time.monotonic() to budget search and its num_cpus/num_gpus limits. Divide the total budget across "
+            "fitting blocks; the smoke check has a smaller budget. Set time_budget for FLAML, time_limit for "
+            "AutoGluon, or timeout for LightAutoML; adapt other frameworks similarly. "
+            "All fitting blocks share ONE deadline: a reused block runs again, it is not a cached fitted model. "
+            "Reserve time for later fitting blocks, final refit and prediction before allocating tuning time. "
+            "Check time before every trial AND fold; use library training callbacks or supported time limits "
+            "to stop a long fit, since checking only between trials cannot enforce a deadline. "
+            "Keep smoke training small. Use direct public library APIs for the installed versions; "
+            "do not invent import paths, keyword arguments or dynamic import fallbacks during repair. "
+            "Libraries may persist models/cache under preparation.runtime.work_directory only. Create a unique "
+            "subdirectory for each invocation (smoke and full training); keep it alive through prediction. "
             "Write readable code without a line limit. At module scope use imports, functions, classes and literal "
-            "constants; put computations inside functions. No main block, printing or file writes. "
+            "constants; put computations inside functions. No main block, printing or writes outside the node directory. "
             "On repair use previous_code, execution_error and failed_stage; correct only target_block, "
             "keeping its interface. Explain implementation details in notes, never invent scores.\n"
-            + json.dumps(context, ensure_ascii=False), "implementer", code=True)
+            + json.dumps(context, ensure_ascii=False), "implementer", code=True,
+            thinking=bool(context.get("execution_error")))
 
     async def analyze(self, context: dict):
         return await self.ask(Analysis, NODE_RULES + "Analyze this recorded attempt, which may have failed BEFORE execution. "
@@ -379,6 +439,14 @@ class JSONAgents:
             "with evaluation_status=completed is a measured score. Distinguish infrastructure errors from code bugs. "
             "Use the ordered assembly, ALL block sources, recorded result, brief repair errors and comparisons. "
             "Distinguish measured facts from possible explanations. "
+            "input_facts describe measured INPUTS, not model internals or completed training. "
+            "smoke and full execution are separate: a class absent from smoke may exist in full fit. "
+            "Repair errors describe earlier failed versions, not necessarily the final program. "
+            "execution_stages distinguish completed, failed and interrupted phases; a time-budget "
+            "interruption is not proof of a model exception or an infinite loop. "
+            "Do not equate max trials with completed trials, or total node duration with training time. "
+            "Treat unrecorded correlations, selected hyperparameters, actual class weighting effects "
+            "and causes of score changes as hypotheses, explicitly marked unverified. "
             "Explain what changed, what worked or failed, and which concrete ideas should be tried next. "
             "Identify the block relevant to each finding or next idea. A failed attempt can suggest a block bugfix. "
             "Check whether the actual implementation matches the saved plan. "
@@ -386,83 +454,16 @@ class JSONAgents:
             "Keep the summary brief. Do not write code or alter the metric, split or task.\n"
             + json.dumps(context, ensure_ascii=False), "analyzer")
 
-    async def propose(self, context: dict, *, log_directory: Path | None = None):
-        prompt_context = {key: value for key, value in context.items() if key != 'used'}
-        prompt = (NODE_RULES + "Plan exactly count DISTINCT experiments in the requested purposes order. "
-            "Follow the requested purposes list: the controller reserves one slot for explore and the rest for improve. "
-            "Improve must extend leader_id; explore should test a different algorithm or pipeline and may use "
-            "another available parent. Use completed analyzer findings, scores/errors and pending plans. "
-            "Each proposal is ONE coherent hypothesis implementation with an ORDERED assembly.blocks list and "
-            "assembly.write_blocks naming ALL modules to create or change for this hypothesis. "
-            "Reuse any compatible saved modules from module_catalog by name and source_node, retaining their "
-            "description, requires and provides exactly for unchanged modules. Each write_blocks entry may modify "
-            "a saved module or create a new one with source_node=null; ALL new modules must be listed. "
-            "You may create or change several blocks together, including updating consumers when an interface changes. "
-            "A separate implementer writes each requested block IN PARALLEL, without seeing other new sources. "
-            "Agree exact types, shapes, feature/column order and object APIs in block descriptions. "
-            "Prefer reusing useful compatible stages; when the catalog lacks them, create meaningful reusable "
-            "blocks instead of repeatedly rewriting an entire solution. Omit optional modules to disable them; "
-            "list order is execution order. "
-            "Initial state keys: fit, validation, test, preparation, auxiliary. auxiliary contains extra named "
-            "input tables, excluding full train/test. Each run(state) returns declared provides keys; "
-            "values can be arbitrary in-memory objects. Every requires key must be available from initial state or "
-            "earlier blocks. Final state must contain validation_predictions and test_predictions. "
-            "No fixed features/model/train slots: name blocks for this task. A single composite block can implement "
-            "an entire coupled algorithm, ensemble, internal loop or other unusual approach. Sequential composition "
-            "must not force decomposition of jointly trained components. Plan one coherent hypothesis per node. "
-            "Do not require hidden validation labels, a changed scorer/split or full-train refit. "
-            "Fit on fit rows and predict unlabeled validation/test; preserve their row order. "
-            "Honor installed libraries, experiment_timeout_seconds and remaining_seconds. "
-            "Avoid pending/previous identical experiments. A different rationale alone is not a new experiment: "
-            "record concrete algorithm, parameter or preprocessing changes in pipeline and assembly. "
-            "Use rejected_plans as examples to avoid; always honor the CURRENT count and purposes. "
-            "accepted_proposals are already kept from this batch: do not return them again. "
-            "duplicate_of identifies the saved node or accepted proposal that the rejected plan repeats. "
-            "Do not write code or invent scores.\n")
-        used, accepted, rejected = dict(context['used']), [], []
-        for round_number in (1, 2):
-            try:
-                batch = await self.ask(Proposals,
-                    prompt + json.dumps(prompt_context, ensure_ascii=False, separators=(',', ':')), 'baker', validation={
-                        'count': prompt_context['count'], 'purposes': prompt_context['purposes'],
-                        'parents': context['available_parents'], 'leader': context['leader_id'],
-                        'catalog': context['module_catalog']})
-            except QwenError as error:
-                if log_directory:
-                    save(log_directory / f'response_{round_number:02d}.json', {'error': str(error)})
-                if not accepted:
-                    raise
-                return PlannedBatch(accepted, rejected, str(error))
-            duplicates = []
-            for index, proposal in enumerate(batch.proposals):
-                key = plan_key(proposal)
-                if key in used:
-                    duplicates.append({'index': index, 'purpose': proposal.purpose,
-                        'duplicate_of': used[key], 'proposal': proposal.model_dump(mode='json')})
-                else:
-                    accepted.append(proposal)
-                    used[key] = f'accepted_proposal_{len(accepted)}'
-            rejected.extend(duplicates)
-            if log_directory:
-                save(log_directory / f'response_{round_number:02d}.json', {
-                    'proposals': batch.model_dump(mode='json')['proposals'], 'rejected': duplicates})
-            if not duplicates or not self.remaining_calls or time.monotonic() >= self.deadline:
-                break
-            prompt_context = {**prompt_context, 'count': len(duplicates),
-                'purposes': [item['purpose'] for item in duplicates], 'rejected_plans': duplicates,
-                'accepted_proposals': [p.model_dump(mode='json') for p in accepted]}
-        return PlannedBatch(accepted, rejected)
 
 
 async def extract_task(task_path: Path, output: Path, settings: Settings, *, agents: JSONAgents | None = None):
     """Extraction does not read datasets or reject unsupported execution capabilities."""
     text = task_path.read_text(encoding="utf-8")
-    agents = agents or JSONAgents(settings,
-        time.monotonic() + 2 * settings.timeout_seconds if settings.timeout_seconds else math.inf, max_calls=0)
+    deadline = time.monotonic() + 2 * settings.timeout_seconds if settings.timeout_seconds else math.inf
+    agents = agents or JSONAgents(settings, deadline)
     output.mkdir(parents=True, exist_ok=False)
     agents.root.log_directory = output
-    agents.log('run_started', task=str(task_path),
-               max_llm_calls=None if math.isinf(agents.budget['limit']) else agents.budget['limit'])
+    agents.log('run_started', task=str(task_path), max_llm_calls=None if math.isinf(agents.budget['limit']) else agents.budget['limit'])
     report = RunReport(status="running", task_sha256=hashlib.sha256(text.encode()).hexdigest())
     save(output / "report.json", report)
     try:

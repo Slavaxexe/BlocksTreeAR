@@ -13,7 +13,7 @@ import httpx
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 
-from agent.agents import JSONAgents, extract_task
+from agent.agents import JSONAgents, extract_task, response_json
 from agent.config import Settings
 from agent.contracts import DataFacts, Extraction, ProblemFacts, Program
 from agent.storage import load, save
@@ -61,6 +61,11 @@ def expected(name):
 
 
 class ExtractionTests(unittest.IsolatedAsyncioTestCase):
+    def test_markdown_wrapper_is_removed_without_accepting_surrounding_text(self):
+        self.assertEqual(response_json('```json\n{"format":"CSV"}\n```'), '{"format":"CSV"}')
+        self.assertEqual(response_json('```\n{}\n```'), '{}')
+        self.assertEqual(response_json('Explanation\n```json\n{}\n```'), 'Explanation\n```json\n{}\n```')
+
     async def test_network_retry_does_not_consume_json_repair(self):
         _, text, facts = expected('regression')
         settings = Settings('fake', 'https://qwen.example/v1', 'model')

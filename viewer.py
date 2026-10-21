@@ -52,7 +52,7 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
                 warnings.append(f'{path.name}: исходник недоступен')
                 return None
         task = read(folder / "task.json")
-        run = {key: read(folder / f"{key}.json") for key in ("profile", "validation", "best", "delta", "report", "preparation")}
+        run = {key: read(folder / f"{key}.json") for key in ("profile", "validation", "best", "delta", "report", "preparation", "ideas")}
         block_directory = folder / 'extraction' if (folder / 'extraction').is_dir() else folder
         blocks = {key: read(block_directory / f"{key}.json") for key in ("problem", "data", "metric", "output")}
         extraction = read(folder / "extraction.json")
@@ -194,8 +194,8 @@ nav{flex-wrap:wrap}
 <header><div><h1>Поиск ML-решений</h1><small>3 ноды: 2 улучшения + 1 исследование · до 8 агентов Qwen</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel" hidden><p class="muted">Общая подготовка фиксирует условия сравнения. Нода реализует одну гипотезу и может создавать или менять несколько блоков. Их агенты пишут код параллельно, а готовые блоки выполняются по порядку.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Три ноды, до восьми агентов блоков, сборщик и анализатор"></svg></div><p class="footnote">На каждый блок: первая версия и до двух исправлений, включая ошибки полного запуска. Исправляется только проблемный блок. Лимит 8 общий для реализаторов, Baker, анализаторов и извлечения.</p></section>
-<section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><p id="tree-legend" class="legend"></p><div id="assembly-overview" class="assembly-overview" hidden></div><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Основные предки и источники модулей"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранной ноды"></aside></div></div><p id="tree-note" class="footnote"></p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">Baker предлагает короткие идеи. Планировщики нод параллельно готовят сборки; каждый готовый план сразу передаётся агентам блоков. Общая подготовка фиксирует условия сравнения.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Baker, очередь идей, планировщики нод, агенты блоков и анализатор"></svg></div><p class="footnote">По умолчанию на блок: первая версия и до четырёх исправлений, включая ошибки полного запуска. Исправляется только проблемный блок. Лимит 8 общий для реализаторов, планировщиков нод, Baker, анализаторов и извлечения.</p></section>
+<section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><div id="ideas-overview" class="assembly-overview" hidden></div><p id="tree-legend" class="legend"></p><div id="assembly-overview" class="assembly-overview" hidden></div><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Основные предки и источники модулей"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранной ноды"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
 const $=id=>document.getElementById(id), NS='http://www.w3.org/2000/svg';
@@ -226,8 +226,8 @@ function architecture(){
    ['02 Извлечение · Qwen',['Четыре запроса → факты'],'llm'],
    ['03 Подготовка · Qwen',['Общий prepare.py'],'llm'],
    ['04 Условия · Python',['Профиль, split, scorer'],'cpu'],
-   ['05 Baker · Qwen',['Анализы + каталог модулей'],'llm'],
-   ['06 План до реализации',['Порядок + список write_blocks'],''],
+   ['05 Baker · Qwen',['Короткие идеи → очередь'],'llm'],
+   ['06 Планировщики · Qwen',['Одна идея → план одной ноды'],'llm'],
    ['07 Три параллельные ноды',['2 улучшения + 1 исследование'],''],
    ['08 Агенты блоков · Qwen',['До 8 обращений для всех ролей'],'llm'],
    ['09 Сборщик · Python',['Снимки блоков + интерфейсы'],''],
@@ -256,8 +256,8 @@ function architecture(){
  box(c,40,210,280,90,'04  Подготовка · Qwen',['Чтение, split, scorer, submission','Один общий prepare.py'],'llm');
  box(c,420,210,280,90,'05  Выполнение подготовки',['Профиль реальных данных','Фиксированный split'],'cpu');
  box(c,800,210,280,90,'06  Общие условия',['Метрика + форматы + профиль','Компактный контекст для ролей']);
- box(c,40,390,280,90,'07  Baker · Qwen',['До 3 нод одновременно','2 улучшения + 1 исследование'],'llm');
- box(c,420,390,280,90,'08  Сохранённый план',['Порядок, источники и интерфейсы','write_blocks: создать или изменить']);
+ box(c,40,390,280,90,'07  Baker · Qwen',['Короткие идеи → очередь','2 улучшения + 1 исследование'],'llm');
+ box(c,420,390,280,90,'08  Планировщики нод · Qwen',['Одна идея → порядок и новые блоки','Python подставляет готовые блоки'],'llm');
  box(c,800,390,280,90,'09  Агенты блоков · Qwen',['Отдельный агент на каждый блок','До 8 обращений для всех ролей'],'llm');
  box(c,40,570,280,90,'10  Сборщик · Python',['Копирует сохранённые версии','Проверяет порядок, входы и хеши']);
  box(c,420,570,280,90,'11  Обучение и оценка',['Короткая проверка → полный запуск','Общий scorer → finish.json'],'cpu');
@@ -281,7 +281,7 @@ function modeOf(run) {
     : run.nodes.some(n => n.start.source === 'offline') ? 'offline' : 'режим не записан';
 }
 function updatePicker() {
-  const select = $('runs'), runs = state.runs.filter(r => view === 'extraction' ? r.kind === 'extraction' : r.nodes.length || r.kind === 'experiment'); select.replaceChildren();
+  const select = $('runs'), runs = state.runs.filter(r => view === 'extraction' ? r.kind === 'extraction' : r.nodes.length || r.report || r.ideas?.ideas?.length || r.kind === 'experiment'); select.replaceChildren();
   for (const r of runs) {
     const label = r.kind === 'extraction' ? `${extractionStatus(r)} · ${r.id}`
       : `${r.id.includes('synthetic') ? 'Синтетика' : 'Данные'} · ${modeOf(r)} · ${r.id}`;
@@ -311,17 +311,33 @@ function render() {
     ['Агентов Qwen', (r.report?.active_agents?.length??0)+' / '+(r.report?.max_parallel_agents??'—')],
     ['Улучшения', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='improve').length??0],
     ['Исследование', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='explore').length??0],
-    ['В очереди', r.report?.queued_nodes?.length??0],
+    ['Идей в очереди', r.report?.queued_ideas?.length??0],
+    ['Планировщики нод', r.report?.planning_nodes?.join(', ')||'—'],
     ['Анализатор', r.report?.analyzing_nodes?.length?'Анализирует '+r.report.analyzing_nodes.join(', '):'—'],
-    ['Бейкер', r.report?.planning?'Планирует':'Ожидает результатов']
+    ['Бейкер', r.report?.planning?'Формулирует идеи':'Ожидает']
   ];
   $('summary').replaceChildren();
   for (const [label, value] of info) {
     const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
   }
-  drawTree(r); drawAssembly(r); drawDetail(r);
+  drawIdeas(r); drawTree(r); drawAssembly(r); drawDetail(r);
+}
+function drawIdeas(r) {
+  const panel=$('ideas-overview'); panel.replaceChildren();
+  const records=(r.ideas?.ideas??[]).filter(record=>['queued','planning','failed','rejected'].includes(record.status)).slice(-8);
+  panel.hidden=!records.length;
+  if(!records.length)return;
+  panel.append(element('h2','','Идеи и подготовка нод'));
+  const labels={queued:'В очереди',planning:'Планировщик готовит сборку',failed:'Ошибка планирования',rejected:'Повтор готового плана'};
+  for(const record of records){
+    const row=element('div','comparison');
+    row.append(element('b','',`${record.id} · ${purposes[record.idea.purpose]??record.idea.purpose} · ${labels[record.status]}${record.node_id?' · '+record.node_id:''}`),element('p','',record.idea.change));
+    if(record.error)row.append(element('small','error-text',record.error));
+    panel.append(row);
+  }
 }
 function drawExtraction(r) {
+  $('ideas-overview').hidden=true;
   $('assembly-overview').hidden=true;
   if (!(selected in roles) && !['result', 'preparation', 'node_000', 'delta'].includes(selected)) selected = Object.keys(roles).find(k => r.blocks[k]) ?? 'result';
   const c = $('tree'), report = r.report, accepted = Object.values(r.blocks).filter(Boolean).length;
@@ -373,13 +389,13 @@ function drawExtractionDetail(r) {
   const d = $('detail'), key = selected, report = r.report; d.replaceChildren();
   if (key === 'node_000') {
     if (r.nodes.some(n=>n.id===key)) { drawDetail(r); return; }
-    d.append(element('h2', '', 'Baseline'), element('p', '', 'Baker сохранит start.json до реализации. Затем появятся код и результат либо причина отказа.')); return;
+    d.append(element('h2', '', 'Baseline'), element('p', '', 'Baker предложит идею, планировщик подготовит сборку, Python сохранит start.json. Затем появятся код и результат либо причина отказа.')); return;
   }
   d.append(element('h2', '', key === 'result' ? 'Извлечение и сборка' : key==='preparation'?'Подготовка данных':key==='delta'?'История экспериментов':roles[key]+' · '+key+'.json'));
   d.append(element('small', 'mono', (key in roles?r.block_directory:r.directory)+'/'+(key === 'result' ? 'extraction.json' : key+'.json')));
   if (key === 'result' || key === 'preparation' || key === 'delta') {
     d.append(element('p', '', key==='result' ? 'extraction.json объединяет ответы с evidence. report.json хранит этап, ошибки и попытки API.'
-      : key==='delta' ? 'Python сравнил планы и измеренные score. Baker получает эту историю для следующей пары гипотез.'
+      : key==='delta' ? 'Python сравнил планы и измеренные score. Baker получает эту историю для следующих идей.'
       : 'Qwen предложил чтение, split и scorer в prepare.py. Python измерил профиль и сохранил общие условия экспериментов.'));
     if (key === 'delta') {
       const button = element('button', '', 'Открыть дерево экспериментов'); button.onclick = () => showTab('tree'); d.append(button);
@@ -462,7 +478,8 @@ function drawTree(r) {
     g.append(svg('text', {x:p.x+15, y:p.y+24, class:'caption'}, n.id + ' · ' + (purposes[n.start.purpose??n.start.context?.purpose]??n.start.source)));
     if (best) g.append(svg('text', {x:p.x+189, y:p.y+24, class:'best-label'}, 'ЛИДЕР'));
     const model = n.start.hypothesis?.pipeline?.model;
-    const label = families[model?.family] ?? model?.family ?? model?.name ?? model?.type ?? 'Описание модели в JSON';
+    const label = [model?.algorithm, model?.name, model?.framework, families[model?.family], model?.family, model?.type]
+      .find(value => typeof value === 'string' && value.trim()) ?? 'Модель не указана';
     g.append(svg('text', {x:p.x+15, y:p.y+46, class:'title'}, String(label).slice(0, 30)));
     g.append(svg('text', {x:p.x+15, y:p.y+73, class:'score'}, fmt(f?.value)));
     g.append(svg('text', {x:p.x+15, y:p.y+95, class:'caption'}, status + duration));
@@ -492,7 +509,7 @@ function drawAssembly(r){
    element('small','', 'Выход: '+b.provides.join(', ')));
   const progress=r.report?.node_states?.[n.id]?.blocks?.[b.name];
   if(progress){const label=progress.stage==='implementation'?(agents.has(b.name)?'Агент пишет код':'Ожидает места для Qwen'):(phases[progress.stage]??progress.stage);
-   card.append(element('small','',label+(progress.attempt?' · версия '+progress.attempt+'/3':'')));}
+   card.append(element('small','',label+(progress.attempt?' · версия '+progress.attempt+'/'+(n.start.context?.max_code_attempts??3):'')));}
   if(b.source_node){const button=element('button','',(edited||repaired.has(b.name)?'Основа: ':'Из ')+b.source_node);button.onclick=()=>{selected=b.source_node;render()};card.append(button);}
   else card.append(element('small','','Создан в этой ноде'));
   chain.append(card);
@@ -510,7 +527,7 @@ function drawDetail(r) {
   const purpose=n.start.purpose??n.start.context?.purpose;
   if (purpose) d.append(element('p', 'muted', 'Роль: '+(purposes[purpose]??purpose)));
   const calls = r.report?.llm_calls?.filter(call=>call.node_id===n.id&&call.role==='implementer')??[];
-  if (calls.length) d.append(element('small', '', 'Запросов реализаторов: '+calls.length+' · версий блоков: '+(n.attempts?.length??0)+' · до 3 на каждый блок'));
+  if (calls.length) d.append(element('small', '', 'Запросов реализаторов: '+calls.length+' · версий блоков: '+(n.attempts?.length??0)+' · до '+(n.start.context?.max_code_attempts??3)+' на каждый блок'));
   if (n.finish) d.append(element('p', 'metric', `${n.finish.metric?.name??'Метрика'}: ${fmt(n.finish.value)} · ${n.finish.evaluation_status??n.finish.status}`));
   d.append(element('h3', '', 'Гипотеза'), element('p', '', n.start.hypothesis?.rationale ?? '—'));
   d.append(element('small', '', n.start.hypothesis?.expected_effect ?? ''));

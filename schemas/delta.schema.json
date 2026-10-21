@@ -490,22 +490,18 @@
       "additionalProperties": false,
       "properties": {
         "data": {
-          "description": "JSON object of data settings; never a string or list",
           "title": "Data",
           "type": "object"
         },
         "preprocessing": {
-          "description": "JSON object of preprocessing settings; never a string or list",
           "title": "Preprocessing",
           "type": "object"
         },
         "model": {
-          "description": "JSON object with estimator name and parameters; never a string or list",
           "title": "Model",
           "type": "object"
         },
         "training": {
-          "description": "JSON object of training settings; never a string or list",
           "title": "Training",
           "type": "object"
         }
