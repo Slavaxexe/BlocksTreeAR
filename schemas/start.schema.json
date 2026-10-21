@@ -94,6 +94,13 @@
         },
         "pipeline": {
           "$ref": "#/$defs/Pipeline"
+        },
+        "research_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Research Ids",
+          "type": "array"
         }
       },
       "required": [

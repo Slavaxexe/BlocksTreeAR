@@ -1,0 +1,53 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "parent_id": {
+      "anyOf": [
+        {
+          "pattern": "^research_[0-9]{3}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Id"
+    },
+    "question": {
+      "minLength": 1,
+      "title": "Question",
+      "type": "string"
+    },
+    "hypothesis": {
+      "minLength": 1,
+      "title": "Hypothesis",
+      "type": "string"
+    },
+    "method": {
+      "minLength": 1,
+      "title": "Method",
+      "type": "string"
+    },
+    "decision": {
+      "minLength": 1,
+      "title": "Decision",
+      "type": "string"
+    },
+    "code": {
+      "description": "Complete Python module: run(state) -> dict of measurements",
+      "minLength": 1,
+      "title": "Code",
+      "type": "string"
+    }
+  },
+  "required": [
+    "question",
+    "hypothesis",
+    "method",
+    "decision",
+    "code"
+  ],
+  "title": "ResearchPlan",
+  "type": "object"
+}

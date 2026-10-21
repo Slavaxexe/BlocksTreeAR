@@ -14,6 +14,10 @@
               "type": "string"
             },
             {
+              "pattern": "^research_[0-9]{3}$",
+              "type": "string"
+            },
+            {
               "type": "null"
             }
           ],
@@ -100,6 +104,7 @@
       "enum": [
         "extraction",
         "preparation",
+        "data_research",
         "baseline",
         "search",
         "complete"
@@ -221,7 +226,7 @@
       "type": "boolean"
     },
     "max_parallel_nodes": {
-      "default": 3,
+      "default": 6,
       "title": "Max Parallel Nodes",
       "type": "integer"
     },
@@ -243,6 +248,45 @@
       },
       "title": "Node States",
       "type": "object"
+    },
+    "max_parallel_research": {
+      "default": 0,
+      "title": "Max Parallel Research",
+      "type": "integer"
+    },
+    "researching_nodes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Researching Nodes",
+      "type": "array"
+    },
+    "research_nodes": {
+      "default": 0,
+      "title": "Research Nodes",
+      "type": "integer"
+    },
+    "research_revision": {
+      "default": 0,
+      "title": "Research Revision",
+      "type": "integer"
+    },
+    "research_insights": {
+      "default": 0,
+      "title": "Research Insights",
+      "type": "integer"
+    },
+    "research_stop_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Research Stop Reason"
     }
   },
   "required": [

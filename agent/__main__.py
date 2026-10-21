@@ -23,7 +23,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--time-budget", type=float, default=600)
     parser.add_argument("--experiment-timeout", type=float, default=240)
     parser.add_argument("--max-experiments", type=int, default=10, help="Всего нод, включая baseline.")
-    parser.add_argument("--parallel", type=int, default=3, help="Одновременных нод: по умолчанию 2 improve и 1 explore.")
+    parser.add_argument("--parallel", type=int, default=6, help="Одновременных нод основного дерева: по умолчанию 6.")
+    parser.add_argument("--research-parallel", type=int, default=0, help="Одновременных нод исследования данных; по умолчанию отключено.")
+    parser.add_argument("--max-research-nodes", type=int, default=12, help="Всего исследовательских нод на запуск.")
+    parser.add_argument("--research-timeout", type=float, default=60, help="Лимит выполнения одного исследования, секунд.")
     parser.add_argument("--parallel-agents", type=int, default=8, help="Одновременных обращений к Qwen для всех ролей.")
     parser.add_argument("--max-llm-calls", type=int, default=80, help="Лимит всех запросов Qwen, включая повторы.")
     parser.add_argument("--max-code-attempts", type=int, default=5,
@@ -49,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
                 options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout,
                     output_dir=output, max_experiments=args.max_experiments if args.command == "search" else 1,
                     parallel=args.parallel, parallel_agents=args.parallel_agents, max_llm_calls=args.max_llm_calls,
-                    max_code_attempts=args.max_code_attempts)
+                    max_code_attempts=args.max_code_attempts, research_parallel=args.research_parallel,
+                    max_research_nodes=args.max_research_nodes, research_timeout=args.research_timeout)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")

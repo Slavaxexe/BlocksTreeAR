@@ -10,6 +10,7 @@
         },
         "findings": {
           "items": {
+            "minLength": 1,
             "type": "string"
           },
           "title": "Findings",
@@ -17,6 +18,7 @@
         },
         "next_ideas": {
           "items": {
+            "minLength": 1,
             "type": "string"
           },
           "title": "Next Ideas",
@@ -350,6 +352,13 @@
         },
         "pipeline": {
           "$ref": "#/$defs/Pipeline"
+        },
+        "research_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Research Ids",
+          "type": "array"
         }
       },
       "required": [

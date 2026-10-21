@@ -12,14 +12,18 @@ import time
 import traceback
 from uuid import uuid4
 
+from ml_reference_tools import MAX_REFERENCE_ROUNDS
+
 from .agents import JSONAgents, extract_task
 from .assembly import BlockError, assemble, block_catalog, initialize, sources
 from .config import Settings
-from .context import execution_contract, history_view, preparation_view, requirements
+from .context import (execution_contract, history_view, idea_history_view, preparation_view,
+                      requirements, research_profile_view)
 from .contracts import Delta, Extraction, Finish, NodeDelta, Preparation, Start
 from .data import check_code, file_hash, installed_libraries, inventory, within
 from .qwen import QwenError
 from .search import Search
+from .research import Research
 from .storage import atomic_bytes, load, save
 
 
@@ -29,10 +33,13 @@ class Options:
     experiment_timeout: float = 240
     output_dir: Path | None = None
     max_experiments: int = 1
-    parallel: int = 3
+    parallel: int = 6
     parallel_agents: int = 8
     max_llm_calls: int = 80
     max_code_attempts: int = 5
+    research_parallel: int = 0
+    max_research_nodes: int = 12
+    research_timeout: float = 60
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -41,7 +48,7 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
         raise TimeoutError('Run time budget exhausted')
     env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
            'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1',
-           'OMP_NUM_THREADS': '2', 'OPENBLAS_NUM_THREADS': '2', 'MKL_NUM_THREADS': '2'}
+           'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}
     # Some ML libraries need the user/temp directories even without API credentials.
     for name in ('HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA'):
         if name in os.environ:
@@ -128,7 +135,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
         spec = next(b for b in start.assembly.blocks if b.name == name)
         path = node / 'modules' / f'{name}.py'
         if name not in clients:
-            clients[name] = JSONAgents(agents.settings, deadline, max_code_attempts * 3, shared=agents,
+            clients[name] = JSONAgents(agents.settings, deadline, max_code_attempts * (3 + MAX_REFERENCE_ROUNDS), shared=agents,
                                       node_id=start.node_id, block=name)
         while attempts.get(name, 0) < max_code_attempts:
             attempt = attempts[name] = attempts.get(name, 0) + 1
@@ -137,6 +144,15 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                        'previous_code': path.read_text(encoding='utf-8') if path.exists() else None,
                        'execution_error': error, 'failed_stage': failed_stage,
                        'remaining_run_seconds': max(0., deadline - time.monotonic())}
+            if error and failed_stage in {'check', 'execution'}:
+                providers = {}
+                for block in start.assembly.blocks:
+                    if block.name == name:
+                        break
+                    providers.update({key: block.name for key in block.provides})
+                dependencies = dict.fromkeys(providers[key] for key in spec.requires if key in providers)
+                request['dependency_code'] = {dependency: (node / 'modules' / f'{dependency}.py').read_text(encoding='utf-8')
+                                              for dependency in dependencies}
             save(attempt_dir / 'request.json', {'block': name, 'stage': failed_stage, 'execution_error': error})
             block_update(name, stage='implementation', attempt=attempt)
             agents.log('block_generation_started', node_id=start.node_id, block=name, attempt=attempt,
@@ -299,6 +315,8 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
 async def run(task_path: Path, options: Options, settings: Settings):
     if not 0 < options.time_budget <= 10800 or not 0 < options.experiment_timeout <= 10800:
         raise ValueError('Time budgets must be finite, positive and at most three hours')
+    if not 0 < options.research_timeout <= 10800 or not 0 <= options.max_research_nodes <= 1000 or options.research_parallel < 0:
+        raise ValueError('Research needs a positive timeout and nonnegative node/parallel limits')
     if (not 1 <= options.max_experiments <= 1000 or options.parallel < 1
             or options.parallel_agents < 1 or options.max_llm_calls < 1 or options.max_code_attempts < 1):
         raise ValueError('Use 1..1000 experiments and positive parallel, LLM call and code attempt limits')
@@ -311,7 +329,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
     if report.status == 'failed':
         return directory, report
     active, analyses, starts = {}, {}, {}
-    revision, published, search = 0, None, None
+    revision, published, search, research = 0, None, None, None
+    shared = {}
     delta, stop_reason = None, 'max_experiments'
 
     def update(**values):
@@ -319,7 +338,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
         report = report.model_copy(update={**values, 'llm_calls': list(agents.calls),
             'running_nodes': [s.node_id for s in active.values()], 'queued_nodes': [],
             'analyzing_nodes': list(analyses.values()), **(search.report() if search else {}),
+            **(research.report() if research else {}),
             'max_parallel_nodes': options.parallel, 'max_parallel_agents': options.parallel_agents,
+            'max_parallel_research': options.research_parallel,
             'active_agents': list(agents.active.values()),
             'experiments': len(starts), 'best_node': delta.best_node_id if delta else None})
         try:
@@ -344,6 +365,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
     def save_delta():
         save(directory / 'delta.json', delta)
         save(directory / 'journal.json', {'nodes': [n.model_dump(mode='json') for n in delta.nodes]})
+        if research:
+            research.model_feedback = [idea_history_view(row) for row in delta.nodes[-8:]]
         for row in delta.nodes:
             save(directory / 'nodes' / row.node_id / 'delta.json', row)
 
@@ -383,7 +406,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 facts = json.loads(path.read_text(encoding='utf-8'))
                 if facts['code_sha256'] == row.result.code_sha256:
                     context['input_facts'][phase] = {k: v for k, v in facts.items() if k != 'code_sha256'}
-        local = JSONAgents(settings, deadline, 3, shared=agents, node_id=row.node_id)
+        local = JSONAgents(settings, deadline, 3 + MAX_REFERENCE_ROUNDS, shared=agents, node_id=row.node_id)
         return await local.analyze(context)
 
     agents.on_activity = update
@@ -393,30 +416,46 @@ async def run(task_path: Path, options: Options, settings: Settings):
         context = {'task_text': task_path.read_text(encoding='utf-8'), 'task_directory': str(task_path.parent),
                    'extraction': requirements(extraction), 'inventory': inventory(task_path.parent),
                    'installed_libraries': installed_libraries()}
-        for attempt in range(3):
-            draft = await agents.prepare(context)
-            try:
-                check_code(draft.code, ('load_data', 'make_split', 'score', 'write_submission'))
-                for relative in draft.data.files.values():
-                    within(task_path.parent, relative)
-                within(directory / 'nodes' / 'node_000', draft.output.filename)
-                atomic_bytes(directory / 'prepare.py', draft.code.encode('utf-8'))
-                preparation = Preparation(task_directory=str(task_path.parent), rationale=draft.rationale,
-                    data=draft.data, validation=draft.validation, metric=draft.metric, output=draft.output,
-                    code_sha256=file_hash(directory / 'prepare.py'))
-                save(directory / 'preparation.json', preparation)
-                await process(['-m', 'agent.worker', '--prepare', str(directory)], directory,
-                              directory / 'preparation.log', deadline, options.experiment_timeout)
-                preparation = load(directory / 'preparation.json', Preparation)
-                break
-            except (ValueError, OSError, TimeoutError) as error:
-                if attempt == 2:
-                    raise
-                context.update(previous_code=draft.code, execution_error=str(error)[-5000:])
-                update(warnings=report.warnings + [f'Preparation required code repair {attempt + 1}/2'])
-        shared = {'requirements': requirements(extraction, prepared=True), 'preparation': preparation_view(preparation),
+        async def prepare_inputs(inspect_only=False):
+            for attempt in range(3):
+                draft = await agents.prepare(context)
+                try:
+                    check_code(draft.code, ('load_data', 'make_split', 'score', 'write_submission'))
+                    for relative in draft.data.files.values():
+                        within(task_path.parent, relative)
+                    within(directory / 'nodes' / 'node_000', draft.output.filename)
+                    atomic_bytes(directory / 'prepare.py', draft.code.encode('utf-8'))
+                    prepared = Preparation(task_directory=str(task_path.parent), rationale=draft.rationale,
+                        data=draft.data, validation=draft.validation, metric=draft.metric, output=draft.output,
+                        code_sha256=file_hash(directory / 'prepare.py'))
+                    save(directory / 'preparation.json', prepared)
+                    arguments = (['-m', 'agent.research_worker', '--root', str(directory)] if inspect_only
+                                 else ['-m', 'agent.worker', '--prepare', str(directory)])
+                    await process(arguments, directory, directory / 'preparation.log', deadline, options.experiment_timeout)
+                    context.pop('execution_error', None)
+                    context['previous_code'] = draft.code
+                    return load(directory / 'preparation.json', Preparation)
+                except (ValueError, OSError, TimeoutError) as error:
+                    if attempt == 2:
+                        raise
+                    context.update(previous_code=draft.code, execution_error=str(error)[-5000:])
+                    update(warnings=report.warnings + [f'Preparation required code repair {attempt + 1}/2'])
+
+        shared.update(requirements=requirements(extraction, prepared=True), installed_libraries=context['installed_libraries'])
+        if options.research_parallel and options.max_research_nodes:
+            preparation = await prepare_inputs(inspect_only=True)
+            shared['preparation'] = preparation_view(preparation)
+            save(directory / 'research' / 'structure_preparation.json', preparation)
+            atomic_bytes(directory / 'research' / 'structure_prepare.py', (directory / 'prepare.py').read_bytes())
+            research = Research(agents, directory, options, shared, process, notify, update)
+            update(stage='data_research')
+            await research.bootstrap()
+            context.update(data_research=research.view(), preparation_phase='finalize_validation',
+                           data_profile=research_profile_view(json.loads((directory / 'research' / 'profile.json').read_text(encoding='utf-8'))))
+        preparation = await prepare_inputs()
+        shared.update({'requirements': requirements(extraction, prepared=True), 'preparation': preparation_view(preparation),
                   'execution_contract': execution_contract(preparation),
-                  'installed_libraries': context['installed_libraries']}
+                  'installed_libraries': context['installed_libraries']})
         delta = Delta(preparation_sha256=file_hash(directory / 'preparation.json'), metric=preparation.metric)
         save_delta()
         update(checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
@@ -426,13 +465,16 @@ async def run(task_path: Path, options: Options, settings: Settings):
             expired = time.monotonic() >= deadline
             if expired:
                 stop_reason = 'time_budget'
-                for task in [*active, *analyses, *search.tasks]:
+                for task in [*active, *analyses, *search.tasks, *(research.tasks if research else [])]:
                     task.cancel()
             else:
                 search.fill(delta, list(active.values()), revision)
+                if research and (active or analyses or search.tasks):
+                    research.fill()
             update(stage='search' if delta.nodes else 'baseline')
-            tasks = [*active, *analyses, *search.tasks]
-            if not tasks:
+            model_tasks = [*active, *analyses, *search.tasks]
+            tasks = [*model_tasks, *(research.tasks if research else [])]
+            if not model_tasks:
                 if not expired:
                     stop_reason = search.stop_reason
                     if not search.parents and stop_reason == 'max_experiments':
@@ -440,6 +482,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 break
             done, _ = await asyncio.wait(tasks, timeout=None if expired else max(0., deadline - time.monotonic()),
                                          return_when=asyncio.FIRST_COMPLETED)
+            if research:
+                research.collect(done)
             for task in [task for task in done if task in active]:
                 start = active.pop(task)
                 record(start, task.result())
@@ -479,6 +523,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     preparation_sha256=delta.preparation_sha256,
                     context={'task': str(task_path), 'task_sha256': report.task_sha256, 'source_hashes': hashes,
                              'analysis_revision': revision, 'installed_libraries': shared['installed_libraries'],
+                             'research_revision': research.revision if research else 0,
                              'max_code_attempts': options.max_code_attempts},
                     outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
                     timeout_seconds=float(options.experiment_timeout))
@@ -510,4 +555,6 @@ async def run(task_path: Path, options: Options, settings: Settings):
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if research:
+            await research.close(stop_reason)
     return directory, report

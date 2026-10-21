@@ -43,6 +43,22 @@
           "minLength": 1,
           "title": "Expected Effect",
           "type": "string"
+        },
+        "priority": {
+          "default": 50,
+          "description": "Queue priority; higher runs first, not an expected score",
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "research_ids": {
+          "description": "IDs of only the research insights needed for this change; empty when unrelated",
+          "items": {
+            "type": "string"
+          },
+          "title": "Research Ids",
+          "type": "array"
         }
       },
       "required": [
@@ -52,6 +68,42 @@
       ],
       "title": "Idea",
       "type": "object"
+    },
+    "IdeaUpdate": {
+      "additionalProperties": false,
+      "properties": {
+        "idea_id": {
+          "title": "Idea Id",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "prioritize",
+            "remove"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "priority": {
+          "default": 50,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "idea_id",
+        "action",
+        "reason"
+      ],
+      "title": "IdeaUpdate",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -60,14 +112,17 @@
       "items": {
         "$ref": "#/$defs/Idea"
       },
-      "minItems": 1,
       "title": "Ideas",
+      "type": "array"
+    },
+    "updates": {
+      "items": {
+        "$ref": "#/$defs/IdeaUpdate"
+      },
+      "title": "Updates",
       "type": "array"
     }
   },
-  "required": [
-    "ideas"
-  ],
   "title": "Ideas",
   "type": "object"
 }

@@ -41,7 +41,7 @@ def execution_contract(preparation):
             'preparation': {'metadata': 'Fixed compact metadata, not a recipe to execute again',
                             'runtime': {'time_budget_seconds': 'Total budget for training/search in this invocation',
                                         'deadline': 'time.monotonic() deadline; compute remaining time before each fit',
-                                        'num_cpus': 2, 'num_gpus': 0,
+                                        'num_cpus': 1, 'num_gpus': 0,
                                         'is_smoke_check': 'True for the small preliminary check',
                                         'work_directory': 'Current node directory; persist model files here'}},
             'auxiliary': 'Other already loaded named input tables, without full train or validation labels',
@@ -65,7 +65,12 @@ def history_view(row):
 
 def idea_history_view(row):
     result = history_view(row)
-    result['assembly'] = [block.name for block in row.assembly.blocks]
+    result['hypothesis'].pop('expected_effect')  # Forecasts are not new evidence about past experiments.
+    result['assembly'] = {
+        'order': [block.name for block in row.assembly.blocks],
+        'sources': {block.name: block.source_node or row.node_id for block in row.assembly.blocks},
+        'write_blocks': list(row.assembly.write_blocks),
+    }
     return result
 
 
@@ -78,4 +83,38 @@ def catalog_view(catalog):
             if identity not in seen:
                 result.setdefault(node_id, []).append({key: block[key] for key in ('name', 'description', 'requires', 'provides')})
                 seen.add(identity)
+    return result
+
+
+def node_context(context, research_ids):
+    """Only Baker selects research; execution roles receive the selected evidence."""
+    result = {key: value for key, value in context.items() if key != 'data_research'}
+    if research_ids:
+        research = context.get('data_research', {})
+        insights = [item for item in research.get('insights', []) if item['id'] in research_ids]
+        result['data_research'] = {'insights': insights,
+            'unavailable_ids': sorted(set(research_ids) - {item['id'] for item in insights})}
+    return result
+
+
+def research_profile_view(profile):
+    """Keep measured values and column names while removing repeated per-column JSON keys."""
+    result = {key: value for key, value in profile.items() if key != 'tables'}
+    result['quantile_levels'] = [0, .25, .5, .75, 1]
+    result['tables'] = {}
+    for role, table in profile['tables'].items():
+        types, unique, missing, nonfinite, quantiles, frequent = {}, {}, {}, {}, {}, {}
+        for name, column in table['columns'].items():
+            types.setdefault(column['dtype'], []).append(name)
+            unique[name] = column['unique']
+            if column['missing']:
+                missing[name] = column['missing']
+            if column.get('nonfinite'):
+                nonfinite[name] = column['nonfinite']
+            if column.get('quantiles'):
+                quantiles[name] = [column['quantiles'][str(float(q))] for q in result['quantile_levels']]
+            if 'frequent_values' in column:
+                frequent[name] = column['frequent_values']
+        result['tables'][role] = {'rows': table['rows'], 'columns_by_dtype': types, 'unique': unique,
+            'missing': missing, 'nonfinite': nonfinite, 'quantiles': quantiles, 'frequent_values': frequent}
     return result

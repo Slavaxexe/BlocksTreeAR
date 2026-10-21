@@ -88,9 +88,9 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False, t
     # Leave time for prediction, scoring and saving the final files after AutoML search.
     training_budget = max(1., time_budget * 0.8)
     metadata['runtime'] = {'time_budget_seconds': training_budget, 'deadline': started + training_budget,
-                           'num_cpus': 2, 'num_gpus': 0, 'is_smoke_check': small,
+                           'num_cpus': 1, 'num_gpus': 0, 'is_smoke_check': small,
                            'work_directory': str(Path.cwd())}
-    with threadpool_limits(limits=2):
+    with threadpool_limits(limits=1):
         auxiliary = {role: frame.copy() for role, frame in tables.items() if role not in {'train', 'test'}}
         valid_predictions, test_predictions = fit_predict(train.iloc[fit].copy(), validation_input.copy(), test.copy(),
                                                          metadata, auxiliary)
@@ -150,8 +150,18 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
                     raise ValueError('Metric returned a non-finite value')
                 evaluation = 'completed'
             except Exception as exception:
-                value, evaluation, error = None, 'failed', f'Metric: {type(exception).__name__}: {exception}'[:2000]
-        result = Finish(status='completed', value=value, evaluation_status=evaluation,
+                value, evaluation = None, 'failed'
+                error = f'Metric: {type(exception).__name__}: {exception}'[:1500]
+                schema = {'rows': len(valid_predictions), 'columns': [str(name) for name in valid_predictions.columns],
+                          'dtypes': {str(name): str(dtype) for name, dtype in valid_predictions.dtypes.items()}}
+                error += '; prediction schema: ' + str(schema)
+                failed_block = next(block.name for block in reversed(start.assembly.blocks)
+                                    if 'validation_predictions' in block.provides)
+                save(directory / 'block_error.json', {'stage': 'metric', 'block': failed_block,
+                     'error': error, 'prediction_schema': schema})
+        result = Finish(status='failed' if evaluation == 'failed' else 'completed',
+                        failed_block=failed_block if evaluation == 'failed' else None,
+                        value=value, evaluation_status=evaluation,
                         duration_seconds=time.monotonic() - started,
                         validation_file=validation_file.relative_to(directory).as_posix(),
                         submission_file=submission_file.relative_to(directory).as_posix(), error=error, **common)

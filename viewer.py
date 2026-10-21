@@ -53,6 +53,16 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
                 return None
         task = read(folder / "task.json")
         run = {key: read(folder / f"{key}.json") for key in ("profile", "validation", "best", "delta", "report", "preparation", "ideas")}
+        run['research_context'] = read(folder / 'research' / 'context.json')
+        research_tree = read(folder / 'research' / 'tree.json') or {}
+        run['research_nodes'] = []
+        for row in research_tree.get('nodes', []):
+            directory = folder / 'research' / 'nodes' / row['node_id']
+            run['research_nodes'].append({**row, 'start': read(directory / 'start.json'),
+                'finish': read(directory / 'finish.json'), 'measurements': read(directory / 'measurements.json'),
+                'code': source(directory / 'probe.py'),
+                'attempts': [{'number': p.name, 'error': read(p / 'error.json'), 'code': source(p / 'probe.py')}
+                             for p in sorted((directory / 'attempts').glob('*'))]})
         block_directory = folder / 'extraction' if (folder / 'extraction').is_dir() else folder
         blocks = {key: read(block_directory / f"{key}.json") for key in ("problem", "data", "metric", "output")}
         extraction = read(folder / "extraction.json")
@@ -186,15 +196,16 @@ nav{flex-wrap:wrap}
 .analysis-card{padding:14px;border:1px solid var(--purple);border-radius:10px;background:var(--purple-bg);margin:16px 0}
 .assembly-overview{border:1px solid var(--line);padding:16px;border-radius:12px;margin:0 0 18px;background:var(--paper)}
 .assembly-overview h2{margin-bottom:6px}
+.research-insights{max-height:280px;overflow:auto}
 .source-edge{stroke:var(--purple);stroke-width:2;stroke-dasharray:5 5;fill:none;opacity:.8}
 .phase-label{fill:var(--purple);font-size:11px}
 .tree-node.analyzing .box{stroke:var(--purple);stroke-width:2}
 .assembly-json{margin-top:12px}
 </style>
-<header><div><h1>Поиск ML-решений</h1><small>3 ноды: 2 улучшения + 1 исследование · до 8 агентов Qwen</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
+<header><div><h1>Поиск ML-решений</h1><small>Поиск моделей · исследование данных подключается отдельно</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button><button id="research-tab" aria-selected="false">Анализ данных</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel" hidden><p class="muted">Baker предлагает короткие идеи. Планировщики нод параллельно готовят сборки; каждый готовый план сразу передаётся агентам блоков. Общая подготовка фиксирует условия сравнения.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Baker, очередь идей, планировщики нод, агенты блоков и анализатор"></svg></div><p class="footnote">По умолчанию на блок: первая версия и до четырёх исправлений, включая ошибки полного запуска. Исправляется только проблемный блок. Лимит 8 общий для реализаторов, планировщиков нод, Baker, анализаторов и извлечения.</p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">Исследование данных по умолчанию отключено. Схема показывает полный путь при --research-parallel 2: исследования структуры до фиксации split и фоновые проверки во время поиска моделей.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Дерево моделей и параллельное дерево исследования данных"></svg></div><p class="footnote">Лимит 8 обращений Qwen общий для всех ролей. Каждому процессу выделяется один CPU-поток. Исследования используют отдельную часть общего API-бюджета. Split во время поиска не меняется.</p></section>
 <section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><div id="ideas-overview" class="assembly-overview" hidden></div><p id="tree-legend" class="legend"></p><div id="assembly-overview" class="assembly-overview" hidden></div><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Основные предки и источники модулей"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранной ноды"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
@@ -204,8 +215,8 @@ const svg=(tag,attrs={},text)=>{const e=document.createElementNS(NS,tag);for(con
 const fmt=n=>typeof n==='number'&&Number.isFinite(n)?n.toFixed(6):'—';
 const families={dummy:'Dummy baseline',extra_trees:'ExtraTrees',hist_gradient_boosting:'HistGradientBoosting'};
 const statuses={completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
-const purposes={baseline:'baseline',improve:'улучшение',explore:'исследование'};
-const phases={queued:'В очереди',implementation:'Написание блоков',ready:'Код готов',reused:'Сохранённая версия',assembly:'Сборка',check:'Короткая проверка',execution:'Полный запуск',completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
+const purposes={baseline:'baseline',improve:'улучшение',explore:'альтернатива',data:'данные'};
+const phases={queued:'В очереди',planning:'Вопрос и код проверки',review:'Интерпретация измерений',cancelled:'Прервано',implementation:'Написание блоков',ready:'Код готов',reused:'Сохранённая версия',assembly:'Сборка',check:'Короткая проверка',execution:'Выполнение',completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
 const analysisLabels={pending:'Ожидает анализа',running:'Анализатор работает',completed:'Анализ готов',failed:'Ошибка анализатора',skipped:'Анализ пропущен'};
 const stops={node_limit:'Лимит нод',time_budget:'Лимит времени',llm_error:'Ошибка API / JSON',preparation_failed:'Ошибка подготовки',error:'Ошибка контроллера',max_experiments:'Лимит экспериментов',planning_stalled:'Baker не предложил новых планов'};
 const roles={problem:'Задача',data:'Данные',metric:'Метрика',output:'Формат ответа'};
@@ -218,60 +229,29 @@ function box(canvas,x,y,w,h,title,lines=[],kind=''){
  lines.forEach((line,i)=>g.append(svg('text',{x:x+16,y:y+49+i*18,class:'caption'},line)));canvas.append(g);return g;
 }
 function architecture(){
- const c=$('architecture'); marker(c); c.setAttribute('viewBox','0 0 1120 960');
- if(window.innerWidth<900){
-  c.setAttribute('viewBox','0 0 560 1100');
-  const cards=[
-   ['01 Задание',['Markdown и локальные данные'],''],
-   ['02 Извлечение · Qwen',['Четыре запроса → факты'],'llm'],
-   ['03 Подготовка · Qwen',['Общий prepare.py'],'llm'],
-   ['04 Условия · Python',['Профиль, split, scorer'],'cpu'],
-   ['05 Baker · Qwen',['Короткие идеи → очередь'],'llm'],
-   ['06 Планировщики · Qwen',['Одна идея → план одной ноды'],'llm'],
-   ['07 Три параллельные ноды',['2 улучшения + 1 исследование'],''],
-   ['08 Агенты блоков · Qwen',['До 8 обращений для всех ролей'],'llm'],
-   ['09 Сборщик · Python',['Снимки блоков + интерфейсы'],''],
-   ['10 Обучение и оценка',['Проверка → полный запуск'],'cpu'],
-   ['11 Сравнение · Python',['Метрики + лучший submission'],'cpu'],
-   ['12 Анализатор · Qwen',['Вся сборка, ошибки, идеи'],'llm'],
-   ['13 Следующие гипотезы',['После нового анализа'],'llm'],
-   ['14 Лучшее решение',['best.json и файл ответа'],'']];
-  cards.forEach((card,i)=>{
-   const x=i%2?300:20,y=20+Math.floor(i/2)*150;
-   if(i){const px=(i-1)%2?300:20,py=20+Math.floor((i-1)/2)*150;
-    edge(c,i%2?`M ${px+240} ${py+50} H ${x}`:`M ${px+120} ${py+100} V ${py+125} H ${x+120} V ${y}`);}
-   box(c,x,y,240,100,card[0],card[1],card[2]);
-  });
-  edge(c,'M 20 970 H 5 V 370 H 20',true);
-  return;
- }
- ['M 320 75 H 420','M 700 75 H 800','M 940 120 V 165 H 180 V 210',
-  'M 320 255 H 420','M 700 255 H 800','M 940 300 V 345 H 180 V 390',
-  'M 320 435 H 420','M 700 435 H 800','M 940 480 V 525 H 180 V 570',
-  'M 320 615 H 420','M 700 615 H 800','M 940 660 V 705 H 560 V 750',
-  'M 700 795 H 800'].forEach(p=>edge(c,p));
- box(c,40,30,280,90,'01  Задание',['Markdown + локальные файлы','Имена и требования из условия']);
- box(c,420,30,280,90,'02  Четыре extractor’а',['Задача · данные · метрика · ответ','Факты с исходными цитатами'],'llm');
- box(c,800,30,280,90,'03  Извлечение',['extraction.json','Проверенные требования']);
- box(c,40,210,280,90,'04  Подготовка · Qwen',['Чтение, split, scorer, submission','Один общий prepare.py'],'llm');
- box(c,420,210,280,90,'05  Выполнение подготовки',['Профиль реальных данных','Фиксированный split'],'cpu');
- box(c,800,210,280,90,'06  Общие условия',['Метрика + форматы + профиль','Компактный контекст для ролей']);
- box(c,40,390,280,90,'07  Baker · Qwen',['Короткие идеи → очередь','2 улучшения + 1 исследование'],'llm');
- box(c,420,390,280,90,'08  Планировщики нод · Qwen',['Одна идея → порядок и новые блоки','Python подставляет готовые блоки'],'llm');
- box(c,800,390,280,90,'09  Агенты блоков · Qwen',['Отдельный агент на каждый блок','До 8 обращений для всех ролей'],'llm');
- box(c,40,570,280,90,'10  Сборщик · Python',['Копирует сохранённые версии','Проверяет порядок, входы и хеши']);
- box(c,420,570,280,90,'11  Обучение и оценка',['Короткая проверка → полный запуск','Общий scorer → finish.json'],'cpu');
- box(c,800,570,280,90,'12  Сравнение · Python',['Метрики и изменения блоков','Обновление лучшего submission'],'cpu');
- box(c,420,750,280,90,'13  Анализатор · Qwen',['Вся сборка, ошибки, сравнения','Наблюдения + идеи по блокам'],'llm');
- box(c,800,750,280,90,'Лучшее решение',['best.json + файл ответа','Худшая попытка его не заменяет']);
- edge(c,'M 420 795 H 15 V 435 H 40',true);
- edge(c,'M 560 660 V 700 H 1100 V 435 H 1080',true);
- c.append(svg('text',{x:585,y:695,class:'caption'},'Ошибка → исправление нужного блока'));
+ const c=$('architecture'); marker(c); c.setAttribute('viewBox','0 0 1050 1250');
+ const stages=[
+  ['01 Задание',['Условие, словарь, данные'],''],
+  ['02 Извлечение · Qwen',['Четыре запроса → требования'],'llm'],
+  ['03 Загрузка и профиль',['Распределения, пропуски, дубликаты'],'cpu'],
+  ['04 Первые 2 исследования',['Вопрос → код → измерения → вывод'],'llm'],
+  ['05 Фиксация split',['Qwen учитывает результаты исследований'],'cpu'],
+  ['06 Baker → планировщики',['Идеи с актуальным контекстом данных'],'llm'],
+  ['07 Шесть нод моделей',['Улучшения + модельные альтернативы'],''],
+  ['08 Исполнение и анализ',['Метрики, ошибки, лучший submission'],'cpu']];
+ stages.forEach((row,i)=>{const y=20+i*150;if(i)edge(c,`M 220 ${y-40} V ${y}`);box(c,20,y,400,110,row[0],row[1],row[2]);});
+ box(c,590,620,420,110,'Параллельно: 2 исследования',['Размеченный fit, признаки validation/test','Новые вопросы и проверка гипотез'],'llm');
+ box(c,590,800,420,110,'Измерения → проверка выводов',['Код, результаты, источники','Наблюдения отдельно от интерпретаций'],'cpu');
+ box(c,590,980,420,110,'Актуальный контекст данных',['Все активные выводы + история изменений','research/context.json → Baker']);
+ edge(c,'M 800 730 V 800');edge(c,'M 800 910 V 980');
+ edge(c,'M 1010 1035 H 1030 V 675 H 1010',true);
+ edge(c,'M 590 1035 H 500 V 825 H 420',true);
+ edge(c,'M 420 1125 H 470 V 675 H 590',true);
 }
 function showTab(name) {
   view = name; const diagram = name === 'architecture';
   $('architecture-panel').hidden = !diagram; $('tree-panel').hidden = diagram; $('run-picker').hidden = diagram;
-  for (const tab of ['extraction', 'architecture', 'tree']) $(tab+'-tab').setAttribute('aria-selected', tab === name);
+  for (const tab of ['extraction', 'architecture', 'tree', 'research']) $(tab+'-tab').setAttribute('aria-selected', tab === name);
   history.replaceState(null,'','#'+name);
   if (!diagram) { selected = null; updatePicker(); render(); }
 }
@@ -299,6 +279,7 @@ function render() {
     : 'Показаны записанные JSON. Нода без finish могла выполняться или быть прервана. Без report.json завершение запуска не подтверждено.';
   if (!r) { $('assembly-overview').hidden=true; $('empty').textContent = view === 'extraction' ? 'Результатов извлечения пока нет. Запустите python -m agent extract; JSON появятся здесь автоматически.' : 'Экспериментов пока нет.'; return; }
   if (r.kind === 'extraction' && view === 'extraction') { drawExtraction(r); drawExtractionDetail(r); return; }
+  if (view === 'research') { drawResearch(r); return; }
    if (!['start', 'finish', 'delta', 'code', 'analysis', 'assembly', 'attempts', 'modules', 'executions'].includes(jsonTab)) jsonTab = 'start';
   if (!r.nodes.some(n => n.id === selected)) selected = r.nodes.find(n => n.id === r.best?.node_id)?.id ?? r.nodes[0]?.id;
   const mode = modeOf(r), metric = r.preparation?.metric?.name ?? r.task?.metric?.name ?? 'Не записана';
@@ -308,9 +289,11 @@ function render() {
     ['Запуск', r.report?.status ? extractionStatus(r) : 'report.json ещё не записан'],
     ['Остановка', stops[r.report?.stop_reason]??'Ещё не остановлен'], ['Нод всего', r.nodes.length],
     ['Нод одновременно', (r.report?.running_nodes?.length??0)+' / '+(r.report?.max_parallel_nodes??'—')],
+    ['Анализ данных', (r.report?.researching_nodes?.length??0)+' / '+(r.report?.max_parallel_research??'—')],
+    ['Контекст данных', 'v'+(r.report?.research_revision??0)+' · '+(r.report?.research_insights??0)+' выводов'],
     ['Агентов Qwen', (r.report?.active_agents?.length??0)+' / '+(r.report?.max_parallel_agents??'—')],
     ['Улучшения', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='improve').length??0],
-    ['Исследование', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='explore').length??0],
+    ['Модельные альтернативы', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='explore').length??0],
     ['Идей в очереди', r.report?.queued_ideas?.length??0],
     ['Планировщики нод', r.report?.planning_nodes?.join(', ')||'—'],
     ['Анализатор', r.report?.analyzing_nodes?.length?'Анализирует '+r.report.analyzing_nodes.join(', '):'—'],
@@ -322,16 +305,62 @@ function render() {
   }
   drawIdeas(r); drawTree(r); drawAssembly(r); drawDetail(r);
 }
+function drawResearch(r) {
+  const rows=r.research_nodes??[], context=r.research_context??{};
+  $('assembly-overview').hidden=true;
+  $('tree-legend').textContent='Дерево вопросов о данных · линия — уточнение предыдущего исследования · нажмите ноду';
+  $('tree-note').textContent='Выводы ссылаются на сохранённые измерения. Интерпретации отмечены отдельно. Структурные исследования не получают таргеты; последующие работают с размеченным fit. Статусы отражают последние сохранённые файлы.';
+  $('summary').replaceChildren();
+  const stopLabel=({node_limit:'Лимит исследований',llm_limit:'Лимит API',repeated_failures:'Повторные ошибки',...stops})[context.stop_reason]??context.stop_reason??'—';
+  for(const [label,value] of [['Исследования',rows.length],['Одновременно',(r.report?.researching_nodes?.length??0)+' / '+(r.report?.max_parallel_research??'—')],['Версия контекста',context.revision??0],['Активных выводов',context.insights?.length??0],['Остановка',stopLabel]]){
+    const item=element('div','',label);item.append(element('strong','',String(value)));$('summary').append(item);
+  }
+  const panel=$('ideas-overview');panel.replaceChildren();panel.hidden=false;
+  panel.append(element('h2','','Активные выводы исследований'));
+  const insights=element('div','research-insights');panel.append(insights);
+  if(!context.insights?.length)panel.append(element('p','muted',r.report?.max_parallel_research===0&&!rows.length?'Исследование данных отключено для этого запуска.':'Подтверждённых измерениями выводов пока нет.'));
+  const history=new Map((context.insight_history??[]).map(insight=>[insight.id,insight]));
+  for(const summary of context.insights??[]){
+    const insight={...(history.get(summary.id)??{}),...summary};
+    const item=element('div','comparison');
+    item.append(element('b','',insight.kind==='observation'?'Наблюдение':'Интерпретация'),
+      element('p','',insight.statement),
+      element('small','mono',[insight.id,...(insight.evidence_keys??[])].join(' · ')));
+    if(insight.implication){const details=element('details');
+      details.append(element('summary','','Пояснение исследователя'),element('p','muted',insight.implication));
+      item.append(details);}
+    insights.append(item);
+  }
+  if(context.open_questions?.length){const details=element('details');details.append(element('summary','','Открытые вопросы'));
+    for(const question of context.open_questions)details.append(element('p','',question));panel.append(details);}
+  const nodes=rows.map(row=>({id:row.node_id,research:row,start:{...(row.start??row),purpose:'data',assembly:{blocks:[]}},finish:row.finish}));
+  if(!nodes.some(n=>n.id===selected))selected=nodes.at(-1)?.id;
+  drawTree({...r,nodes,best:null,report:{...r.report,node_states:Object.fromEntries(rows.map(row=>[row.node_id,{stage:row.stage}]))}});
+  const detail=$('detail');detail.replaceChildren();
+  const row=rows.find(row=>row.node_id===selected);
+  if(!row){detail.append(element('p','muted','Исследования ещё не запущены.'));return;}
+  detail.append(element('h2','',row.node_id),element('p','',row.question??'Формулируется вопрос'),
+    element('p','muted',row.phase==='structure'?'До split · без таргетов':'После split · таргеты только из fit'));
+  for(const [label,value] of [['Гипотеза',row.hypothesis],['Метод',row.method],['Какое решение меняется',row.decision],['Вывод',row.finish?.review?.summary],['Ошибка',row.finish?.error]]){
+    if(value)detail.append(element('h3','',label),element('p','',value));
+  }
+  for(const [label,value] of [['Измерения',row.measurements],['Код проверки',row.code],['История исправлений',row.attempts],['План',row.start],['Результат',row.finish]]){
+    if(value){const details=element('details');details.append(element('summary','',label),element('pre','',typeof value==='string'?value:JSON.stringify(value,null,2)));detail.append(details);}
+  }
+}
 function drawIdeas(r) {
   const panel=$('ideas-overview'); panel.replaceChildren();
-  const records=(r.ideas?.ideas??[]).filter(record=>['queued','planning','failed','rejected'].includes(record.status)).slice(-8);
+  const history=r.ideas?.ideas??[];
+  const records=history.filter(record=>record.status==='queued').sort((a,b)=>(b.idea.priority??50)-(a.idea.priority??50))
+    .concat(history.filter(record=>['planning','failed','rejected','removed'].includes(record.status)).slice(-4).reverse());
   panel.hidden=!records.length;
   if(!records.length)return;
-  panel.append(element('h2','','Идеи и подготовка нод'));
-  const labels={queued:'В очереди',planning:'Планировщик готовит сборку',failed:'Ошибка планирования',rejected:'Повтор готового плана'};
+  panel.append(element('h2','','Приоритеты идей и подготовка нод'));
+  const labels={queued:'В очереди',planning:'Планировщик готовит сборку',removed:'Удалена Baker',failed:'Ошибка планирования',rejected:'Повтор готового плана'};
   for(const record of records){
     const row=element('div','comparison');
-    row.append(element('b','',`${record.id} · ${purposes[record.idea.purpose]??record.idea.purpose} · ${labels[record.status]}${record.node_id?' · '+record.node_id:''}`),element('p','',record.idea.change));
+    row.append(element('b','',`${record.id} · приоритет ${record.idea.priority??50} · ${purposes[record.idea.purpose]??record.idea.purpose} · ${labels[record.status]}${record.node_id?' · '+record.node_id:''}`),element('p','',record.idea.change));
+    if(record.decision)row.append(element('p','muted',record.decision.reason));
     if(record.error)row.append(element('small','error-text',record.error));
     panel.append(row);
   }
@@ -478,10 +507,11 @@ function drawTree(r) {
     g.append(svg('text', {x:p.x+15, y:p.y+24, class:'caption'}, n.id + ' · ' + (purposes[n.start.purpose??n.start.context?.purpose]??n.start.source)));
     if (best) g.append(svg('text', {x:p.x+189, y:p.y+24, class:'best-label'}, 'ЛИДЕР'));
     const model = n.start.hypothesis?.pipeline?.model;
-    const label = [model?.algorithm, model?.name, model?.framework, families[model?.family], model?.family, model?.type]
-      .find(value => typeof value === 'string' && value.trim()) ?? 'Модель не указана';
+    const label = n.research ? n.research.question??'Формулируется вопрос' :
+      [model?.algorithm, model?.name, model?.framework, families[model?.family], model?.family, model?.type]
+        .find(value => typeof value === 'string' && value.trim()) ?? 'Модель не указана';
     g.append(svg('text', {x:p.x+15, y:p.y+46, class:'title'}, String(label).slice(0, 30)));
-    g.append(svg('text', {x:p.x+15, y:p.y+73, class:'score'}, fmt(f?.value)));
+    g.append(svg('text', {x:p.x+15, y:p.y+73, class:'score'}, n.research ? ({supported:'Подтверждена',refuted:'Опровергнута',inconclusive:'Не определено'}[f?.review?.outcome]??'—') : fmt(f?.value)));
     g.append(svg('text', {x:p.x+15, y:p.y+95, class:'caption'}, status + duration));
     const block=execution?.stage==='execution'?n.progress?.block:execution?.block;
     const writing=Object.values(execution?.blocks??{}).filter(b=>b.stage==='implementation').length;
@@ -580,9 +610,9 @@ async function refresh() {
   } catch (error) { $('connection').textContent = 'Нет связи с локальным viewer. Показан последний снимок.'; }
   setTimeout(refresh, 2000);
 }
-for (const tab of ['extraction','architecture','tree']) $(tab+'-tab').onclick=()=>showTab(tab);
+for (const tab of ['extraction','architecture','tree','research']) $(tab+'-tab').onclick=()=>showTab(tab);
 $('runs').onchange=()=>{active=$('runs').value;selected=null;render()};
-architecture();showTab(['#tree','#architecture'].includes(location.hash)?location.hash.slice(1):'extraction');$('connection').textContent='Снимок · '+new Date(state.captured*1000).toLocaleString('ru-RU');if(live)refresh();
+architecture();showTab(['#tree','#architecture','#research'].includes(location.hash)?location.hash.slice(1):'extraction');$('connection').textContent='Снимок · '+new Date(state.captured*1000).toLocaleString('ru-RU');if(live)refresh();
 window.addEventListener('resize',()=>{ $('architecture').replaceChildren();architecture(); });
 </script></html>'''
 

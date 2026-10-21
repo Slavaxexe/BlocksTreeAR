@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "DataInsight": {
+      "additionalProperties": false,
+      "properties": {
+        "statement": {
+          "minLength": 1,
+          "title": "Statement",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "observation",
+            "interpretation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "evidence_keys": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evidence Keys",
+          "type": "array"
+        },
+        "implication": {
+          "minLength": 1,
+          "title": "Implication",
+          "type": "string"
+        }
+      },
+      "required": [
+        "statement",
+        "kind",
+        "evidence_keys",
+        "implication"
+      ],
+      "title": "DataInsight",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "outcome": {
+      "enum": [
+        "supported",
+        "refuted",
+        "inconclusive"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "summary": {
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    },
+    "insights": {
+      "items": {
+        "$ref": "#/$defs/DataInsight"
+      },
+      "title": "Insights",
+      "type": "array"
+    },
+    "open_questions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Open Questions",
+      "type": "array"
+    },
+    "resolves": {
+      "description": "Previously open questions answered by this research",
+      "items": {
+        "type": "string"
+      },
+      "title": "Resolves",
+      "type": "array"
+    },
+    "supersedes": {
+      "description": "Existing insight IDs contradicted or refined by these measurements",
+      "items": {
+        "type": "string"
+      },
+      "title": "Supersedes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "outcome",
+    "summary"
+  ],
+  "title": "ResearchReview",
+  "type": "object"
+}

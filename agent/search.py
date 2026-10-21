@@ -1,14 +1,14 @@
 """A short idea queue and independent node planners; ready plans never wait for their batch."""
 
 import asyncio
-from collections import deque
+from collections import Counter, deque
 import time
 import traceback
 
 from .agents import JSONAgents, plan_key
 from .assembly import block_catalog
 from .context import catalog_view, idea_history_view
-from .contracts import Idea
+from .contracts import Idea, Ideas
 from .qwen import QwenTemporaryError
 from .storage import fingerprint, save
 
@@ -19,11 +19,14 @@ class Search:
         self.shared, self.notify = shared, notify
         self.queue, self.records, self.planners = deque(), [], {}
         self.baker, self.round, self.next_node = None, 0, 0
-        self.failures, self.misses, self.revision = 0, 0, 0
+        self.failures, self.misses, self.revision = 0, 0, (0, 0)
         self.failed, self.stop_reason = False, 'max_experiments'
         self.used_ideas, self.used_plans = {}, {}
         self.parents, self.leader, self.catalog = [], None, {}
         self.rows = []
+        self.baker_research_revision = 0
+        self.baker_feedback = None
+        self.occupied = {}
         explore = int(options.parallel > 1)
         self.caps = {'improve': options.parallel - explore, 'explore': explore}
 
@@ -34,13 +37,18 @@ class Search:
     def report(self):
         return {'planning': self.baker is not None,
                 'planning_nodes': [record['node_id'] for record in self.planners.values()],
-                'queued_ideas': [{'id': record['id'], **record['idea']} for record in self.queue]}
+                'queued_ideas': self.queued_view()}
+
+    def queued_view(self):
+        return [{'id': record['id'], **record['idea']} for record in
+                sorted(self.queue, key=lambda row: -row['idea'].get('priority', 50))]
 
     def save(self):
         save(self.directory / 'ideas.json', {'ideas': self.records})
 
     def fill(self, delta, running, revision):
         self.rows = delta.nodes
+        revision = (revision, self.shared.get('data_research', {}).get('revision', 0))
         if revision != self.revision:
             self.misses, self.revision = 0, revision
             if self.stop_reason == 'planning_stalled':
@@ -58,21 +66,23 @@ class Search:
 
         # A new leader invalidates queued improvements, but never interrupts work already started.
         for record in list(self.queue):
-            if record['idea']['purpose'] == 'improve' and record['idea']['parent_id'] != self.leader:
+            stale_parent = record['idea']['purpose'] == 'improve' and record['idea']['parent_id'] != self.leader
+            if stale_parent:
                 record['status'] = 'superseded'
                 self.queue.remove(record)
                 self.agents.log('idea_superseded', idea_id=record['id'], leader_id=self.leader)
                 self.save()
+        self.request_ideas()
         self.dispatch(running)
-        self.request_ideas(delta)
 
     def dispatch(self, running):
         occupied = [start.purpose for start in running] + [record['idea']['purpose'] for record in self.planners.values()]
         while (self.queue and len(occupied) < self.options.parallel
                and self.next_node < self.options.max_experiments and self.agents.remaining_calls >= 2):
-            record = next((record for record in self.queue
+            record = max((record for record in self.queue
                 if record['idea']['purpose'] == 'baseline'
-                or occupied.count(record['idea']['purpose']) < self.caps[record['idea']['purpose']]), None)
+                or occupied.count(record['idea']['purpose']) < self.caps[record['idea']['purpose']]),
+                key=lambda row: row['idea'].get('priority', 50), default=None)
             if record is None:
                 break
             self.queue.remove(record)
@@ -81,11 +91,17 @@ class Search:
             self.next_node += 1
             record.update(status='planning', node_id=node_id)
             parent = next((row for row in self.rows if row.node_id == idea.parent_id), None)
-            context = {**self.shared, 'idea': record['idea'],
-                'parent': idea_history_view(parent) if parent else None,
+            parent_context = idea_history_view(parent) if parent else None
+            if parent_context:
+                # Baker chose the change already; old rationales/next ideas are not planner choices.
+                parent_context['hypothesis'] = {'pipeline': parent.hypothesis.pipeline.model_dump()}
+                parent_context.pop('analysis')
+            context = {**self.shared,
+                'parent': parent_context,
                 'module_catalog': catalog_view(self.catalog),
-                'pending': self.pending(), 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
-                'experiment_timeout_seconds': self.options.experiment_timeout}
+                'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
+                'experiment_timeout_seconds': self.options.experiment_timeout,
+                'idea': record['idea']}
             save(self.directory / 'planning' / node_id / 'idea.json', record)
             client = JSONAgents(self.agents.settings, self.agents.deadline, 3, shared=self.agents, node_id=node_id)
             task = asyncio.create_task(client.plan_node(context, idea, self.catalog))
@@ -93,71 +109,110 @@ class Search:
             occupied.append(idea.purpose)
             self.agents.log('node_planning_started', node_id=node_id, idea_id=record['id'])
             self.save()
+        self.occupied = dict(Counter(occupied))
 
-    def pending(self):
-        return [{'id': record['id'], 'status': record['status'], 'node_id': record.get('node_id'),
-                 'error': record.get('error'), 'duplicate_of': record.get('duplicate_of'), **record['idea']}
-                for record in self.records]
+    def idea_history(self, *, active_only=False):
+        result = []
+        experiments = {row.node_id for row in self.rows}
+        for record in self.records:
+            if active_only and record['status'] not in {'queued', 'planning'}:
+                continue
+            item = {'id': record['id'], 'status': record['status'], **record['idea']}
+            # Past forecasts are not observations; retain the concrete change to prevent repeats.
+            item.pop('expected_effect')
+            if record.get('node_id') in experiments:
+                # The complete change and configuration are already in experiments.
+                item = {'id': record['id'], 'status': record['status']}
+            for key in ('node_id', 'error', 'duplicate_of', 'decision'):
+                if record.get(key) is not None:
+                    item[key] = record[key]
+            result.append(item)
+        return result
 
-    def request_ideas(self, delta):
+    def request_ideas(self):
         if self.baker or self.failed or self.misses >= 3:
             return
         if self.agents.remaining_calls < 2:
             self.stop_reason = 'llm_limit'
             return
-        room = self.options.max_experiments - self.next_node - len(self.queue)
-        if room <= 0:
+        remaining = self.options.max_experiments - self.next_node
+        if remaining <= 0:
             return
-        if self.next_node == 0 and not self.queue:
-            purposes = ['baseline']
-        elif self.parents:
-            size = max(3, min(5, self.options.parallel + 2))
-            targets = {'improve': size - int(self.caps['explore'] > 0),
-                       'explore': int(self.caps['explore'] > 0)}
-            needed = {purpose: max(0, target - sum(r['idea']['purpose'] == purpose for r in self.queue))
-                      for purpose, target in targets.items()}
-            purposes = []
-            while any(needed.values()):
-                for purpose, cap in self.caps.items():
-                    count = min(needed[purpose], cap)
-                    purposes.extend([purpose] * count)
-                    needed[purpose] -= count
-        else:
+        if not self.parents and (self.next_node or self.queue):
             return
-        purposes = purposes[:min(room, self.agents.remaining_calls - 1)]
-        if not purposes:
+        needs_ideas = len(self.queue) < min(self.options.parallel, remaining)
+        new_feedback = self.revision != self.baker_feedback
+        if not needs_ideas and not new_feedback and not self.failures:
             return
-        context = {**self.shared, 'purposes': purposes, 'leader_id': self.leader,
-            'available_parents': self.parents, 'experiments': [idea_history_view(row) for row in delta.nodes],
-            'module_catalog': {node: [{'name': block['name'], 'provides': block['provides']} for block in blocks]
-                               for node, blocks in catalog_view(self.catalog).items()},
-            'previous_ideas': self.pending(), 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
-            'experiment_timeout_seconds': self.options.experiment_timeout}
         self.round += 1
-        save(self.directory / 'planning' / f'batch_{self.round:03d}' / 'request.json', context)
-        self.baker = asyncio.create_task(self.ask_ideas(context))
+        self.baker = asyncio.create_task(self.ask_ideas('new_analysis' if new_feedback else 'queue_low'))
 
-    async def ask_ideas(self, context):
+    def baker_context(self):
+        remaining = self.options.max_experiments - self.next_node
+        return {**self.shared, 'purposes': ['baseline'] if self.next_node == 0 else
+                [purpose for purpose, cap in self.caps.items() if cap],
+            'max_new_ideas': min(1 if self.next_node == 0 else 3, remaining),
+            'queue_capacity': min(self.options.parallel, remaining), 'remaining_experiments': remaining,
+            'slot_limits': self.caps, 'occupied_slots': self.occupied,
+            'queued_ideas': self.queued_view(), 'leader_id': self.leader,
+            'available_parents': self.parents, 'experiments': [idea_history_view(row) for row in self.rows],
+            'module_catalog': {node: [{key: block[key] for key in ('name', 'requires', 'provides')} for block in blocks]
+                               for node, blocks in catalog_view(self.catalog).items()},
+            'previous_ideas': self.idea_history(), 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
+            'feedback_revision': {'experiments': self.revision[0],
+                                  'data_research': self.shared.get('data_research', {}).get('revision', 0)},
+            'experiment_timeout_seconds': self.options.experiment_timeout}
+
+    async def ask_ideas(self, trigger):
         if self.failures:
             self.agents.log('planning_retry_wait', consecutive_failures=self.failures, delay_seconds=5)
             await asyncio.sleep(min(5., max(0., self.agents.deadline - time.monotonic())))
-        return await self.agents.propose_ideas({**context,
-            'remaining_seconds': max(0., self.agents.deadline - time.monotonic())})
+        context = {**self.baker_context(), 'trigger': trigger}
+        self.baker_research_revision = context.get('data_research', {}).get('revision', 0)
+        self.baker_feedback = (context['feedback_revision']['experiments'], self.baker_research_revision)
+        save(self.directory / 'planning' / f'batch_{self.round:03d}' / 'request.json', context)
+        if context['remaining_experiments'] <= 0:
+            return Ideas()
+        return await self.agents.propose_ideas(context)
+
+    def apply_updates(self, updates):
+        queued = {row['id']: row for row in self.queue}
+        for update in updates:
+            record = queued.get(update.idea_id)
+            if record is None:
+                self.agents.log('idea_update_skipped', idea_id=update.idea_id, reason='Already dispatched or removed')
+                continue
+            record['decision'] = update.model_dump()
+            if update.action == 'remove':
+                record['status'] = 'removed'
+                self.queue.remove(record)
+            else:
+                record['idea']['priority'] = update.priority
+            self.agents.log('idea_updated', **update.model_dump())
 
     def collect(self, done):
         ready = []
         if self.baker in done:
             task, self.baker = self.baker, None
             try:
-                ideas = task.result()
+                response = task.result()
                 self.failures = 0
+                save(self.directory / 'planning' / f'batch_{self.round:03d}' / 'response.json', response)
+                self.apply_updates(response.updates)
                 accepted = 0
-                for idea in ideas:
-                    key = fingerprint(idea.model_dump(exclude={'expected_effect'}))
+                for idea in response.ideas:
+                    if len(self.queue) >= min(self.options.parallel, self.options.max_experiments - self.next_node):
+                        self.agents.log('idea_capacity_reached')
+                        break
+                    identity = idea.model_dump(exclude={'expected_effect', 'priority', 'research_ids'})
+                    identity['change'] = ' '.join(identity['change'].split())
+                    identity['change_blocks'] = sorted(identity['change_blocks'])
+                    key = fingerprint(identity)
                     if key in self.used_ideas:
                         self.agents.log('duplicate_idea', duplicate_of=self.used_ideas[key])
                         continue
-                    record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(), 'status': 'queued'}
+                    record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(), 'status': 'queued',
+                              'research_revision': self.baker_research_revision}
                     self.records.append(record)
                     self.queue.append(record)
                     self.used_ideas[key] = record['id']

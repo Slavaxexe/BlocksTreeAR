@@ -151,10 +151,26 @@ class Pipeline(Contract):
     training: dict[str, Any]
 
 
+class ModelConfiguration(Contract):
+    name: str = Field(min_length=1, pattern=r'\S', description='Actual algorithm/API name or ensemble name, not a block name')
+    configuration: str = Field(min_length=1, pattern=r'\S', description='Concrete settings of every model; state defaults explicitly')
+
+
+class PipelinePlan(Contract):
+    preprocessing: str = Field(min_length=1, pattern=r'\S', description='Actual transformations, or explicitly no preprocessing')
+    model: ModelConfiguration
+    training: str = Field(min_length=1, pattern=r'\S', description='Fitting, tuning, internal validation and ensemble procedure')
+
+    def configuration(self) -> Pipeline:
+        return Pipeline(data={}, preprocessing={'description': self.preprocessing},
+                        model=self.model.model_dump(), training={'description': self.training})
+
+
 class Hypothesis(Contract):
     rationale: str = Field(min_length=1)
     expected_effect: str = Field(min_length=1)
     pipeline: Pipeline
+    research_ids: list[str] = Field(default_factory=list)
 
 
 class Block(Contract):
@@ -212,19 +228,58 @@ class Idea(Contract):
     change: str = Field(min_length=1, description='One concrete change, including intended algorithm or parameters')
     change_blocks: list[str] = Field(default_factory=list, description='Existing or proposed block names to change')
     expected_effect: str = Field(min_length=1)
+    priority: int = Field(default=50, ge=0, le=100, description='Queue priority; higher runs first, not an expected score')
+    research_ids: list[str] = Field(default_factory=list, description='IDs of only the research insights needed for this change; empty when unrelated')
+
+
+class IdeaUpdate(Contract):
+    idea_id: str
+    action: Literal['prioritize', 'remove']
+    priority: int = Field(default=50, ge=0, le=100)
+    reason: str = Field(min_length=1)
 
 
 class Ideas(Contract):
-    ideas: list[Idea] = Field(min_length=1)
+    ideas: list[Idea] = Field(default_factory=list)
+    updates: list[IdeaUpdate] = Field(default_factory=list)
+
+    @model_validator(mode='before')
+    @classmethod
+    def select_requested(cls, value, info: ValidationInfo):
+        context = info.context or {}
+        if 'max_new_ideas' not in context or not isinstance(value, dict) or not isinstance(value.get('ideas'), list):
+            return value
+        limit = context['max_new_ideas']
+        if len(value['ideas']) <= limit:
+            return value
+        available = []
+        for row in value['ideas']:
+            try:
+                idea = Idea.model_validate(row)
+            except ValueError:
+                continue
+            if (idea.purpose in context['purposes']
+                    and (idea.purpose != 'baseline' or idea.parent_id is None)
+                    and (idea.purpose != 'improve' or idea.parent_id == context['leader'])
+                    and (idea.purpose == 'baseline' or idea.parent_id in context['parents'])):
+                available.append(idea)
+        if len(available) < limit:
+            return value  # Actual invalid ideas still require a corrected model response.
+        available.sort(key=lambda idea: -idea.priority)
+        return {**value, 'ideas': available[:limit]}
 
     @model_validator(mode='after')
     def requested_ideas(self, info: ValidationInfo):
         context = info.context or {}
         if 'purposes' not in context:
             return self
-        if [idea.purpose for idea in self.ideas] != context['purposes']:
-            raise ValueError('Return exactly the requested purposes in their given order')
+        if len(self.ideas) > context.get('max_new_ideas', len(context['purposes'])):
+            raise ValueError('Too many new ideas for this request')
         for idea in self.ideas:
+            if 'research_ids' in context and not set(idea.research_ids).issubset(context['research_ids']):
+                raise ValueError('Reference only supplied research insight IDs')
+            if idea.purpose not in context['purposes']:
+                raise ValueError('Choose an allowed idea purpose')
             if idea.purpose == 'baseline':
                 if idea.parent_id is not None:
                     raise ValueError('Baseline must have no parent')
@@ -232,6 +287,9 @@ class Ideas(Contract):
                 raise ValueError('Choose an available parent')
             elif idea.purpose == 'improve' and idea.parent_id != context['leader']:
                 raise ValueError('Improve must extend the current leader')
+        ids = [update.idea_id for update in self.updates]
+        if len(ids) != len(set(ids)) or not set(ids).issubset(context.get('idea_ids', [])):
+            raise ValueError('Update each supplied idea ID at most once')
         return self
 
 
@@ -272,10 +330,19 @@ class BlockReference(Contract):
 
 
 class NodePlan(Contract):
-    hypothesis: Hypothesis
+    pipeline: PipelinePlan
     order: list[str] = Field(min_length=1, description='Block names in execution order')
     reuse: list[BlockReference] = Field(default_factory=list, description='References only; Python copies the saved interfaces')
     write: list[Block] = Field(min_length=1, description='Complete interfaces of only the new or changed blocks')
+
+    @model_validator(mode='before')
+    @classmethod
+    def legacy_hypothesis(cls, value):
+        if isinstance(value, dict) and 'hypothesis' in value and 'pipeline' not in value:
+            hypothesis = value['hypothesis']
+            pipeline = hypothesis.pipeline if isinstance(hypothesis, Hypothesis) else hypothesis['pipeline']
+            return {**{key: item for key, item in value.items() if key != 'hypothesis'}, 'pipeline': pipeline}
+        return value
 
     def proposal(self, idea: Idea, catalog: dict) -> Proposal:
         blocks = {block.name: block for block in self.write}
@@ -286,7 +353,9 @@ class NodePlan(Contract):
                 raise ValueError(f'Unknown saved block: {reference.source_node}/{reference.name}')
             blocks[reference.name] = Block(source_node=reference.source_node,
                 **{key: source[key] for key in ('name', 'description', 'requires', 'provides')})
-        return Proposal(purpose=idea.purpose, parent_id=idea.parent_id, hypothesis=self.hypothesis,
+        hypothesis = Hypothesis(rationale=idea.change, expected_effect=idea.expected_effect,
+                                pipeline=self.pipeline.configuration(), research_ids=idea.research_ids)
+        return Proposal(purpose=idea.purpose, parent_id=idea.parent_id, hypothesis=hypothesis,
                         assembly=Assembly(blocks=[blocks[name] for name in self.order],
                                           write_blocks=[block.name for block in self.write]))
 
@@ -297,6 +366,9 @@ class NodePlan(Contract):
             raise ValueError('order must contain every written or reused block exactly once')
         context = info.context or {}
         if 'idea' in context:
+            missing = set(context['idea'].change_blocks) - {block.name for block in self.write}
+            if missing:
+                raise ValueError(f'Write every block requested by the idea: {sorted(missing)}')
             proposal = self.proposal(context['idea'], context['catalog'])
             Proposals.model_validate({'proposals': [proposal]}, context={**context, 'count': 1,
                 'baseline': proposal.purpose == 'baseline', 'purposes': [proposal.purpose]})
@@ -305,8 +377,8 @@ class NodePlan(Contract):
 
 class Analysis(Contract):
     summary: str = Field(min_length=1)
-    findings: list[str] = Field(default_factory=list)
-    next_ideas: list[str] = Field(default_factory=list)
+    findings: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+    next_ideas: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
 
 
 class Program(Contract):
@@ -320,6 +392,48 @@ class Program(Contract):
             raise ValueError('Return block code or blocked_reason')
         return self
 
+
+ResearchID = Annotated[str, Field(pattern=r'^research_[0-9]{3}$')]
+
+
+class ResearchPlan(Contract):
+    parent_id: ResearchID | None = None
+    question: str = Field(min_length=1)
+    hypothesis: str = Field(min_length=1)
+    method: str = Field(min_length=1)
+    decision: str = Field(min_length=1)
+    code: str = Field(min_length=1, description='Complete Python module: run(state) -> dict of measurements')
+
+
+class DataInsight(Contract):
+    statement: str = Field(min_length=1)
+    kind: Literal['observation', 'interpretation']
+    evidence_keys: list[str] = Field(min_length=1)
+    implication: str = Field(min_length=1)
+
+
+class ResearchReview(Contract):
+    outcome: Literal['supported', 'refuted', 'inconclusive']
+    summary: str = Field(min_length=1)
+    insights: list[DataInsight] = Field(default_factory=list)
+    open_questions: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+    resolves: list[str] = Field(default_factory=list, description='Previously open questions answered by this research')
+    supersedes: list[str] = Field(default_factory=list, description='Existing insight IDs contradicted or refined by these measurements')
+
+    @model_validator(mode='after')
+    def grounded(self, info: ValidationInfo):
+        context = info.context or {}
+        if 'measurements' in context:
+            for insight in self.insights:
+                if not set(insight.evidence_keys).issubset(context['measurements']):
+                    raise ValueError('Insight evidence must name measured output keys')
+        if 'insight_ids' in context and not set(self.supersedes).issubset(context['insight_ids']):
+            raise ValueError('Only existing insights can be superseded')
+        if self.supersedes and not self.insights:
+            raise ValueError('Superseding an insight requires a replacement')
+        if 'open_questions' in context and not set(self.resolves).issubset(context['open_questions']):
+            raise ValueError('Resolved questions must come from the current research context')
+        return self
 
 class Start(Contract):
     schema_version: Literal[4, 5] = 5
@@ -402,7 +516,7 @@ class Delta(Contract):
 
 class LLMCall(Contract):
     role: str
-    node_id: NodeID | None = None
+    node_id: NodeID | ResearchID | None = None
     block: str | None = None
     attempt: int
     status: Literal["completed", "invalid_json", "api_error"]
@@ -414,7 +528,7 @@ class LLMCall(Contract):
 class RunReport(Contract):
     schema_version: Literal[2] = 2
     status: Literal["running", "ready", "partial", "failed"]
-    stage: Literal["extraction", "preparation", "baseline", "search", "complete"] = "extraction"
+    stage: Literal["extraction", "preparation", "data_research", "baseline", "search", "complete"] = "extraction"
     mode: Literal["qwen"] = "qwen"
     task_sha256: SHA256
     checks: list[str] = Field(default_factory=list)
@@ -430,10 +544,17 @@ class RunReport(Contract):
     queued_ideas: list[dict[str, Any]] = Field(default_factory=list)
     analyzing_nodes: list[NodeID] = Field(default_factory=list)
     planning: bool = False
-    max_parallel_nodes: int = 3
+    max_parallel_nodes: int = 6
     max_parallel_agents: int = 8
     active_agents: list[dict[str, Any]] = Field(default_factory=list)
     node_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    max_parallel_research: int = 0
+    researching_nodes: list[str] = Field(default_factory=list)
+    research_nodes: int = 0
+    research_revision: int = 0
+    research_insights: int = 0
+    research_stop_reason: str | None = None
 
 
-SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport, Proposals, Ideas, NodePlan, Analysis, Assembly, NodeDelta, Delta)
+SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport, Proposals, Ideas, NodePlan, Analysis, Assembly,
+           NodeDelta, Delta, ResearchPlan, ResearchReview)

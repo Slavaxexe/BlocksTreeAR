@@ -73,65 +73,65 @@
       "title": "BlockReference",
       "type": "object"
     },
-    "Hypothesis": {
+    "ModelConfiguration": {
       "additionalProperties": false,
       "properties": {
-        "rationale": {
+        "name": {
+          "description": "Actual algorithm/API name or ensemble name, not a block name",
           "minLength": 1,
-          "title": "Rationale",
+          "pattern": "\\S",
+          "title": "Name",
           "type": "string"
         },
-        "expected_effect": {
+        "configuration": {
+          "description": "Concrete settings of every model; state defaults explicitly",
           "minLength": 1,
-          "title": "Expected Effect",
+          "pattern": "\\S",
+          "title": "Configuration",
           "type": "string"
-        },
-        "pipeline": {
-          "$ref": "#/$defs/Pipeline"
         }
       },
       "required": [
-        "rationale",
-        "expected_effect",
-        "pipeline"
+        "name",
+        "configuration"
       ],
-      "title": "Hypothesis",
+      "title": "ModelConfiguration",
       "type": "object"
     },
-    "Pipeline": {
+    "PipelinePlan": {
       "additionalProperties": false,
       "properties": {
-        "data": {
-          "title": "Data",
-          "type": "object"
-        },
         "preprocessing": {
+          "description": "Actual transformations, or explicitly no preprocessing",
+          "minLength": 1,
+          "pattern": "\\S",
           "title": "Preprocessing",
-          "type": "object"
+          "type": "string"
         },
         "model": {
-          "title": "Model",
-          "type": "object"
+          "$ref": "#/$defs/ModelConfiguration"
         },
         "training": {
+          "description": "Fitting, tuning, internal validation and ensemble procedure",
+          "minLength": 1,
+          "pattern": "\\S",
           "title": "Training",
-          "type": "object"
+          "type": "string"
         }
       },
       "required": [
-        "data",
         "preprocessing",
         "model",
         "training"
       ],
-      "title": "Pipeline",
+      "title": "PipelinePlan",
       "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
-    "hypothesis": {
-      "$ref": "#/$defs/Hypothesis"
+    "pipeline": {
+      "$ref": "#/$defs/PipelinePlan"
     },
     "order": {
       "description": "Block names in execution order",
@@ -161,7 +161,7 @@
     }
   },
   "required": [
-    "hypothesis",
+    "pipeline",
     "order",
     "write"
   ],
