@@ -187,6 +187,22 @@
       "default": null,
       "title": "Submission File"
     },
+    "diagnostics_file": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Diagnostics File"
+    },
+    "quality_summary": {
+      "title": "Quality Summary",
+      "type": "object"
+    },
     "error": {
       "anyOf": [
         {

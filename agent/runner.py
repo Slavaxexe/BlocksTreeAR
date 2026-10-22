@@ -310,7 +310,8 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 writer.cancel()
         if writers:
             await asyncio.gather(*writers, return_exceptions=True)
-    finish = finish.model_copy(update={'notes': list(dict.fromkeys(notes)), 'duration_seconds': time.monotonic() - started})
+    finish = finish.model_copy(update={'notes': list(dict.fromkeys([*finish.notes, *notes])),
+                                       'duration_seconds': time.monotonic() - started})
     save(node / 'finish.json', finish)
     agents.log('experiment_finished', node_id=start.node_id, status=finish.status, stage=finish.stage,
                value=finish.value, evaluation_status=finish.evaluation_status)
@@ -390,6 +391,20 @@ async def run(task_path: Path, options: Options, settings: Settings):
         node = directory / 'nodes' / row.node_id
         modules = sources(node)
         context = {**shared, 'experiment': history_view(row), 'comparisons': comparisons, 'modules': modules}
+        context['comparison_quality'] = [{'node_id': other.node_id, 'quality_summary': other.result.quality_summary}
+                                         for other in delta.nodes
+                                         if other.node_id in references and other.node_id != row.node_id
+                                         and other.result.quality_summary]
+        if row.result.diagnostics_file:
+            try:
+                quality = json.loads(within(node, row.result.diagnostics_file).read_text(encoding='utf-8'))
+                if (quality.get('code_sha256'), quality.get('preparation_sha256'), quality.get('validation_sha256')) != (
+                        row.result.code_sha256, row.result.preparation_sha256,
+                        file_hash(within(node, row.result.validation_file))):
+                    raise ValueError('Quality diagnostics do not match the executed source and predictions')
+                context['quality_diagnostics'] = quality
+            except (OSError, ValueError, TypeError) as error:
+                context['quality_diagnostics'] = {'status': 'unavailable', 'reason': str(error)[:350]}
         context['automl_diagnostics'] = [json.loads(path.read_text(encoding='utf-8'))
                                        for path in sorted(node.glob('*_full_diagnostics.json'))]
         context['repair_attempts'] = []

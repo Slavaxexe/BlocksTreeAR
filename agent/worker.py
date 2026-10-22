@@ -15,6 +15,7 @@ from .contracts import Extraction, Finish, Preparation, Start
 from .assembly import implementation_hash
 from .context import preparation_view, requirements
 from .data import file_hash, input_hashes, module, profile, within
+from .diagnostics import build_diagnostics, quality_summary
 from .storage import atomic_bytes, load, save
 
 
@@ -163,10 +164,28 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
                 evaluation = 'completed'
             except Exception as exception:
                 value, evaluation, error = None, 'failed', f'Metric: {type(exception).__name__}: {exception}'[:2000]
+        diagnostics_file, diagnostics_summary, diagnostic_notes = None, {}, []
+        try:
+            diagnostic_requirements = requirements(load(preparation_path.parent / 'extraction.json', Extraction), prepared=True)
+            diagnostics = build_diagnostics(reference, valid_predictions, config, diagnostic_requirements)
+            diagnostics.update(node_id=start.node_id, code_sha256=code_sha256,
+                               preparation_sha256=start.preparation_sha256,
+                               validation_sha256=file_hash(validation_file),
+                               primary_evaluation={'status': evaluation, 'name': preparation.metric.name, 'value': value},
+                               scope='Outer validation aggregates after prediction; not training or tuning inputs')
+            save(directory / 'quality_diagnostics.json', diagnostics)
+            diagnostics_file = 'quality_diagnostics.json'
+            diagnostics_summary = quality_summary(diagnostics)
+        except Exception as exception:
+            # Optional diagnostics must never discard an otherwise valid submission.
+            diagnostics_summary = {'status': 'unavailable', 'reason': f'{type(exception).__name__}: {exception}'[:350]}
+            diagnostic_notes.append('Quality diagnostics unavailable; primary evaluation is unchanged')
         result = Finish(status='completed', value=value, evaluation_status=evaluation,
                         duration_seconds=time.monotonic() - started,
                         validation_file=validation_file.relative_to(directory).as_posix(),
-                        submission_file=submission_file.relative_to(directory).as_posix(), error=error, **common)
+                        submission_file=submission_file.relative_to(directory).as_posix(),
+                        diagnostics_file=diagnostics_file, quality_summary=diagnostics_summary,
+                        notes=diagnostic_notes, error=error, **common)
     except Exception as exception:
         result = Finish(status='failed', duration_seconds=time.monotonic() - started,
                         failed_block=getattr(exception, 'block', None),

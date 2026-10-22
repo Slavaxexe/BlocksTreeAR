@@ -53,7 +53,7 @@ def execution_contract(preparation):
 
 def result_view(finish):
     return finish.model_dump(exclude={'schema_version', 'metric', 'preparation_sha256', 'start_sha256',
-                                     'code_sha256', 'validation_file', 'submission_file', 'notes'})
+                                     'code_sha256', 'validation_file', 'submission_file', 'diagnostics_file', 'notes'})
 
 
 def history_view(row):

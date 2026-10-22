@@ -353,6 +353,8 @@ class Finish(Contract):
     notes: list[str] = Field(default_factory=list)
     validation_file: str | None = None
     submission_file: str | None = None
+    diagnostics_file: str | None = None
+    quality_summary: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 
     @model_validator(mode="after")
