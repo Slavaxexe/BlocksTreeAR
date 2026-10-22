@@ -21,9 +21,9 @@ from alfa_agent.config import Settings
 from alfa_agent.agents import JSONAgents, baker_context, implementation_context
 from alfa_agent.contracts import CodeReview, Delta, Finish, Hypotheses, Hypothesis, Metric, OutputBinding, Preparation, Program, ReviewRecord, RunReport, Start
 from alfa_agent.data import LIBRARIES, check_code, file_hash, library_context, profile
-from alfa_agent.runner import Options, process, review_source, run, summarize
+from alfa_agent.runner import Options, RepairProgress, experiment, process, review_source, run, summarize
 from alfa_agent.storage import load
-from alfa_agent.worker import validate_submission
+from alfa_agent.worker import check_predictor, diagnostics, prediction_frame, validate_submission
 from package_solution import build
 
 PREPARE = '''import numpy as np
@@ -48,11 +48,12 @@ def write_submission(test, predictions, tables, config, path):
 '''
 PROGRAM = '''import pandas as pd
 
-def fit_predict(fit, validation, test, preparation):
+def fit_model(fit, preparation):
     column = preparation['data']['target_columns'][0]
     value = float(fit[column].mean())
-    return (pd.DataFrame({column: [value] * len(validation)}),
-            pd.DataFrame({column: [value] * len(test)}))
+    def predict(features):
+        return pd.DataFrame({column: [value] * len(features)})
+    return predict
 '''
 
 
@@ -119,7 +120,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                        invalid_program=False, broken_code=False, execution_timeout=False, full_repair=False,
                        json_failure=False, network_failure=False, ast_failure=False, refused_once=False,
                        refused_after_error=False, wrong_columns=False, semantic_error=False, preparation_error=False,
-                       review_warning=False, review_unavailable=False, never_fix=False, max_nodes=1):
+                       review_warning=False, review_unavailable=False, never_fix=False, max_nodes=1,
+                       final_refit=False, refit_failure=False):
         path, answers = fixture(directory)
         if missing_metric:
             answers['PreparationDraft']['metric']['status'] = 'needs_implementation'
@@ -214,7 +216,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(context['failed_stage'], 'check')
                     self.assertFalse(context['last_refusal']['verified'])
             elif title == 'Program' and repair and seen.count(title) < int(repair):
-                answer = {**answers['Program'], 'code': PROGRAM.replace('value = float(fit[column].mean())', 'raise ValueError("repair me")')}
+                answer = {**answers['Program'], 'code': PROGRAM.replace('value = float(fit[column].mean())',
+                          f'raise ValueError("repair me attempt {seen.count(title)}")')}
             elif title == 'Program' and repair:
                 self.assertIn('repair me', body['messages'][-1]['content'])
             if title == 'Program' and full_repair and seen.count(title):
@@ -230,6 +233,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         full_attempts = 0
         async def launch(arguments, *args):
             nonlocal full_attempts
+            if refit_failure and '--refit' in arguments:
+                raise TimeoutError('Final refit exceeded remaining budget')
             if semantic_error and '--start' in arguments:
                 self.assertNotIn('.median()', Path(arguments[0]).read_text())
             if '--check' in arguments and (broken_code or execution_timeout):
@@ -244,7 +249,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError('Experiment time limit')
             return await process(arguments, *args)
         with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), patch('alfa_agent.runner.process', side_effect=launch):
-            result = await run(path, Options(time_budget=40, experiment_timeout=12, output_dir=run_directory, max_nodes=max_nodes),
+            result = await run(path, Options(time_budget=40, experiment_timeout=12, output_dir=run_directory, max_nodes=max_nodes, final_refit=final_refit),
                                Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         return result, seen
 
@@ -258,6 +263,111 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(review.result.status, 'pass')
             self.assertEqual(review.code_sha256, file_hash(node / 'experiment.py'))
             self.assertEqual(load(node / 'finish.json', Finish).value, 47.)
+
+    async def test_full_refit_uses_all_train_without_overwriting_validation_score(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), _ = await self.exercise(Path(temporary), final_refit=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            final, best = (json.loads((root / name).read_text()) for name in ('finalization.json', 'best.json'))
+            self.assertEqual((final['status'], final['fit_input_rows']), ('completed', 40))
+            self.assertEqual(best['value'], 47.)
+            self.assertFalse(best['refit_scored'])
+            self.assertEqual(load(root / 'nodes/node_000/finish.json', Finish).value, 47.)
+            self.assertEqual(pd.read_csv(Path(temporary) / 'result.tsv', sep='\t').estimate.tolist(), [39.] * 5)
+            self.assertEqual(pd.read_csv(root / best['validation_submission_file'], sep='\t').estimate.tolist(), [31.] * 5)
+
+    async def test_failed_refit_keeps_validated_submission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), _ = await self.exercise(Path(temporary), final_refit=True, refit_failure=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertEqual(json.loads((root / 'finalization.json').read_text())['status'], 'timeout')
+            self.assertEqual((Path(temporary) / 'result.tsv').read_bytes(), (root / 'nodes/node_000/result.tsv').read_bytes())
+
+    async def test_plan_conflict_routes_to_baker_without_mutating_start(self):
+        from types import SimpleNamespace
+        from alfa_agent.contracts import PlanConflict
+        from alfa_agent.storage import save
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            node = root / 'nodes/node_001'
+            node.mkdir(parents=True)
+            (_, answers) = fixture(root)
+            hypothesis = Hypothesis.model_validate(answers['Hypothesis'])
+            hypothesis.pipeline.training['thresholds'] = 'Tune on outer validation labels'
+            start = Start(node_id='node_001', parent_id='node_000', preparation_sha256='a' * 64,
+                          hypothesis=hypothesis, outputs={}, timeout_seconds=10.)
+            save(node / 'start.json', start)
+            before = (node / 'start.json').read_bytes()
+            (root / 'prepare.py').write_text(PREPARE)
+            agent = SimpleNamespace(max_calls=20, requests=0, settings=SimpleNamespace(api_key='fake'),
+                implement=AsyncMock(return_value=Program(plan_conflict=PlanConflict(
+                    missing_input='validation_targets', plan_quote='Tune on outer validation labels'))))
+            with patch('alfa_agent.runner.process', new=AsyncMock()) as child:
+                finish = await experiment(node, start, {'preparation': answers['PreparationDraft']}, agent,
+                                          time.monotonic() + 20, lambda *args: None)
+            self.assertEqual(finish.status, 'needs_replan')
+            self.assertFalse(finish.replan['verified'])
+            self.assertEqual((node / 'start.json').read_bytes(), before)
+            child.assert_not_called()
+            context = {'parent': {'start': start.model_dump(), 'finish': {'value': 0}, 'code': ''},
+                       'preparation': {}, 'delta': {'nodes': [{'node_id': start.node_id, 'parent_id': start.parent_id,
+                       'hypothesis': hypothesis.model_dump(), 'result': finish.model_dump()}]}, 'pending': []}
+            compact = baker_context(context)
+            self.assertEqual(compact['replan_requests'][0]['node_id'], 'node_001')
+            self.assertEqual(compact['history'][0]['error_source'], 'model_request')
+
+    def test_no_progress_ignores_comments_but_distinct_repairs_keep_budget(self):
+        progress = RepairProgress()
+        self.assertEqual(progress.observe('check', PROGRAM, ValueError('same'))['unchanged_failures'], 1)
+        progress.observe('check', PROGRAM + '\n# cosmetic', ValueError('same'))
+        with self.assertRaisesRegex(ValueError, 'Repair stalled'):
+            progress.observe('check', PROGRAM + '\n\n# another comment', ValueError('same'))
+        for index in range(20):
+            progress.observe('check', PROGRAM + f'\nVERSION = {index}', ValueError('same'))
+
+    def test_frozen_predictor_catches_batch_categories_and_preserves_fitted_stochastic_model(self):
+        from sklearn.neural_network import MLPRegressor
+        features = pd.DataFrame({'category': ['a', 'b', 'c'] * 12})
+        broken = lambda frame: pd.DataFrame({'y': frame['category'].astype('category').cat.codes.to_numpy()})
+        with self.assertRaisesRegex(ValueError, 'Frozen predictor changed'):
+            check_predictor(broken, features, prediction_frame(broken, features.copy()))
+        numeric = pd.DataFrame({'x': np.arange(36, dtype=float)})
+        model = MLPRegressor(hidden_layer_sizes=(4,), max_iter=5, random_state=1).fit(numeric, numeric.x)
+        predict = lambda frame: pd.DataFrame({'y': model.predict(frame)})
+        check_predictor(predict, numeric, prediction_frame(predict, numeric.copy()))
+
+    def test_auxiliary_class_diagnostics_do_not_replace_custom_metric(self):
+        from types import SimpleNamespace
+        preparation = SimpleNamespace(data=SimpleNamespace(target_columns=['y']), task_type='classification')
+        measured = diagnostics(pd.DataFrame({'y': ['a', 'a', 'a', 'b']}), pd.DataFrame({'y': ['a', 'b', 'b', 'b']}), preparation)
+        self.assertAlmostEqual(measured['classification']['b']['precision'], 1/3)
+        self.assertEqual(measured['classification']['b']['recall'], 1.)
+        self.assertEqual(measured['classification']['b']['support'], 1)
+        integer = diagnostics(pd.DataFrame({'y': [0, 1]}), pd.DataFrame({'y': [0., 1.]}), preparation)
+        self.assertEqual(integer['classification']['1.0']['f1'], 1.)
+        self.assertEqual(diagnostics(pd.DataFrame({'y': [0, 1]}), pd.DataFrame({'y': [.2, .7]}), preparation), {})
+
+    def test_predictor_rejects_input_mutation_and_nonfinite_values(self):
+        features = pd.DataFrame({'x': [1., 2.]})
+        def mutate(frame):
+            frame['x'] = 0
+            return pd.DataFrame({'y': [0., 0.]})
+        with self.assertRaisesRegex(ValueError, 'mutated'):
+            prediction_frame(mutate, features.copy())
+        with self.assertRaisesRegex(ValueError, 'non-finite'):
+            prediction_frame(lambda frame: pd.DataFrame({'y': [float('inf'), 1.]}), features.copy())
+
+    def test_baker_diagnostics_stay_bounded_and_include_leader_parent_deltas(self):
+        pipeline = {'data': {}, 'preprocessing': {}, 'model': {}, 'training': {}}
+        hypothesis = {'pipeline': pipeline}
+        classes = {str(i): {'f1': i/100, 'precision': .5, 'recall': .4, 'support': i+1} for i in range(100)}
+        rows = [{'node_id': f'node_{i:03}', 'parent_id': None, 'hypothesis': hypothesis, 'result': {'value': i,
+                'diagnostics': {'classification': classes, 'parent_delta': {k: {'f1': .1} for k in classes}}}} for i in range(10)]
+        context = {'preparation': {}, 'parent': {'start': {'node_id': 'node_000', 'hypothesis': hypothesis},
+                   'finish': {'value': 0}, 'code': ''}, 'delta': {'nodes': rows}, 'pending': []}
+        brief = baker_context(context)['diagnostics']
+        self.assertEqual([r['node_id'] for r in brief], ['node_000', 'node_008', 'node_009'])
+        self.assertTrue(all(len(r['weak_classes']) == len(r['parent_delta']) == 3 for r in brief))
 
     async def test_preparation_review_repairs_wrong_metric_before_any_node(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -286,9 +396,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             (root, report), seen = await self.exercise(Path(temporary), semantic_error=True, never_fix=True)
             calls = [c for c in report.llm_calls if c.node_id == 'node_000']
-            self.assertEqual(len(calls), 20)
+            self.assertEqual(len(calls), 4)
             self.assertEqual(sum(c.role == 'reviewer' for c in calls), 1)
-            self.assertEqual(seen.count('Program'), 19)
+            self.assertEqual(seen.count('Program'), 3)
             self.assertEqual(load(root / 'nodes/node_000/finish.json', Finish).stage, 'review')
             self.assertFalse((root / 'best.json').exists())
 
@@ -442,8 +552,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             finish = load(node / 'finish.json', Finish)
             self.assertEqual((finish.status, finish.stage), ('failed', 'check'))
             self.assertEqual(finish.code_sha256, file_hash(node / 'experiment.py'))
-            self.assertEqual(seen.count('Program'), 20)
-            self.assertEqual(sum(call.role == 'implementer' for call in report.llm_calls), 20)
+            self.assertEqual(seen.count('Program'), 4)
+            self.assertEqual(sum(call.role == 'implementer' for call in report.llm_calls), 4)
             self.assertEqual(sum(call.status == 'invalid_json' for call in report.llm_calls), 1)
             self.assertFalse((root / 'best.json').exists())
 
@@ -469,7 +579,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(report.status, 'failed')
             node = root / 'nodes/node_000'
             finish = load(node / 'finish.json', Finish)
-            self.assertEqual((finish.stage, seen.count('Program')), ('check', 20))
+            self.assertEqual((finish.stage, seen.count('Program')), ('check', 3))
             self.assertEqual(finish.code_sha256, file_hash(node / 'experiment.py'))
             self.assertIn('COLUMNS = list()', (node / 'experiment.py').read_text())
             self.assertIn('Move computed values inside a function', (node / 'execution.log').read_text())
@@ -540,11 +650,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 await process(['-c', 'import time; time.sleep(5)'], root, root / 'timeout.log', time.monotonic()+5, .1)
 
     def test_code_interface_and_import_guard(self):
-        check_code(PROGRAM.replace('    column = ', '    columns = [name for name in fit.columns]\n    column = '), ('fit_predict',))
-        for code in ('def fit_predict(:\n    pass', 'import subprocess\n' + PROGRAM, 'print("top-level execution")\n' + PROGRAM,
-                     PROGRAM.replace('fit_predict', 'wrong_function')):
+        check_code(PROGRAM.replace('    column = ', '    columns = [name for name in fit.columns]\n    column = '), ('fit_model',))
+        for code in ('def fit_model(:\n    pass', 'import subprocess\n' + PROGRAM, 'print("top-level execution")\n' + PROGRAM,
+                     PROGRAM.replace('fit_model', 'wrong_function')):
             with self.subTest(code=code[:30]), self.assertRaises(ValueError):
-                check_code(code, ('fit_predict',))
+                check_code(code, ('fit_model',))
 
     async def test_timeout_stops_library_child_processes(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -563,11 +673,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         distributions = {line.split('==')[0].split('[')[0] for line in requirements if '==' in line}
         self.assertEqual(set(LIBRARIES), distributions)
         for root in LIBRARIES.values():
-            check_code(f'import {root}\n' + PROGRAM, ('fit_predict',))
+            check_code(f'import {root}\n' + PROGRAM, ('fit_model',))
         check_code('from torch import nn\nclass Network(nn.Module):\n    def forward(self, x):\n        return x\n' +
-                   PROGRAM, ('fit_predict',))
+                   PROGRAM, ('fit_model',))
         with self.assertRaisesRegex(ValueError, 'Unsupported generated import'):
-            check_code('import unapproved_package\n' + PROGRAM, ('fit_predict',))
+            check_code('import unapproved_package\n' + PROGRAM, ('fit_model',))
 
     def test_missing_local_library_is_still_permitted(self):
         from importlib.metadata import PackageNotFoundError
@@ -596,10 +706,12 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
                           'model': {'family': family, 'value': value}}})
             if index == 1:
                 code.append('from sklearn.linear_model import LinearRegression\nimport pandas as pd\n'
-                    'def fit_predict(fit, validation, test, preparation):\n'
+                    'def fit_model(fit, preparation):\n'
                     '    column = preparation["data"]["target_columns"][0]\n'
                     '    model = LinearRegression().fit(fit[["signal"]], fit[column])\n'
-                    '    return pd.DataFrame({column:model.predict(validation[["signal"]])}), pd.DataFrame({column:model.predict(test[["signal"]])})\n')
+                    '    def predict(features):\n'
+                    '        return pd.DataFrame({column:model.predict(features[["signal"]])})\n'
+                    '    return predict\n')
             else:
                 code.append(PROGRAM.replace('float(fit[column].mean())', value))
         starts, requests, wrong_sent, rejected = {}, {}, False, 0
@@ -721,7 +833,7 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
                     elif requests[node_id] == 1:
                         raise httpx.ConnectError('temporary disconnection', request=request)
                     else:
-                        answer = {'code': 'COLUMNS = list()\n' + code[index]}
+                        answer = {'code': f'ATTEMPT = {requests[node_id]}\nCOLUMNS = list()\n' + code[index]}
             else:
                 answer = answers[title]
             return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0,
@@ -750,7 +862,7 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
         with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), patch('alfa_agent.runner.summarize', side_effect=record), \
              patch('alfa_agent.runner.time', SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])), \
              patch('alfa_agent.agents.asyncio.sleep', side_effect=backoff):
-            directory, report = await run(path, Options(time_budget=90, experiment_timeout=12, output_dir=root, max_nodes=max_nodes),
+            directory, report = await run(path, Options(time_budget=90, experiment_timeout=12, output_dir=root, max_nodes=max_nodes, final_refit=False),
                                           Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         for node_id, saved in starts.items():
             self.assertEqual((root / 'nodes' / node_id / 'start.json').read_bytes(), saved)

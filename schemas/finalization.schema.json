@@ -1,0 +1,78 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "timeout"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "node_id": {
+      "pattern": "^node_[0-9]{3}$",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "preparation_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Preparation Sha256",
+      "type": "string"
+    },
+    "code_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Code Sha256",
+      "type": "string"
+    },
+    "start_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Start Sha256",
+      "type": "string"
+    },
+    "fit_input_rows": {
+      "default": 0,
+      "title": "Fit Input Rows",
+      "type": "integer"
+    },
+    "submission_file": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Submission File"
+    },
+    "duration_seconds": {
+      "default": 0.0,
+      "title": "Duration Seconds",
+      "type": "number"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    }
+  },
+  "required": [
+    "status",
+    "node_id",
+    "preparation_sha256",
+    "code_sha256",
+    "start_sha256"
+  ],
+  "title": "Finalization",
+  "type": "object"
+}

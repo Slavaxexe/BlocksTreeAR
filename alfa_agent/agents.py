@@ -23,11 +23,14 @@ def runtime_contract(preparation):
     validation, profile = preparation.get('validation', {}), preparation.get('profile', {})
     rows = {'fit': validation.get('fit_rows'), 'validation': validation.get('validation_rows'),
             'test': profile.get('test', {}).get('rows')}
-    return {'entrypoint': 'fit_predict(fit, validation, test, preparation)',
+    return {'entrypoint': 'fit_model(fit, preparation) -> fitted callable predict(features) -> DataFrame',
         'fit': 'Full training DataFrame: features AND target_columns; all train columns are available.',
         'validation': 'DataFrame with target_columns removed; preserve supplied row order.',
         'test': 'Test DataFrame; preserve supplied row order.',
-        'returns': 'Two prediction DataFrames compatible with score/write_submission in preparation_code.',
+        'returns': 'A fitted callable returning one prediction DataFrame compatible with score/write_submission.',
+        'prediction_scope': preparation.get('prediction_scope', 'row'),
+        'prediction_checks': 'Same fitted predictor on full and reordered subset batches; no input mutation or non-finite outputs.',
+        'final_refit': 'The selected source is trained again with all labeled train rows; len(fit) may change. No new score is assigned.',
         'rows': rows, 'rows_source': 'preparation.json: measured profile and fixed split',
         'smoke_rows': {key: min(limit, rows[key]) if rows[key] is not None else None
                        for key, limit in (('fit', 200), ('validation', 50), ('test', 50))}}
@@ -36,7 +39,7 @@ def runtime_contract(preparation):
 def implementation_context(context):
     """Keep the current plan authoritative; ancestor refusals are not execution facts."""
     keys = ('task_text', 'preparation', 'preparation_code', 'installed_libraries', 'allowed_libraries',
-            'previous_code', 'execution_error', 'failed_stage', 'last_refusal', 'requests_left', 'review_findings')
+            'previous_code', 'execution_error', 'failed_stage', 'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
     result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
               **{key: context[key] for key in keys if key in context}}
     if context.get('parent'):
@@ -59,15 +62,28 @@ def baker_context(context):
             'status': result.get('status', 'pending'), 'score': result.get('value'),
             'duration_seconds': result.get('duration_seconds'), 'stage': result.get('stage'),
             'source': f"nodes/{node['node_id']}/finish.json" if result else f"nodes/{node['node_id']}/start.json",
-            'error': error.splitlines()[-1][-1000:] if error else None,
-            'error_source': ('model_claim' if error.startswith('Implementation blocked:') else
+            'error': 'Plan revision requested; see replan_requests' if result.get('replan') else error.splitlines()[-1][-1000:] if error else None,
+            'error_source': ('model_request' if result.get('replan') else 'model_claim' if error.startswith('Implementation blocked:') else
                              'review' if result.get('stage') == 'review' else
                              'runtime' if result.get('stage') in ('check', 'execution') else 'controller') if error else None}
     keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'remaining_nodes', 'remaining_seconds',
             'experiment_timeout_seconds', 'available_parents')
+    def brief(node):
+        measured = node['result'].get('diagnostics', {})
+        classes = measured.get('classification', {})
+        weak = sorted(classes.items(), key=lambda pair: pair[1]['f1'])[:3]
+        return {'node_id': node['node_id'], 'weak_classes': dict(weak),
+                'parent_delta': {label: measured.get('parent_delta', {}).get(label) for label, _ in weak},
+                **{k: v for k, v in measured.items() if k not in {'classification', 'parent_delta'}}}
+    measured = [n for n in context['delta']['nodes'] if n.get('result', {}).get('diagnostics')]
+    leader = next((n for n in measured if n['node_id'] == parent['start']['node_id']), None)
+    recent = ([leader] if leader else []) + [n for n in measured if n is not leader][-2:]
     return {**{k: context[k] for k in keys if k in context}, 'runtime_contract': runtime_contract(context['preparation']),
         'parent': {'node_id': parent['start']['node_id'], 'pipeline': base, 'code': parent['code'],
                    'score': parent['finish']['value']},
+        'diagnostics': [brief(n) for n in recent],
+        'replan_requests': [{'node_id': n['node_id'], 'pipeline': n['hypothesis']['pipeline'], **n['result']['replan']}
+                            for n in context['delta']['nodes'] if n.get('result', {}).get('replan')][-3:],
         'history': [row(n) for n in context['delta']['nodes']], 'pending': [row(n) for n in context['pending']]}
 
 
@@ -217,6 +233,7 @@ class JSONAgents:
             "write the required output file at path in its required format/column order; preserve ID values and test order.\n"
             "config is the entire preparation object; files are in config['data']['files'] relative to task_directory. "
             "Put target/id column lists in data; actual output filename/format/columns in output. "
+            "Set prediction_scope=row for independent objects. Use batch only when task semantics require joint/sequence prediction; explain why in rationale. "
             "If platform_output is supplied, its filename and CSV format are mandatory; keep task-specific columns and IDs. "
             "Use arbitrary metric.name; mark metric ready only when its definition can be implemented. "
             "Do not put row counts or measured profiles in your JSON; Python will compute them. "
@@ -241,10 +258,13 @@ class JSONAgents:
         return await self.ask(Program, "Implement the saved start.hypothesis as one compact experiment.py. "
             "CURRENT NODE: only context.start defines your assignment; parent_reference is optional reference code. "
             "On repair, correct previous_code using execution_error and failed_stage; do not repeat the same error. "
+            "repair_progress counts unchanged executable code and failure; change the actual code, not comments or notes. "
             "Address review_findings when provided; they concern correctness, not permission to change the saved hypothesis. "
             "The start is immutable: preserve its model, preprocessing, data choices and specified parameters. "
             "You may fill unspecified implementation details and explain them in notes. "
             "If the plan cannot be implemented, return blocked_reason rather than substituting another hypothesis. "
+            "If it specifically requires unavailable OUTER validation targets, request a new Baker plan via plan_conflict: "
+            "missing_input=validation_targets, plan_quote=exact text from the saved hypothesis. Do not silently replace it with an inner split. "
             "Do not rewrite start or return a revised hypothesis. Prefer under 80 lines; use preparation's bindings/profile rather than "
             "duplicating large column lists. "
             "allowed_libraries maps permitted distributions to import names; installed_libraries gives versions in THIS "
@@ -252,9 +272,14 @@ class JSONAgents:
             "explicit subprocesses. Library-managed workers are allowed within the CPU/time budget. "
             "AutoML may write temporary models in a unique tempfile.TemporaryDirectory; avoid shared paths, disable "
             "unneeded persistent files (e.g. CatBoost allow_writing_files=False), and bound threads/trials/time. "
-            "Define fit_predict(fit, validation, test, preparation) returning TWO pandas DataFrames: "
-            "validation predictions and test predictions, in the supplied row order. "
-            "fit contains training targets; validation has target columns removed. preparation is a dict. "
+            "Keep disk-backed models' temporary workspace alive as long as the returned predictor. "
+            "Define fit_model(fit, preparation), train once using labeled fit and return a callable predict(features) "
+            "which returns a pandas DataFrame in input row order. A nested function or callable object is fine. "
+            "Prediction inputs have NO target columns. preparation is a dict. Fit encoders/statistics/category vocabularies only "
+            "on fit and reuse them for every prediction batch; copy input before modifying it. Inference must be deterministic. "
+            "For early stopping, calibration or threshold tuning use an INTERNAL split of labeled fit, respecting the task's time/group structure. "
+            "After inner parameter selection, train the final model on all supplied fit rows when the method permits. "
+            "The controller later refits the same source on all train rows: derive dimensions from fit, never use saved outer split indices. "
             "runtime_contract describes the actual inputs supplied later by the controller. "
             "You can write code using these frames without seeing raw data rows now. "
             "last_refusal is an UNVERIFIED model claim, not a runtime error: reconsider it against the contract, "
@@ -279,6 +304,7 @@ class JSONAgents:
             "category/class mapping, row alignment, weights and whether planned training steps really execute. "
             "For preparation, check reading/bindings, split, exact metric and submission writer against requirements. "
             "A successful smoke run proves execution and shape checks, not semantic correctness. "
+            "smoke also contains measured frozen-predictor invariance checks; a pass covers those probes, not all possible data. "
             "Return at most THREE concise findings with exact code_quote, violated requirement, explanation and "
             "a brief check idea in plain language (no executable code). Only direct, demonstrable contradictions "
             "visible in the supplied code/contract are errors. Uncertain risks are warnings and MUST NOT block. "
@@ -304,12 +330,17 @@ class JSONAgents:
             "not proof that a plan is impossible. error_source=review is a code-review judgment, not an observed runtime failure. "
             "Runtime failures describe that execution, not a permanent ban on a family. "
             "Use profile missing/distinct counts, observed errors and time costs to justify the next experiment; do not invent diagnostics. "
+            "Use measured diagnostics (weak-class precision/recall/support and parent deltas); rising recall with falling precision may hurt the primary score. "
+            "replan_requests preserve immutable failed plans. Propose a corrected NEW plan; unavailable outer validation labels "
+            "can be replaced by a task-appropriate INTERNAL labeled split of fit. Claims from the model are requests, not proven impossibility. "
             "If correction[purpose].action is new_direction, abandon that candidate: for explore choose a different model family "
             "or substantially different preprocessing; for improve choose a different substantive change to the leader. "
             "Use parent code as a reference when useful. All accepted proposals will be tested. "
             "Keep preparation's data bindings, split, scorer and output contract fixed. "
             "The executor receives labeled fit rows and UNLABELED validation/test rows; do not require refitting on full labeled train. "
-            "Train on fit and predict both validation and test. Use at most two parallel training jobs; another experiment may run concurrently. "
+            "Train fit_model on fit and return a reusable predictor for both validation and test. Early stopping/thresholds/calibration "
+            "must use an inner split of fit. Separate finalization refits the selected source on all train rows without a new validation score. "
+            "Use at most two parallel training jobs; another experiment may run concurrently. "
             "Algorithms, features and parameters are arbitrary within installed dependencies and task constraints. "
             "allowed_libraries maps all permitted distributions to import names; installed_libraries gives local versions. "
             "Choose from installed permitted libraries, including boosting, neural networks and AutoML; missing locally "

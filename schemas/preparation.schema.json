@@ -168,6 +168,27 @@
     "output": {
       "$ref": "#/$defs/OutputBinding"
     },
+    "task_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Type"
+    },
+    "prediction_scope": {
+      "default": "row",
+      "enum": [
+        "row",
+        "batch"
+      ],
+      "title": "Prediction Scope",
+      "type": "string"
+    },
     "profile": {
       "title": "Profile",
       "type": "object"

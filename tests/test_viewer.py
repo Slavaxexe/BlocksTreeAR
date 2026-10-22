@@ -43,6 +43,14 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(run['nodes'][0]['smoke']['status'], 'passed')
         self.assertIsNone(run['nodes'][0]['finish'])
 
+    def test_finalization_and_plan_revision_are_visible(self):
+        self.write(self.run / 'finalization.json', {'status': 'completed', 'fit_input_rows': 40})
+        self.write(self.node / 'finish.json', {'status': 'needs_replan', 'replan': {'verified': False}})
+        run = collect(self.run)['runs'][0]
+        self.assertEqual(run['finalization']['fit_input_rows'], 40)
+        self.assertEqual(run['nodes'][0]['finish']['status'], 'needs_replan')
+        self.assertIn('Нужен новый план', page(collect(self.run)).decode())
+
     def test_partial_json_does_not_hide_other_nodes_or_read_credentials(self):
         (self.run / '.env').write_text('OPENAI_API_KEY=viewer-must-not-read-this', encoding='utf-8')
         (self.node / 'finish.json').write_text('{unfinished', encoding='utf-8')

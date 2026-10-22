@@ -52,7 +52,7 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
                 warnings.append(f'{path.name}: исходник недоступен')
                 return None
         task = read(folder / "task.json")
-        run = {key: read(folder / f"{key}.json") for key in ("profile", "validation", "best", "delta", "report", "preparation", "preparation_review")}
+        run = {key: read(folder / f"{key}.json") for key in ("profile", "validation", "best", "delta", "report", "preparation", "preparation_review", "finalization")}
         block_directory = folder / 'extraction' if (folder / 'extraction').is_dir() else folder
         blocks = {key: read(block_directory / f"{key}.json") for key in ("problem", "data", "metric", "output")}
         extraction = read(folder / "extraction.json")
@@ -130,6 +130,7 @@ main{max-width:1400px;margin:auto;padding:0 32px 28px}
 .tree-node.best .box{stroke:var(--purple);stroke-width:2.3}
 .tree-node.completed .box{fill:var(--teal-bg)}
 .tree-node.failed .box,.tree-node.timeout .box{fill:var(--red-bg)}
+.tree-node.needs_replan .box{stroke:var(--amber);stroke-width:2}
 .tree-node.partial .box{fill:var(--purple-bg)}
 .tree .score{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:17px;font-variant-numeric:tabular-nums}
 .tree .best-label{fill:var(--purple);font-size:11px;font-weight:650}
@@ -173,7 +174,7 @@ const element=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.clas
 const svg=(tag,attrs={},text)=>{const e=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e};
 const fmt=n=>typeof n==='number'&&Number.isFinite(n)?n.toFixed(6):'—';
 const families={dummy:'Dummy baseline',extra_trees:'ExtraTrees',hist_gradient_boosting:'HistGradientBoosting'};
-const statuses={completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
+const statuses={completed:'Завершён',failed:'Ошибка',timeout:'Таймаут',needs_replan:'Нужен новый план'};
 const purposes={baseline:'baseline',improve:'улучшение',explore:'исследование'};
 const stops={node_limit:'Лимит нод',time_budget:'Лимит времени',llm_error:'Ошибка API / JSON',preparation_failed:'Ошибка подготовки',baseline_failed:'Baseline не завершён',error:'Ошибка контроллера',max_experiments:'Лимит экспериментов'};
 const roles={problem:'Задача',data:'Данные',metric:'Метрика',output:'Формат ответа'};
@@ -260,7 +261,7 @@ function drawExtraction(r) {
   c.replaceChildren(); marker(c); c.setAttribute('viewBox', '0 0 735 680'); c.style.width = '735px'; c.style.height = '680px';
   $('summary').replaceChildren();
   for (const [label, value] of [['Статус запуска', extractionStatus(r)], ['Сохранено блоков', accepted+'/4'],
-    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',search:'Поиск гипотез',complete:'Завершён'}[report?.stage]??'Извлечение'],
+    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',search:'Поиск гипотез',finalization:'Обучение на всём train',complete:'Завершён'}[report?.stage]??'Извлечение'],
     ['Вызовов в отчёте', report?.llm_calls?.length ?? '—']]) {
     const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
   }
@@ -321,7 +322,7 @@ function drawExtractionDetail(r) {
       const list = element('ul', 'changes'); for (const check of report.checks) list.append(element('li', 'mono', check));
       const checks = element('details'); checks.append(element('summary', '', 'Пройденные проверки: '+report.checks.length), list); d.append(checks);
     }
-    const files = key==='result'?['extraction','report']:key==='delta'?['delta','best','report']:['preparation','preparation_review','preparation_code'];
+    const files = key==='result'?['extraction','report']:key==='delta'?['delta','best','finalization','report']:['preparation','preparation_review','preparation_code'];
     if (!files.includes(jsonTab)) jsonTab = files[0];
     const tabs = element('div', 'json-tabs');
     for (const name of files) {

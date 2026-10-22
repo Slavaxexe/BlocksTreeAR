@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from threadpoolctl import threadpool_limits
 
-from .contracts import Finish, Preparation, Start
+from .contracts import Finalization, Finish, Preparation, Start
 from .data import file_hash, input_hashes, module, profile, within
 from .storage import atomic_bytes, load, save
 
@@ -70,7 +70,59 @@ def prepare(directory: Path):
     save(path, prepared)
 
 
-def predict(preparation: Preparation, root: Path, fit_predict, *, small=False):
+def prediction_frame(predictor, features):
+    before = features.copy(deep=True)
+    result = predictor(features)
+    if not features.equals(before):
+        raise ValueError('Predictor mutated its input frame; use a copy for preprocessing')
+    if not isinstance(result, pd.DataFrame) or len(result) != len(features):
+        raise ValueError('Predictor must return a DataFrame with one row per input row')
+    if result.isna().any().any() or any(not np.isfinite(result[c]).all() for c in result.select_dtypes('number')):
+        raise ValueError('Predictions contain missing or non-finite values')
+    return result.reset_index(drop=True)
+
+
+def check_predictor(predictor, features, predictions):
+    """Probe the SAME fitted predictor, never retrain a stochastic model for this check."""
+    indices = np.unique(np.linspace(0, len(features) - 1, min(17, len(features)), dtype=int))[::-1]
+    for positions in (indices, indices[:1]):
+        actual = prediction_frame(predictor, features.iloc[positions].copy())
+        expected = predictions.iloc[positions].reset_index(drop=True)
+        try:
+            pd.testing.assert_frame_equal(actual, expected, check_dtype=False, check_exact=False, rtol=1e-6, atol=1e-8)
+        except AssertionError:
+            raise ValueError('Frozen predictor changed predictions for the same rows in a reordered subset; '
+                             'check batch-fitted encoders/statistics, category codes and inference randomness') from None
+
+
+def diagnostics(reference, predictions, preparation):
+    """Auxiliary measurements only; never replace the task's scorer with these metrics."""
+    targets = preparation.data.target_columns
+    if len(targets) != 1 or targets[0] not in predictions:
+        return {}
+    target = targets[0]
+    kind = (preparation.task_type or '').casefold()
+    if 'classif' in kind or 'классиф' in kind:
+        from sklearn.metrics import precision_recall_fscore_support
+        from sklearn.utils.multiclass import type_of_target
+        truth, predicted = reference[target], predictions[target]
+        if type_of_target(predicted) not in {'binary', 'multiclass'}:
+            return {}  # A probability column is not a vector of predicted class labels.
+        if pd.api.types.is_numeric_dtype(truth):
+            truth, predicted = truth.astype(float), pd.to_numeric(predicted).astype(float)
+        else:
+            truth, predicted = truth.astype(str), predicted.astype(str)
+        labels = sorted(set(truth) | set(predicted))
+        precision, recall, f1, support = precision_recall_fscore_support(truth, predicted, labels=labels, zero_division=0)
+        return {'classification': {str(label): {'precision': float(p), 'recall': float(r), 'f1': float(f), 'support': int(s)}
+                for label, p, r, f, s in zip(labels, precision, recall, f1, support)}}
+    if 'regress' in kind or 'регресс' in kind:
+        residual = reference[target].to_numpy(dtype=float) - predictions[target].to_numpy(dtype=float)
+        return {'regression': {'mae': float(np.mean(np.abs(residual))), 'rmse': float(np.sqrt(np.mean(residual ** 2)))}}
+    return {}
+
+
+def predict(preparation: Preparation, root: Path, fit_model, *, small=False):
     source = Path(preparation.task_directory)
     if input_hashes(source, preparation.data.files) != preparation.source_hashes:
         raise ValueError('Input files changed after preparation')
@@ -91,18 +143,21 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False):
     reference = train.iloc[valid].reset_index(drop=True)
     validation_input = reference.drop(columns=preparation.data.target_columns)
     with threadpool_limits(limits=2):
-        valid_predictions, test_predictions = fit_predict(train.iloc[fit].copy(), validation_input.copy(), test.copy(), config)
-    if any(not isinstance(frame, pd.DataFrame) for frame in (valid_predictions, test_predictions)):
-        raise ValueError('fit_predict must return two DataFrames')
-    if len(valid_predictions) != len(valid) or len(test_predictions) != len(test):
-        raise ValueError('Prediction row count differs from validation or test')
+        predictor = fit_model(train.iloc[fit].copy(), config)
+        if not callable(predictor):
+            raise ValueError('fit_model must return a fitted callable: predict(features) -> DataFrame')
+        valid_predictions = prediction_frame(predictor, validation_input.copy())
+        test_predictions = prediction_frame(predictor, test.copy())
+        if preparation.prediction_scope == 'row':
+            check_predictor(predictor, validation_input, valid_predictions)
+            check_predictor(predictor, test, test_predictions)
     return reader, config, tables, reference, valid_predictions.reset_index(drop=True), test_predictions.reset_index(drop=True)
 
 
 def smoke(directory: Path, preparation_path: Path):
     preparation = load(preparation_path, Preparation)
     program = module(directory / 'experiment.py', file_hash(directory / 'experiment.py'))
-    reader, config, tables, _, _, predictions = predict(preparation, preparation_path.parent, program.fit_predict, small=True)
+    reader, config, tables, _, _, predictions = predict(preparation, preparation_path.parent, program.fit_model, small=True)
     with tempfile.TemporaryDirectory() as temporary:
         destination = within(Path(temporary), preparation.output.filename)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -110,10 +165,12 @@ def smoke(directory: Path, preparation_path: Path):
         validate_submission(destination, preparation.output, len(tables['test']))
     atomic_bytes(directory / 'smoke.json', json.dumps({'status': 'passed',
         'prediction_rows': len(predictions), 'prediction_columns': list(predictions.columns),
-        'checks': ['prediction_frames', 'prediction_row_counts', 'submission_format']}).encode())
+        'checks': ['prediction_frames', 'prediction_row_counts', 'finite_predictions', 'input_immutability', 'submission_format'] +
+                  (['frozen_predictor_subset_order'] if preparation.prediction_scope == 'row' else []),
+        'prediction_scope': preparation.prediction_scope}).encode())
 
 
-def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=None) -> Finish:
+def evaluate(start_path: Path, fit_model, *, start_sha256=None, code_sha256=None) -> Finish:
     start = load(start_path, Start)
     directory = start_path.parent.resolve()
     started = time.monotonic()
@@ -131,7 +188,7 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
         if file_hash(within(directory, start.implementation)) != code_sha256:
             raise ValueError('Experiment source changed after its check')
         reader, config, tables, reference, valid_predictions, test_predictions = predict(
-            preparation, preparation_path.parent, fit_predict)
+            preparation, preparation_path.parent, fit_model)
         validation_file = within(directory, start.outputs['validation'])
         atomic_bytes(validation_file, valid_predictions.to_csv(index=False).encode())
         submission_file = within(directory, start.outputs['submission'])
@@ -151,6 +208,12 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
                         duration_seconds=time.monotonic() - started,
                         validation_file=validation_file.relative_to(directory).as_posix(),
                         submission_file=submission_file.relative_to(directory).as_posix(), error=error, **common)
+        try:
+            measured = diagnostics(reference, valid_predictions, preparation)
+            json.dumps(measured, allow_nan=False)
+            result = result.model_copy(update={'diagnostics': measured})
+        except (ValueError, TypeError):  # Optional diagnostics must not invalidate a custom task's score.
+            pass
     except Exception as exception:
         result = Finish(status='failed', duration_seconds=time.monotonic() - started,
                         error=f'{type(exception).__name__}: {exception}'[:2000], **common)
@@ -158,16 +221,57 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
     return result
 
 
-def main(fit_predict=None):
+def refit(start_path: Path):
+    start, started = load(start_path, Start), time.monotonic()
+    node, root = start_path.parent, start_path.parent.parent.parent
+    preparation = load(root / 'preparation.json', Preparation)
+    finish = load(node / 'finish.json', Finish)
+    result = Finalization(status='running', node_id=start.node_id, preparation_sha256=start.preparation_sha256,
+                          code_sha256=finish.code_sha256, start_sha256=finish.start_sha256)
+    try:
+        if file_hash(start_path) != result.start_sha256 or file_hash(root / 'preparation.json') != result.preparation_sha256:
+            raise ValueError('Saved plan or preparation changed before final refit')
+        source = Path(preparation.task_directory)
+        if input_hashes(source, preparation.data.files) != preparation.source_hashes:
+            raise ValueError('Input files changed before final refit')
+        reader = module(root / 'prepare.py', preparation.code_sha256)
+        program = module(node / 'experiment.py', result.code_sha256)
+        config = preparation.model_dump(mode='json')
+        tables = reader.load_data(source, config)
+        train, test = tables['train'], tables['test']
+        config['runtime'] = {'stage': 'final_refit', 'fit_rows': len(train)}
+        with threadpool_limits(limits=2):
+            predictor = program.fit_model(train.copy(), config)
+            predictions = prediction_frame(predictor, test.copy())
+            if preparation.prediction_scope == 'row':
+                check_predictor(predictor, test, predictions)
+        destination = within(root / 'final', preparation.output.filename)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        reader.write_submission(test, predictions, tables, config, destination)
+        validate_submission(destination, preparation.output, len(test))
+        result = result.model_copy(update={'status': 'completed', 'fit_input_rows': len(train),
+                                           'submission_file': destination.relative_to(root).as_posix()})
+    except Exception as error:
+        result = result.model_copy(update={'status': 'failed', 'error': f'{type(error).__name__}: {error}'[-2000:]})
+    result = result.model_copy(update={'duration_seconds': time.monotonic() - started})
+    save(root / 'finalization.json', result)
+    if result.status != 'completed':
+        raise ValueError(result.error)
+
+
+def main(fit_model=None):
     parser = argparse.ArgumentParser()
-    if fit_predict is None:
+    if fit_model is None:
         stage = parser.add_mutually_exclusive_group(required=True)
         stage.add_argument('--prepare', type=Path)
         stage.add_argument('--check', type=Path)
+        stage.add_argument('--refit', type=Path)
         parser.add_argument('--preparation', type=Path)
         args = parser.parse_args()
         if args.prepare:
             prepare(args.prepare.resolve())
+        elif args.refit:
+            refit(args.refit.resolve())
         else:
             smoke(args.check.resolve(), args.preparation.resolve())
     else:
@@ -175,7 +279,7 @@ def main(fit_predict=None):
         parser.add_argument('--start-sha256')
         parser.add_argument('--code-sha256')
         args = parser.parse_args()
-        result = evaluate(args.start.resolve(), fit_predict, start_sha256=args.start_sha256, code_sha256=args.code_sha256)
+        result = evaluate(args.start.resolve(), fit_model, start_sha256=args.start_sha256, code_sha256=args.code_sha256)
         if result.status != 'completed':
             print(result.error, file=sys.stderr)
             raise SystemExit(1)

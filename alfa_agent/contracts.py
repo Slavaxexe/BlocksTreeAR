@@ -126,6 +126,7 @@ class PreparationDraft(Contract):
     validation: dict[str, Any]
     metric: Metric
     output: OutputBinding
+    prediction_scope: Literal['row', 'batch'] = 'row'
     code: str = Field(min_length=1, description="Complete prepare.py source implementing the requested Python interface")
 
 
@@ -139,6 +140,8 @@ class Preparation(Contract):
     validation: dict[str, Any]
     metric: Metric
     output: OutputBinding
+    task_type: str | None = None
+    prediction_scope: Literal['row', 'batch'] = 'row'
     profile: dict[str, Any] = Field(default_factory=dict)
     source_hashes: dict[str, str] = Field(default_factory=dict)
     code_sha256: SHA256
@@ -217,14 +220,20 @@ class Hypotheses(Contract):
         return self
 
 
+class PlanConflict(Contract):
+    missing_input: Literal['validation_targets']
+    plan_quote: str = Field(min_length=1, max_length=400)
+
+
 class Program(Contract):
     code: str = Field(default="", description="Complete experiment.py implementing the saved start, or empty when blocked")
     notes: list[str] = Field(default_factory=list, description="Implementation details and limitations; never measured scores")
     blocked_reason: str | None = None
+    plan_conflict: PlanConflict | None = None
 
     @model_validator(mode="after")
     def code_or_reason(self):
-        if not self.code.strip() and not (self.blocked_reason or '').strip():
+        if not self.code.strip() and not (self.blocked_reason or '').strip() and not self.plan_conflict:
             raise ValueError('Return implementation code or explain why the saved plan cannot be implemented')
         return self
 
@@ -275,7 +284,7 @@ class Start(Contract):
 class Finish(Contract):
     schema_version: Literal[3] = 3
     node_id: NodeID = "node_000"
-    status: Literal["completed", "failed", "timeout"]
+    status: Literal["completed", "failed", "timeout", "needs_replan"]
     stage: Literal["implementation", "check", "review", "execution"] = "execution"
     metric: Metric
     value: float | None = None
@@ -288,6 +297,8 @@ class Finish(Contract):
     validation_file: str | None = None
     submission_file: str | None = None
     error: str | None = None
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    replan: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def consistent_result(self):
@@ -300,6 +311,18 @@ class Finish(Contract):
         if self.status != 'completed' and (self.value is not None or not self.error):
             raise ValueError('Failed execution requires an error and cannot have a score')
         return self
+
+
+class Finalization(Contract):
+    status: Literal['running', 'completed', 'failed', 'timeout']
+    node_id: NodeID
+    preparation_sha256: SHA256
+    code_sha256: SHA256
+    start_sha256: SHA256
+    fit_input_rows: int = 0
+    submission_file: str | None = None
+    duration_seconds: float = 0.
+    error: str | None = None
 
 
 class Change(Contract):
@@ -348,7 +371,7 @@ class LLMCall(Contract):
 class RunReport(Contract):
     schema_version: Literal[2] = 2
     status: Literal["running", "ready", "partial", "failed"]
-    stage: Literal["extraction", "preparation", "baseline", "search", "complete"] = "extraction"
+    stage: Literal["extraction", "preparation", "baseline", "search", "finalization", "complete"] = "extraction"
     mode: Literal["qwen"] = "qwen"
     task_sha256: SHA256
     checks: list[str] = Field(default_factory=list)
@@ -363,4 +386,4 @@ class RunReport(Contract):
     planning: bool = False
 
 
-SCHEMAS = (Extraction, Preparation, Start, Finish, NodeDelta, Delta, RunReport)
+SCHEMAS = (Extraction, Preparation, Start, Finish, NodeDelta, Delta, RunReport, Finalization)

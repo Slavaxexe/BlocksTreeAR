@@ -90,6 +90,7 @@
         "preparation",
         "baseline",
         "search",
+        "finalization",
         "complete"
       ],
       "title": "Stage",

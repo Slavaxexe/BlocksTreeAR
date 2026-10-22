@@ -1,6 +1,7 @@
 """Bounded experiment tree: extraction → preparation → start / finish / delta → next plan."""
 
 import asyncio
+import ast
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,13 +17,43 @@ from uuid import uuid4
 
 from .agents import BAKER_ATTEMPTS, JSONAgents, extract_task, runtime_contract
 from .config import Settings
-from .contracts import Change, Comparison, Delta, Extraction, Finish, NodeDelta, Preparation, ReviewRecord, Start
+from .contracts import Change, Comparison, Delta, Extraction, Finalization, Finish, NodeDelta, Preparation, ReviewRecord, Start
 from .qwen import QwenError
 from .data import check_code, file_hash, inventory, library_context, within
 from .storage import atomic_bytes, canonical, load, save
 
-ENTRY = "\nif __name__ == '__main__':\n    from alfa_agent.worker import main\n    main(fit_predict)\n"
+ENTRY = "\nif __name__ == '__main__':\n    from alfa_agent.worker import main\n    main(fit_model)\n"
 IMPLEMENTATION_CALLS = 20
+
+
+class RepairProgress:
+    """Three consecutive unchanged executable code/failure pairs stop only this node."""
+    def __init__(self):
+        self.key, self.repeats = None, 0
+
+    def observe(self, stage, code, error):
+        try:
+            code = ast.dump(ast.parse(code), include_attributes=False)
+        except SyntaxError:
+            code = code.strip()
+        key = (stage, code, (str(error).strip().splitlines() or [type(error).__name__])[-1])
+        self.repeats = self.repeats + 1 if key == self.key else 1
+        self.key = key
+        if self.repeats >= 3:
+            kind = TimeoutError if isinstance(error, TimeoutError) else ValueError
+            raise kind(f'{error}\nRepair stalled: unchanged code and failure repeated 3 times; return this node to planning.')
+        return {'unchanged_failures': self.repeats, 'stop_after': 3, 'require_changed_code': True}
+
+
+class NeedsReplan(ValueError):
+    pass
+
+
+def plan_contains(value, quote):
+    if isinstance(value, str):
+        return quote in value
+    values = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
+    return any(plan_contains(item, quote) for item in values)
 
 
 @dataclass(frozen=True)
@@ -32,6 +63,7 @@ class Options:
     output_dir: Path | None = None
     max_nodes: int = 10
     platform_output: bool = False
+    final_refit: bool = True
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -130,6 +162,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
     start_hash, started = file_hash(node / 'start.json'), time.monotonic()
     checkpoint()
     code_hash, notes, stage = None, [], 'implementation'
+    progress, replan = RepairProgress(), {}
     request_limit = min(agents.max_calls, agents.requests + IMPLEMENTATION_CALLS)
     try:
         preparation_path = node.parent.parent / 'preparation.json'
@@ -142,6 +175,16 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
             context['requests_left'] = request_limit - agents.requests
             program = await agents.implement(context, request_limit=request_limit)
             notes = list(dict.fromkeys(notes + program.notes))
+            if program.plan_conflict and not program.code.strip():
+                conflict = program.plan_conflict
+                if shared['preparation']['data']['target_columns'] and plan_contains(start.hypothesis.model_dump(), conflict.plan_quote):
+                    replan = {**conflict.model_dump(), 'source': 'model_request', 'verified': False,
+                              'contract_fact': 'Outer validation targets are withheld; labeled rows are available in fit.',
+                              'action': 'Baker must propose a new plan; consider an inner split of fit.'}
+                    raise NeedsReplan('Plan conflict request: ' + canonical(replan))
+                context['last_refusal'] = {'source': 'model_claim', 'verified': False,
+                                          'message': 'plan_conflict requires an exact saved-plan quote and actual withheld target columns'}
+                continue
             if program.blocked_reason and not program.code.strip():
                 message = 'Implementation blocked: ' + program.blocked_reason
                 context['last_refusal'] = {'source': 'model_claim', 'verified': False, 'message': program.blocked_reason}
@@ -153,7 +196,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
             try:
                 atomic_bytes(node / start.implementation, (program.code + ENTRY).encode())
                 code_hash = file_hash(node / start.implementation)
-                check_code(program.code, ('fit_predict',))
+                check_code(program.code, ('fit_model',))
                 await process(['-m', 'alfa_agent.worker', '--check', str(node), '--preparation', str(preparation_path)],
                               node, node / 'execution.log', deadline, min(45, start.timeout_seconds))
                 if file_hash(node / 'start.json') != start_hash or file_hash(preparation_path) != start.preparation_sha256:
@@ -181,15 +224,17 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 break
             except (ValueError, OSError, TimeoutError) as error:
                 atomic_bytes(node / 'execution.log', str(error).encode())
+                context['repair_progress'] = progress.observe(stage, program.code, error)
                 if agents.requests >= request_limit or time.monotonic() >= deadline:
                     raise
                 context.update(previous_code=program.code, execution_error=str(error)[-5000:], failed_stage=stage)
                 checkpoint(f'{start.node_id}: code repair after {stage}; saved start is unchanged')
     except (Exception, asyncio.CancelledError) as error:
         message = (str(error) or 'Experiment cancelled').replace(agents.settings.api_key, '[REDACTED]')[-5000:]
-        finish = Finish(node_id=start.node_id, status='timeout' if isinstance(error, TimeoutError) or time.monotonic() >= deadline else 'failed',
+        finish = Finish(node_id=start.node_id, status='needs_replan' if isinstance(error, NeedsReplan) else
+            'timeout' if isinstance(error, TimeoutError) or time.monotonic() >= deadline else 'failed',
             stage=stage, metric=shared['preparation']['metric'], duration_seconds=0.,
-            preparation_sha256=start.preparation_sha256, start_sha256=start_hash, code_sha256=code_hash, error=message)
+            preparation_sha256=start.preparation_sha256, start_sha256=start_hash, code_sha256=code_hash, error=message, replan=replan)
     finish = finish.model_copy(update={'notes': notes, 'duration_seconds': time.monotonic() - started})
     save(node / 'finish.json', finish)
     checkpoint()
@@ -202,7 +247,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
     if type(options.max_nodes) is not int or not 1 <= options.max_nodes <= 1000:
         raise ValueError('max_nodes must be an integer between 1 and 1000')
     task_path = task_path.resolve()
-    deadline = time.monotonic() + options.time_budget
+    final_deadline = time.monotonic() + options.time_budget
+    reserve = min(options.time_budget * .15, options.experiment_timeout, 1200) if options.final_refit else 0
+    deadline = final_deadline - reserve
     agents = JSONAgents(settings, deadline, max_calls=12 + (IMPLEMENTATION_CALLS + BAKER_ATTEMPTS) * options.max_nodes)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     directory = (options.output_dir or Path('artifacts') / f'{task_path.parent.name}-{stamp}-{uuid4().hex[:6]}').resolve()
@@ -244,6 +291,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 atomic_bytes(directory / 'prepare.py', draft.code.encode())
                 preparation = Preparation(task_directory=str(task_path.parent), rationale=draft.rationale,
                     data=draft.data, validation=draft.validation, metric=draft.metric, output=draft.output,
+                    task_type=extraction.problem.task_type, prediction_scope=draft.prediction_scope,
                     code_sha256=file_hash(directory / 'prepare.py'))
                 save(directory / 'preparation.json', preparation)
                 await process(['-m', 'alfa_agent.worker', '--prepare', str(directory)], directory,
@@ -287,6 +335,14 @@ async def run(task_path: Path, options: Options, settings: Settings):
 
         def record(start, finish):
             nonlocal delta, published
+            parent = next((n.result for n in delta.nodes if n.node_id == start.parent_id), None)
+            classes = finish.diagnostics.get('classification', {})
+            reference = parent.diagnostics.get('classification', {}) if parent else {}
+            differences = {label: {key: values[key] - reference[label][key] for key in ('precision', 'recall', 'f1')}
+                           for label, values in classes.items() if label in reference}
+            if differences:
+                finish = finish.model_copy(update={'diagnostics': {**finish.diagnostics, 'parent_delta': differences}})
+                save(directory / 'nodes' / start.node_id / 'finish.json', finish)
             row, delta = summarize(delta, start, finish)
             save(directory / 'nodes' / start.node_id / 'delta.json', row)
             save(directory / 'delta.json', delta)
@@ -371,6 +427,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                                     'delta_nodes': len(snapshot['delta']['nodes']), 'extraction': '../../extraction.json',
                                     'extraction_sha256': file_hash(directory / 'extraction.json'),
                                     'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries'],
+                                    'runtime_interface': 'fit_model_v1',
                                     'allowed_libraries': shared['allowed_libraries']},
                                 outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
                                 timeout_seconds=float(options.experiment_timeout))
@@ -392,6 +449,35 @@ async def run(task_path: Path, options: Options, settings: Settings):
                         if planning_failed or (not active and not waiting and len(delta.nodes) <= blocked_version):
                             update(errors=report.errors + [message])
                 planner = asyncio.create_task(anext(planning)) if planning is not None and time.monotonic() < deadline else None
+        if published and baseline_ready and options.final_refit and time.monotonic() < final_deadline:
+            selected = next(n.result for n in delta.nodes if n.node_id == published)
+            final = Finalization(status='running', node_id=published, preparation_sha256=selected.preparation_sha256,
+                                 start_sha256=selected.start_sha256, code_sha256=selected.code_sha256)
+            save(directory / 'finalization.json', final)
+            update(stage='finalization')
+            started = time.monotonic()
+            try:
+                await process(['-m', 'alfa_agent.worker', '--refit', str(directory / 'nodes' / published / 'start.json')],
+                              directory, directory / 'finalization.log', final_deadline, min(1200, options.experiment_timeout))
+                final = load(directory / 'finalization.json', Finalization)
+                if final.status != 'completed' or (final.node_id, final.code_sha256, final.preparation_sha256, final.start_sha256) != (
+                        published, selected.code_sha256, selected.preparation_sha256, selected.start_sha256):
+                    raise ValueError('Final refit does not match the selected source and preparation')
+                output = within(directory, final.submission_file)
+                from .worker import validate_submission
+                validate_submission(output, preparation.output, preparation.profile['test']['rows'])
+                atomic_bytes(within(task_path.parent, preparation.output.filename), output.read_bytes())
+                if (directory / 'best.json').exists():
+                    best = json.loads((directory / 'best.json').read_text())
+                    best.update(validation_submission_file=best['submission_file'], submission_file=final.submission_file,
+                                refit_on_full_train=True, refit_scored=False)
+                    atomic_bytes(directory / 'best.json', canonical(best).encode())
+                update(checks=report.checks + ['final_refit', 'final_submission_validated'])
+            except (ValueError, OSError, TimeoutError) as error:
+                final = final.model_copy(update={'status': 'timeout' if isinstance(error, TimeoutError) else 'failed',
+                    'error': str(error)[-2000:], 'duration_seconds': time.monotonic() - started})
+                save(directory / 'finalization.json', final)
+                update(warnings=report.warnings + ['Final refit failed; preserved validated winner: ' + str(error)[-1000:]])
         update(status='ready' if delta.best_node_id and stop_reason == 'node_limit' else 'partial' if published else 'failed',
                stage='complete', stop_reason=stop_reason,
                checks=report.checks + ['saved_starts', 'recorded_finishes', 'computed_deltas'] + (['submission_written'] if published else []))

@@ -104,7 +104,8 @@
           "enum": [
             "completed",
             "failed",
-            "timeout"
+            "timeout",
+            "needs_replan"
           ],
           "title": "Status",
           "type": "string"
@@ -215,6 +216,14 @@
           ],
           "default": null,
           "title": "Error"
+        },
+        "diagnostics": {
+          "title": "Diagnostics",
+          "type": "object"
+        },
+        "replan": {
+          "title": "Replan",
+          "type": "object"
         }
       },
       "required": [
