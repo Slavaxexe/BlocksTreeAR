@@ -114,6 +114,7 @@
           "enum": [
             "implementation",
             "check",
+            "review",
             "execution"
           ],
           "title": "Stage",

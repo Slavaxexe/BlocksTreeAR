@@ -3,6 +3,7 @@
 import argparse
 import csv
 import io
+import json
 from pathlib import Path
 import sys
 import time
@@ -107,6 +108,9 @@ def smoke(directory: Path, preparation_path: Path):
         destination.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(tables['test'], predictions, tables, config, destination)
         validate_submission(destination, preparation.output, len(tables['test']))
+    atomic_bytes(directory / 'smoke.json', json.dumps({'status': 'passed',
+        'prediction_rows': len(predictions), 'prediction_columns': list(predictions.columns),
+        'checks': ['prediction_frames', 'prediction_row_counts', 'submission_format']}).encode())
 
 
 def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=None) -> Finish:

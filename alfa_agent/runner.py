@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -13,12 +14,12 @@ import sys
 import time
 from uuid import uuid4
 
-from .agents import BAKER_ATTEMPTS, JSONAgents, extract_task
+from .agents import BAKER_ATTEMPTS, JSONAgents, extract_task, runtime_contract
 from .config import Settings
-from .contracts import Change, Comparison, Delta, Extraction, Finish, NodeDelta, Preparation, Start
+from .contracts import Change, Comparison, Delta, Extraction, Finish, NodeDelta, Preparation, ReviewRecord, Start
 from .qwen import QwenError
 from .data import check_code, file_hash, inventory, library_context, within
-from .storage import atomic_bytes, load, save
+from .storage import atomic_bytes, canonical, load, save
 
 ENTRY = "\nif __name__ == '__main__':\n    from alfa_agent.worker import main\n    main(fit_predict)\n"
 IMPLEMENTATION_CALLS = 20
@@ -99,6 +100,32 @@ def summarize(delta: Delta, start: Start, finish: Finish) -> tuple[NodeDelta, De
     return row, delta.model_copy(update={'nodes': delta.nodes + [row], 'best_node_id': best})
 
 
+def review_contract(preparation: dict) -> dict:
+    return {**{k: preparation[k] for k in ('data', 'validation', 'metric', 'output')},
+        'columns': {name: stats['dtype'] for name, stats in preparation.get('profile', {}).get('train', {}).get('columns', {}).items()},
+        'runtime': runtime_contract(preparation)}
+
+
+async def review_source(agents, path: Path, source: Path, context: dict, *, request_limit=None):
+    """Review only this source/contract; reuse a verdict only for identical bytes and inputs."""
+    code_hash = file_hash(source)
+    context_hash = hashlib.sha256(canonical(context).encode()).hexdigest()
+    previous = load(path, ReviewRecord) if path.exists() else None
+    if previous and (previous.code_sha256, previous.context_sha256) == (code_hash, context_hash) and previous.result:
+        return previous.result
+    payload = {**context, 'previous_findings': previous.result.model_dump()['findings'] if previous and previous.result else []}
+    try:
+        result = await agents.review(payload, request_limit=request_limit)
+        if file_hash(source) != code_hash:
+            raise ValueError('Source changed during review')
+    except (Exception, asyncio.CancelledError) as error:
+        save(path, ReviewRecord(code_sha256=code_hash, context_sha256=context_hash,
+             error=(str(error) or 'Review cancelled').replace(agents.settings.api_key, '[REDACTED]')[-2000:]))
+        raise
+    save(path, ReviewRecord(code_sha256=code_hash, context_sha256=context_hash, result=result))
+    return result
+
+
 async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents, deadline: float, checkpoint) -> Finish:
     start_hash, started = file_hash(node / 'start.json'), time.monotonic()
     checkpoint()
@@ -131,6 +158,16 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                               node, node / 'execution.log', deadline, min(45, start.timeout_seconds))
                 if file_hash(node / 'start.json') != start_hash or file_hash(preparation_path) != start.preparation_sha256:
                     raise ValueError('Saved plan or preparation changed during implementation')
+                stage = 'review'
+                review = await review_source(agents, node / 'review.json', node / start.implementation,
+                    {'kind': 'experiment', 'plan': start.hypothesis.pipeline.model_dump(), 'code': program.code,
+                     'contract': review_contract(shared['preparation']),
+                     'smoke': json.loads((node / 'smoke.json').read_text()) if (node / 'smoke.json').exists()
+                              else {'status': 'passed', 'checks': ['worker_exit_0']}}, request_limit=request_limit)
+                context['review_findings'] = [f.model_dump() for f in review.findings]
+                if review.status == 'revise':
+                    raise ValueError('Reviewer requested correction: ' + canonical(context['review_findings']))
+                notes.extend('Reviewer warning: ' + f.explanation for f in review.findings)
                 stage = 'execution'
                 await process([str(node / start.implementation), '--start', str(node / 'start.json'),
                                '--start-sha256', start_hash, '--code-sha256', code_hash], node,
@@ -212,13 +249,23 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 await process(['-m', 'alfa_agent.worker', '--prepare', str(directory)], directory,
                               directory / 'preparation.log', deadline, options.experiment_timeout)
                 preparation = load(directory / 'preparation.json', Preparation)
+                review = await review_source(agents, directory / 'preparation_review.json', directory / 'prepare.py',
+                    {'kind': 'preparation', 'code': draft.code, 'contract': review_contract(preparation.model_dump(mode='json')),
+                     'requirements': {k: {field: value for field, value in block.items() if field != 'evidence'}
+                                      for k, block in extraction.model_dump(mode='json').items() if isinstance(block, dict)},
+                     'execution': {'status': 'passed', 'checks': ['loaded_tables', 'measured_profile', 'disjoint_split']}})
+                context['review_findings'] = [f.model_dump() for f in review.findings]
+                if review.status == 'revise':
+                    raise ValueError('Preparation reviewer requested correction: ' + canonical(context['review_findings']))
+                if review.findings:
+                    update(warnings=report.warnings + ['Preparation reviewer: ' + f.explanation for f in review.findings])
                 break
-            except (ValueError, OSError, TimeoutError) as error:
+            except (ValueError, OSError, TimeoutError, QwenError) as error:
                 if (directory / 'preparation.json').exists():
                     failed = load(directory / 'preparation.json', Preparation).model_copy(
                         update={'status': 'blocked', 'issues': [str(error)[-5000:]]})
                     save(directory / 'preparation.json', failed)
-                if attempt:
+                if attempt or isinstance(error, QwenError):
                     raise
                 context.update(previous_code=draft.code, execution_error=str(error)[-5000:])
                 update(warnings=report.warnings + ['Preparation required one code repair'])

@@ -14,8 +14,8 @@ AlfaHakaton/
 │   ├── __main__.py          CLI check-config / ping / ask / extract / baseline
 │   ├── config.py            Env / .env, проверка настроек, скрытие ключа
 │   ├── qwen.py              Текстовые диагностические вызовы API
-│   ├── contracts.py         Контракты фактов, подготовки, start / finish, delta и report
-│   ├── agents.py            Роли Qwen, контексты по ролям, память ошибок / времени, выдача гипотез
+│   ├── contracts.py         Контракты фактов, подготовки, start / finish, review, delta и report
+│   ├── agents.py            Роли Qwen, компактное ревью, контексты, память ошибок / времени, гипотезы
 │   ├── data.py              Инвентаризация, профиль, хеши, разрешённые библиотеки / версии, проверка кода
 │   ├── runner.py            Барьер baseline, пересмотр отказов, два исполнителя, delta / лидер и лимиты
 │   ├── worker.py            Исполнение prepare.py, smoke-test, модель, общий scorer, запись finish
@@ -33,9 +33,10 @@ AlfaHakaton/
 │   ├── prepare.py           Общий загрузчик, splitter, scorer, writer от Qwen
 │   ├── preparation.json     Профиль, конфигурация, готовность, хеши
 │   ├── preparation.log      Диагностика подготовки
+│   ├── preparation_review.json Отдельное ревью prepare.py до baseline
 │   ├── split.npz            Индексы общей validation
 │   ├── delta.json           Общая история: планы, результаты, сравнения, текущий лидер
-│   ├── nodes/node_*/        start.json, experiment.py, finish.json, delta.json, лог и предсказания
+│   ├── nodes/node_*/        start, experiment.py, smoke, review, finish, delta, лог и предсказания
 │   └── best.json            Указатель на оценённую ноду
 ├── data/raw/                Публичные условия, исходные данные и словари признаков
 ├── docs/
@@ -61,13 +62,13 @@ AlfaHakaton/
 явные аргументы переопределяют значения. API ждёт до 300 с, ответ до 32 768 токенов.
 Вызовы идут без provider JSON-mode; удаляется только внешняя Markdown-обёртка,
 после чего обязательны прежние проверки JSON / evidence.
-Реализатор и исправления кода используют reasoning `medium` / thinking `true`;
+Реализатор, исправления кода и Reviewer используют reasoning `medium` / thinking `true`;
 extractor’ы, подготовка и Baker — `none` / `false`. Температура — 0.
 Файл ответа также публикуется рядом с Markdown согласно условию; генерируемые
 submission исключены из git. Данные в каждую ноду не копируются.
 
 `solution.py` → CLI baseline → `runner.run()` → extractor’ы → prepare.py через
-worker → baker → start.json → реализатор → проверка → experiment.py через worker → finish / output.
+worker → ревью подготовки → baker → start.json → реализатор → smoke → Reviewer → experiment.py через worker → finish / output.
 Start неизменен; finish хранит хеши плана / кода, заметки и этап возможного отказа.
 После finish runner вычисляет node delta, обновляет общий delta и best. Baker
 получает условие, preparation, код лидера и краткую историю score / статусов /
@@ -77,7 +78,10 @@ Start неизменен; finish хранит хеши плана / кода, з
 сохраняются до реализации. Два исполнителя принимают новые ноды по освобождению,
 без ожидания пары. Лимит учитывает очередь и работающие ноды. Последняя порция — один improve.
 Исправления после smoke / полного запуска
-сохраняют start и расходуют общий для ноды лимит из 20 API-запросов, включая JSON-repair.
+сохраняют start и расходуют общий для ноды лимит из 20 API-запросов, включая Reviewer и JSON-repair.
+Reviewer видит текущий код / pipeline, компактный контракт и smoke; до трёх замечаний,
+без истории дерева и переписки. Ответ ограничен 8192 токенами. Точные цитаты проверяются
+по исходнику; warnings не блокируют. Результат и хеши видны в JSON-вкладках viewer.
 Отказ модели возвращается как непроверенный last_refusal, не стирая ошибку исполнения.
 Реализатор получает собственный start, общий код / профиль и контракт входных
 DataFrame; от родителя — только pipeline / код. Профиль измеряет missing / distinct.

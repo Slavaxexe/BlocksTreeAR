@@ -1,0 +1,119 @@
+{
+  "$defs": {
+    "CodeReview": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "pass",
+            "revise"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/ReviewFinding"
+          },
+          "maxItems": 3,
+          "title": "Findings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "CodeReview",
+      "type": "object"
+    },
+    "ReviewFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "severity": {
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "code_quote": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Code Quote",
+          "type": "string"
+        },
+        "requirement": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Requirement",
+          "type": "string"
+        },
+        "explanation": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        },
+        "check": {
+          "description": "Brief reproduction or verification idea, not Python code",
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Check",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "code_quote",
+        "requirement",
+        "explanation",
+        "check"
+      ],
+      "title": "ReviewFinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "code_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Code Sha256",
+      "type": "string"
+    },
+    "context_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Context Sha256",
+      "type": "string"
+    },
+    "result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CodeReview"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    }
+  },
+  "required": [
+    "code_sha256",
+    "context_sha256"
+  ],
+  "title": "ReviewRecord",
+  "type": "object"
+}

@@ -229,6 +229,35 @@ class Program(Contract):
         return self
 
 
+class ReviewFinding(Contract):
+    severity: Literal['error', 'warning']
+    code_quote: str = Field(min_length=1, max_length=600)
+    requirement: str = Field(min_length=1, max_length=400)
+    explanation: str = Field(min_length=1, max_length=600)
+    check: str = Field(min_length=1, max_length=400, description='Brief reproduction or verification idea, not Python code')
+
+
+class CodeReview(Contract):
+    status: Literal['pass', 'revise']
+    findings: list[ReviewFinding] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode='after')
+    def grounded_findings(self, info: ValidationInfo):
+        code = (info.context or {}).get('review_code')
+        if code is not None and any(f.code_quote not in code for f in self.findings):
+            raise ValueError('Every code_quote must be an exact substring of the reviewed source')
+        if (self.status == 'revise') != any(f.severity == 'error' for f in self.findings):
+            raise ValueError('Use revise exactly when findings contain an error; warnings alone must pass')
+        return self
+
+
+class ReviewRecord(Contract):
+    code_sha256: SHA256
+    context_sha256: SHA256
+    result: CodeReview | None = None
+    error: str | None = None
+
+
 class Start(Contract):
     schema_version: Literal[3] = 3
     node_id: NodeID = "node_000"
@@ -247,7 +276,7 @@ class Finish(Contract):
     schema_version: Literal[3] = 3
     node_id: NodeID = "node_000"
     status: Literal["completed", "failed", "timeout"]
-    stage: Literal["implementation", "check", "execution"] = "execution"
+    stage: Literal["implementation", "check", "review", "execution"] = "execution"
     metric: Metric
     value: float | None = None
     evaluation_status: Literal["completed", "unavailable", "failed"] = "unavailable"

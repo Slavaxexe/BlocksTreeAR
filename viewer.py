@@ -52,7 +52,7 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
                 warnings.append(f'{path.name}: исходник недоступен')
                 return None
         task = read(folder / "task.json")
-        run = {key: read(folder / f"{key}.json") for key in ("profile", "validation", "best", "delta", "report", "preparation")}
+        run = {key: read(folder / f"{key}.json") for key in ("profile", "validation", "best", "delta", "report", "preparation", "preparation_review")}
         block_directory = folder / 'extraction' if (folder / 'extraction').is_dir() else folder
         blocks = {key: read(block_directory / f"{key}.json") for key in ("problem", "data", "metric", "output")}
         extraction = read(folder / "extraction.json")
@@ -65,7 +65,8 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
             start = read(directory / "start.json")
             if start:
                 nodes.append({"id": directory.name, "start": start, "finish": read(directory / "finish.json"),
-                              "delta": read(directory / "delta.json"), "code": source(directory / 'experiment.py')})
+                              "delta": read(directory / "delta.json"), "review": read(directory / 'review.json'),
+                              "smoke": read(directory / 'smoke.json'), "code": source(directory / 'experiment.py')})
         if task is None and extraction:
             task = {key: extraction.get(key, {}) for key in ('problem', 'data', 'metric')}
         run.update(id=prefix + (folder.relative_to(root).as_posix() if folder != root else folder.name),
@@ -140,7 +141,7 @@ main{max-width:1400px;margin:auto;padding:0 32px 28px}
 .facts p{margin:4px 0 8px}
 .facts summary{cursor:pointer;color:var(--muted)}
 blockquote{margin:8px 0;padding:0 10px;border-left:2px solid var(--line);color:var(--muted)}
-.json-tabs{display:flex;gap:6px;margin-top:20px}
+.json-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-top:20px}
 .json-tabs button{font-size:12px;padding:5px 10px}
 .comparison{padding:8px 0;border-bottom:1px solid var(--line);font-size:12px}
 .comparison b{font-weight:600}
@@ -163,7 +164,7 @@ nav{flex-wrap:wrap}
 <header><div><h1>Как работает ML-агент</h1><small>Условие → подготовка → эксперименты → delta → новые гипотезы</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel" hidden><p class="muted">Цикл от условия до дерева экспериментов. Состояния и JSON конкретного запуска — во вкладках «Извлечение» и «Эксперименты».</p><div class="legend"><span><i class="dot"></i>Детерминированный Python</span><span><i class="dot llm"></i>Вызов Qwen API</span><span><i class="dot cpu"></i>Локальное обучение на CPU</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" viewBox="0 0 1120 820" role="img" aria-label="Текущая архитектура: извлечение, подготовка, пары гипотез и дерево экспериментов"></svg></div><p class="footnote">Qwen пишет prepare.py и experiment.py. Общая обвязка измеряет профиль, фиксирует split и вычисляет score. После baseline Baker предлагает по две гипотезы; до 10 нод и до 20 API-запросов реализации на ноду.</p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">Цикл от условия до дерева экспериментов. Состояния и JSON конкретного запуска — во вкладках «Извлечение» и «Эксперименты».</p><div class="legend"><span><i class="dot"></i>Детерминированный Python</span><span><i class="dot llm"></i>Вызов Qwen API</span><span><i class="dot cpu"></i>Локальное обучение на CPU</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" viewBox="0 0 1120 820" role="img" aria-label="Текущая архитектура: извлечение, подготовка, пары гипотез и дерево экспериментов"></svg></div><p class="footnote">Qwen пишет prepare.py и experiment.py. Общая обвязка измеряет профиль, фиксирует split и вычисляет score. После baseline Baker предлагает по две гипотезы; число нод задаётся при запуске, до 20 API-запросов реализации и ревью на ноду.</p></section>
 <section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><p id="tree-legend" class="legend"></p><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Граф сохранённых JSON"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранного блока"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
@@ -195,10 +196,10 @@ function architecture(){
  box(c,760,30,320,90,'03  extraction.json',['Схема + проверка исходных цитат','Не проверяем поддержку исполнителем']);
  box(c,40,230,280,90,'04  Подготовка · Qwen',['Условие + инвентаризация файлов','Чтение, split, scorer → prepare.py'],'llm');
  box(c,420,230,280,90,'05  Исполнение Python',['Читаем реальные данные','Измеряем профиль; сохраняем split'],'cpu');
- box(c,800,230,280,90,'06  preparation.json',['Общие условия всех экспериментов','Профиль, split, метрика, проблемы']);
+ box(c,800,230,280,90,'06  Ревью подготовки · Qwen',['preparation.json + проверка prepare.py','preparation_review.json'],'llm');
  box(c,40,420,280,90,'07  Baker · Qwen',['Improve лидера + explore альтернативы','История + pending + родители'],'llm');
  box(c,420,420,280,90,'08  start.json',['План Baker + ссылки на контекст','Сохраняется до реализации']);
- box(c,800,420,280,90,'09  Два исполнителя · Qwen',['Независимые код / проверки / запуск','До 20 запросов на каждую ноду'],'llm');
+ box(c,800,420,280,90,'09  Код + Reviewer · Qwen',['Два исполнителя: код → smoke → ревью','До 20 общих запросов на ноду'],'llm');
  box(c,420,590,280,90,'10  Отдельный процесс',['Fit → predictions → общий scorer','finish.json + предсказания'],'cpu');
  box(c,40,590,280,90,'11  delta.json · Python',['Изменения pipeline и реальные score','Обновление истории и best'],'cpu');
  edge(c,'M 40 635 H 18 V 465 H 40',true);
@@ -236,7 +237,7 @@ function render() {
     : 'Показаны записанные JSON. Нода без finish могла выполняться или быть прервана. Без report.json завершение запуска не подтверждено.';
   if (!r) { $('empty').textContent = view === 'extraction' ? 'Результатов извлечения пока нет. Запустите python -m alfa_agent extract; JSON появятся здесь автоматически.' : 'Экспериментов пока нет.'; return; }
   if (r.kind === 'extraction' && view === 'extraction') { drawExtraction(r); drawExtractionDetail(r); return; }
-  if (!['start', 'finish', 'delta', 'code'].includes(jsonTab)) jsonTab = 'start';
+  if (!['start', 'finish', 'delta', 'review', 'smoke', 'code'].includes(jsonTab)) jsonTab = 'start';
   if (!r.nodes.some(n => n.id === selected)) selected = r.nodes.find(n => n.id === r.best?.node_id)?.id ?? r.nodes[0]?.id;
   const mode = modeOf(r), metric = r.preparation?.metric?.name ?? r.task?.metric?.name ?? 'Не записана';
   const info = [
@@ -320,7 +321,7 @@ function drawExtractionDetail(r) {
       const list = element('ul', 'changes'); for (const check of report.checks) list.append(element('li', 'mono', check));
       const checks = element('details'); checks.append(element('summary', '', 'Пройденные проверки: '+report.checks.length), list); d.append(checks);
     }
-    const files = key==='result'?['extraction','report']:key==='delta'?['delta','best','report']:['preparation','preparation_code'];
+    const files = key==='result'?['extraction','report']:key==='delta'?['delta','best','report']:['preparation','preparation_review','preparation_code'];
     if (!files.includes(jsonTab)) jsonTab = files[0];
     const tabs = element('div', 'json-tabs');
     for (const name of files) {
@@ -400,17 +401,17 @@ function drawTree(r) {
 function drawDetail(r) {
   const n = r.nodes.find(n => n.id === selected), d = $('detail'); d.replaceChildren();
   if (!n) { d.append(element('p', 'muted', 'start.json ещё не записан.')); return; }
-  const files = ['start', 'finish', ...(n.code?['code']:[]), ...(n.delta?['delta']:[])];
+  const files = ['start', 'finish', ...(n.code?['code']:[]), ...(n.review?['review']:[]), ...(n.smoke?['smoke']:[]), ...(n.delta?['delta']:[])];
   if (!files.includes(jsonTab)) jsonTab = 'start';
   d.append(element('h2', '', n.id), element('small', '', `Родитель: ${n.start.parent_id ?? 'нет · baseline'}`));
   if (n.start.context?.purpose) d.append(element('p', 'muted', 'Роль: '+(purposes[n.start.context.purpose]??n.start.context.purpose)));
   const calls = r.report?.llm_calls?.filter(call=>call.node_id===n.id)??[];
-  if (calls.length) d.append(element('small', '', 'API-попыток реализатора: '+calls.length+'/20'));
+  if (calls.length) d.append(element('small', '', 'API-попыток реализации и ревью: '+calls.length+'/20'));
   if (n.finish) d.append(element('p', 'metric', `${n.finish.metric?.name??'Метрика'}: ${fmt(n.finish.value)} · ${n.finish.evaluation_status??n.finish.status}`));
   d.append(element('h3', '', 'Гипотеза'), element('p', '', n.start.hypothesis?.rationale ?? '—'));
   d.append(element('small', '', n.start.hypothesis?.expected_effect ?? ''));
   if (n.finish?.error) d.append(element('p', 'error-text', n.finish.error));
-  if (n.finish?.stage) d.append(element('p', 'muted', 'Этап результата: '+({implementation:'Реализация',check:'Проверка кода',execution:'Запуск'}[n.finish.stage]??n.finish.stage)));
+  if (n.finish?.stage) d.append(element('p', 'muted', 'Этап результата: '+({implementation:'Реализация',check:'Проверка кода',review:'Ревью кода',execution:'Запуск'}[n.finish.stage]??n.finish.stage)));
   if (n.finish?.notes?.length) {
     const list = element('ul', 'changes'); for (const note of n.finish.notes) list.append(element('li', '', note));
     d.append(element('h3', '', 'Заметки реализатора'), list);

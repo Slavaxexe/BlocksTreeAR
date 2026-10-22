@@ -33,6 +33,16 @@ class ViewerTests(unittest.TestCase):
         self.assertIsNone(updated['nodes'][0]['start']['parent_id'])
         self.assertEqual(updated['id'], 'regression/run-1')
 
+    def test_review_and_smoke_are_visible_before_finish(self):
+        self.write(self.run / 'preparation_review.json', {'result': {'status': 'pass'}})
+        self.write(self.node / 'review.json', {'result': {'status': 'revise', 'findings': [{'code_quote': 'mean()'}]}})
+        self.write(self.node / 'smoke.json', {'status': 'passed'})
+        run = collect(self.run)['runs'][0]
+        self.assertEqual(run['preparation_review']['result']['status'], 'pass')
+        self.assertEqual(run['nodes'][0]['review']['result']['status'], 'revise')
+        self.assertEqual(run['nodes'][0]['smoke']['status'], 'passed')
+        self.assertIsNone(run['nodes'][0]['finish'])
+
     def test_partial_json_does_not_hide_other_nodes_or_read_credentials(self):
         (self.run / '.env').write_text('OPENAI_API_KEY=viewer-must-not-read-this', encoding='utf-8')
         (self.node / 'finish.json').write_text('{unfinished', encoding='utf-8')

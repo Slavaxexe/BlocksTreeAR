@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from zipfile import ZipFile
 
 import httpx
@@ -19,9 +19,9 @@ import pandas as pd
 
 from alfa_agent.config import Settings
 from alfa_agent.agents import JSONAgents, baker_context, implementation_context
-from alfa_agent.contracts import Delta, Finish, Hypotheses, Hypothesis, Metric, OutputBinding, Preparation, Program, RunReport, Start
+from alfa_agent.contracts import CodeReview, Delta, Finish, Hypotheses, Hypothesis, Metric, OutputBinding, Preparation, Program, ReviewRecord, RunReport, Start
 from alfa_agent.data import LIBRARIES, check_code, file_hash, library_context, profile
-from alfa_agent.runner import Options, process, run, summarize
+from alfa_agent.runner import Options, process, review_source, run, summarize
 from alfa_agent.storage import load
 from alfa_agent.worker import validate_submission
 from package_solution import build
@@ -90,6 +90,7 @@ def fixture(directory):
             'pipeline': {'data': {'source': 'preparation'}, 'preprocessing': {},
                          'model': {'family': 'constant', 'strategy': 'mean'}, 'training': {}}},
         'Program': {'code': PROGRAM, 'notes': ['The target name is taken from preparation.']},
+        'CodeReview': {'status': 'pass', 'findings': []},
     }
     return path, answers
 
@@ -117,7 +118,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def exercise(self, directory, *, repair=False, missing_metric=False, blocked=False, broken_metric=False,
                        invalid_program=False, broken_code=False, execution_timeout=False, full_repair=False,
                        json_failure=False, network_failure=False, ast_failure=False, refused_once=False,
-                       refused_after_error=False, wrong_columns=False, max_nodes=1):
+                       refused_after_error=False, wrong_columns=False, semantic_error=False, preparation_error=False,
+                       review_warning=False, review_unavailable=False, never_fix=False, max_nodes=1):
         path, answers = fixture(directory)
         if missing_metric:
             answers['PreparationDraft']['metric']['status'] = 'needs_implementation'
@@ -142,8 +144,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         def handler(request):
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
-            self.assertEqual(body['reasoning_effort'], 'medium' if title == 'Program' else 'none')
-            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': title == 'Program'})
+            self.assertEqual(body['reasoning_effort'], 'medium' if title in {'Program', 'CodeReview'} else 'none')
+            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': title in {'Program', 'CodeReview'}})
             self.assertNotIn('response_format', body)
             if title == 'Program' and seen.count(title) < int(network_failure):
                 seen.append(title)
@@ -151,6 +153,25 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             answer = answers[title]
             if title == 'PreparationDraft' and wrong_columns and title not in seen:
                 answer = {**answer, 'output': {**answer['output'], 'columns': ['wrong']}}
+            if title == 'PreparationDraft' and preparation_error and (title not in seen or preparation_error == 'always'):
+                answer = {**answer, 'code': PREPARE.replace(' + 7)', ' + 8)')}
+            if title == 'CodeReview':
+                review_context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
+                kind = review_context['kind']
+                self.assertEqual(set(review_context), {'kind', 'code', 'contract', 'previous_findings'} |
+                                 ({'plan', 'smoke'} if kind == 'experiment' else {'requirements', 'execution'}))
+                self.assertEqual(body['max_tokens'], 8192)
+                if kind == 'experiment' and review_unavailable:
+                    return httpx.Response(401, json={'error': {'message': 'fake-secret'}})
+                quote = 'float(fit[column].median())' if kind == 'experiment' else ' + 8)'
+                if (semantic_error if kind == 'experiment' else preparation_error) and quote in review_context['code']:
+                    answer = {'status': 'revise', 'findings': [{'severity': 'error', 'code_quote': quote,
+                        'requirement': 'Use the specified mean / metric formula', 'explanation': 'Implemented a different statistic',
+                        'check': 'Compare against hand-calculated values on a small table'}]}
+                elif kind == 'experiment' and review_warning:
+                    answer = {'status': 'pass', 'findings': [{'severity': 'warning', 'code_quote': 'mean()',
+                        'requirement': 'Finite predictions', 'explanation': 'All-missing targets could require a fallback',
+                        'check': 'Check whether targets can be missing'}]}
             if title in {'PreparationDraft', 'Hypothesis', 'Program'}:
                 payload = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
                 self.assertEqual(payload['allowed_libraries'], LIBRARIES)
@@ -166,6 +187,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(context['start']['context']['installed_libraries'], context['installed_libraries'])
                 self.assertNotIn('extraction', context)
                 self.assertEqual(context['runtime_contract']['rows'], {'fit': 32, 'validation': 8, 'test': 5})
+                if semantic_error and (title not in seen or never_fix):
+                    answer = {**answer, 'code': PROGRAM.replace('mean()', 'median()')}
+                elif semantic_error:
+                    self.assertEqual(context['failed_stage'], 'review')
+                    self.assertEqual(context['review_findings'][0]['code_quote'], 'float(fit[column].median())')
             if title == 'Program' and json_failure and title not in seen:
                 answer = {'code': ''}
             elif title == 'Program' and refused_once:
@@ -204,6 +230,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         full_attempts = 0
         async def launch(arguments, *args):
             nonlocal full_attempts
+            if semantic_error and '--start' in arguments:
+                self.assertNotIn('.median()', Path(arguments[0]).read_text())
             if '--check' in arguments and (broken_code or execution_timeout):
                 if broken_code:
                     raise ValueError('cannot run')
@@ -220,6 +248,81 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                                Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         return result, seen
 
+    async def test_semantic_review_repairs_runnable_code_before_full_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), semantic_error=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertEqual(seen.count('Program'), 2)
+            node = root / 'nodes/node_000'
+            review = load(node / 'review.json', ReviewRecord)
+            self.assertEqual(review.result.status, 'pass')
+            self.assertEqual(review.code_sha256, file_hash(node / 'experiment.py'))
+            self.assertEqual(load(node / 'finish.json', Finish).value, 47.)
+
+    async def test_preparation_review_repairs_wrong_metric_before_any_node(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), preparation_error=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertEqual(seen.count('PreparationDraft'), 2)
+            self.assertEqual(load(root / 'preparation_review.json', ReviewRecord).result.status, 'pass')
+            self.assertEqual(load(root / 'nodes/node_000/finish.json', Finish).value, 47.)
+
+    async def test_review_warnings_pass_and_unavailable_review_does_not_publish(self):
+        for unavailable in (False, True):
+            with self.subTest(unavailable=unavailable), tempfile.TemporaryDirectory() as temporary:
+                (root, report), _ = await self.exercise(Path(temporary), review_warning=True, review_unavailable=unavailable)
+                finish = load(root / 'nodes/node_000/finish.json', Finish)
+                review = load(root / 'nodes/node_000/review.json', ReviewRecord)
+                if unavailable:
+                    self.assertEqual((report.status, finish.stage), ('failed', 'review'))
+                    self.assertIsNone(review.result)
+                    self.assertNotIn('fake-secret', review.error)
+                    self.assertFalse((Path(temporary) / 'result.tsv').exists())
+                else:
+                    self.assertEqual(report.status, 'ready')
+                    self.assertTrue(any('Reviewer warning:' in note for note in finish.notes))
+
+    async def test_repeated_rejected_code_reuses_review_and_respects_total_node_budget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), semantic_error=True, never_fix=True)
+            calls = [c for c in report.llm_calls if c.node_id == 'node_000']
+            self.assertEqual(len(calls), 20)
+            self.assertEqual(sum(c.role == 'reviewer' for c in calls), 1)
+            self.assertEqual(seen.count('Program'), 19)
+            self.assertEqual(load(root / 'nodes/node_000/finish.json', Finish).stage, 'review')
+            self.assertFalse((root / 'best.json').exists())
+
+    async def test_review_quotes_must_exist_and_uncertain_findings_cannot_block(self):
+        finding = {'severity': 'warning', 'code_quote': 'mean()', 'requirement': 'Finite outputs',
+                   'explanation': 'Possible missing targets', 'check': 'Inspect missing targets'}
+        for status, quote in [('revise', 'mean()'), ('pass', 'invented()')]:
+            with self.subTest(status=status, quote=quote), self.assertRaises(ValueError):
+                CodeReview.model_validate({'status': status, 'findings': [{**finding, 'code_quote': quote}]},
+                                          context={'review_code': PROGRAM})
+
+    async def test_failed_preparation_review_never_starts_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), preparation_error='always')
+            self.assertEqual((report.status, report.stop_reason), ('failed', 'preparation_failed'))
+            self.assertNotIn('Hypothesis', seen)
+            self.assertEqual(load(root / 'preparation.json', Preparation).status, 'blocked')
+
+    async def test_review_cache_invalidates_changed_code_or_contract(self):
+        agent = JSONAgents(Settings('fake', 'http://proxy/v1', 'model'), time.monotonic() + 10)
+        agent.review = AsyncMock(return_value=CodeReview(status='pass'))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, record = root / 'experiment.py', root / 'review.json'
+            source.write_text(PROGRAM)
+            context = {'kind': 'experiment', 'code': PROGRAM, 'plan': {'model': 'mean'}}
+            await review_source(agent, record, source, context)
+            await review_source(agent, record, source, context)
+            self.assertEqual(agent.review.await_count, 1)
+            await review_source(agent, record, source, {**context, 'plan': {'model': 'median'}})
+            source.write_text(PROGRAM + '\n')
+            await review_source(agent, record, source, context)
+            self.assertEqual(agent.review.await_count, 3)
+
     async def test_preparation_repairs_columns_that_disagree_with_task(self):
         with tempfile.TemporaryDirectory() as temporary:
             (_, report), seen = await self.exercise(Path(temporary), wrong_columns=True)
@@ -231,7 +334,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             directory = Path(temporary)
             (root, report), seen = await self.exercise(directory)
             self.assertEqual(report.status, 'ready', report.errors)
-            self.assertEqual(len(seen), 7)
+            self.assertEqual(len(seen), 9)  # Four extractors, preparation/review, Baker, implementation/review.
             prep = load(root / 'preparation.json', Preparation)
             self.assertEqual(prep.profile['train']['rows'], 40)
             self.assertEqual(prep.profile['test']['rows'], 5)
@@ -512,8 +615,8 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             nonlocal wrong_sent, rejected, simultaneous, peak
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
-            self.assertEqual(body['reasoning_effort'], 'medium' if title == 'Program' else 'none')
-            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': title == 'Program'})
+            self.assertEqual(body['reasoning_effort'], 'medium' if title in {'Program', 'CodeReview'} else 'none')
+            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': title in {'Program', 'CodeReview'}})
             context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
             if title in {'Hypothesis', 'Hypotheses'}:
                 self.assertEqual(context['allowed_libraries'], LIBRARIES)
@@ -961,9 +1064,9 @@ def handler(request):
     body=json.loads(request.content)
     assert body['model']=='qwen/qwen3.8-27b'
     title=json.loads(body['messages'][0]['content'].split('Schema: ',1)[1])['title']
-    assert body['reasoning_effort']==('medium' if title=='Program' else 'none')
-    assert body['chat_template_kwargs']=={'enable_thinking':title=='Program'}
-    assert body['temperature']==0 and body['max_tokens']==32768 and 'response_format' not in body
+    assert body['reasoning_effort']==('medium' if title in ('Program','CodeReview') else 'none')
+    assert body['chat_template_kwargs']=={'enable_thinking':title in ('Program','CodeReview')}
+    assert body['temperature']==0 and body['max_tokens']==(8192 if title=='CodeReview' else 32768) and 'response_format' not in body
     context=json.loads(body['messages'][1]['content'].rsplit('\\n',1)[1])
     if title=='PreparationDraft':
         preparations+=1
