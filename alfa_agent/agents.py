@@ -137,11 +137,13 @@ class JSONAgents:
             stats = dict(role=role, node_id=self.node_id, attempt=attempt, prompt_tokens=usage.prompt_tokens if usage else 0,
                          completion_tokens=usage.completion_tokens if usage else 0)
             try:
+                if response.choices and response.choices[0].finish_reason == 'length':
+                    raise ValueError('Response truncated by token limit')
                 json.dumps(json.loads(content or ''), allow_nan=False)
                 result = schema.model_validate_json(content or "", context={"source": source, **(validation or {})})
             except (ValidationError, ValueError) as error:
                 details = ([{"loc": e["loc"], "type": e["type"], "reason": e["msg"]} for e in error.errors()][:8]
-                           if isinstance(error, ValidationError) else [{'reason': 'Invalid JSON or non-finite number'}])
+                           if isinstance(error, ValidationError) else [{'reason': 'Truncated response, invalid JSON or non-finite number'}])
                 if (validation or {}).get('rejected'):
                     details = {p: r['error'] for p, r in validation['rejected'].items()}
                 feedback = json.dumps(details, ensure_ascii=False)
@@ -213,6 +215,7 @@ class JSONAgents:
             "write the required output file at path in its required format/column order; preserve ID values and test order.\n"
             "config is the entire preparation object; files are in config['data']['files'] relative to task_directory. "
             "Put target/id column lists in data; actual output filename/format/columns in output. "
+            "If platform_output is supplied, its filename and CSV format are mandatory; keep task-specific columns and IDs. "
             "Use arbitrary metric.name; mark metric ready only when its definition can be implemented. "
             "Do not put row counts or measured profiles in your JSON; Python will compute them. "
             "No data printing, filesystem changes or top-level file reads in generated code. "

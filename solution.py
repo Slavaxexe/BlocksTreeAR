@@ -11,7 +11,7 @@ def main(argv=None):
     for option, value in {'--time-budget': '10500', '--experiment-timeout': '1200', '--max-nodes': '100'}.items():
         if not any(arg == option or arg.startswith(option + '=') for arg in args):
             args.extend((option, value))
-    return cli(['baseline', '--task', task, *args])
+    return cli(['baseline', '--task', task, '--platform-output', *args])
 
 
 if __name__ == '__main__':

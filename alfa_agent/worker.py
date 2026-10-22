@@ -1,6 +1,7 @@
 """Common runtime: measured preparation and one generated experiment in a child process."""
 
 import argparse
+import csv
 import io
 from pathlib import Path
 import sys
@@ -14,6 +15,25 @@ from threadpoolctl import threadpool_limits
 from .contracts import Finish, Preparation, Start
 from .data import file_hash, input_hashes, module, profile, within
 from .storage import atomic_bytes, load, save
+
+
+def validate_submission(path: Path, output, expected_rows: int):
+    if not path.is_file() or not path.stat().st_size:
+        raise ValueError('Submission writer produced no nonempty output file')
+    if (output.format or '').upper() not in {'CSV', 'TSV'}:
+        return
+    with path.open(encoding='utf-8-sig', newline='') as stream:
+        rows = csv.reader(stream, delimiter='\t' if output.format.upper() == 'TSV' else ',', strict=True)
+        header = next(rows, [])
+        if not header or (output.columns and header != output.columns):
+            raise ValueError('Submission columns or column order differ from preparation.output.columns')
+        count = 0
+        for row in rows:
+            if len(row) != len(header):
+                raise ValueError('Submission contains a row with the wrong number of columns')
+            count += 1
+        if count != expected_rows:
+            raise ValueError(f'Submission row count {count} differs from test row count {expected_rows}')
 
 
 def prepare(directory: Path):
@@ -86,8 +106,7 @@ def smoke(directory: Path, preparation_path: Path):
         destination = within(Path(temporary), preparation.output.filename)
         destination.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(tables['test'], predictions, tables, config, destination)
-        if not destination.is_file() or not destination.stat().st_size:
-            raise ValueError('Smoke test produced no nonempty output file')
+        validate_submission(destination, preparation.output, len(tables['test']))
 
 
 def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=None) -> Finish:
@@ -114,8 +133,7 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
         submission_file = within(directory, start.outputs['submission'])
         submission_file.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(tables['test'], test_predictions, tables, config, submission_file)
-        if not submission_file.is_file() or not submission_file.stat().st_size:
-            raise ValueError('Submission writer produced no nonempty output file')
+        validate_submission(submission_file, preparation.output, len(tables['test']))
         value, evaluation, error = None, 'unavailable', None
         if preparation.metric.status == 'ready':
             try:

@@ -22,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--time-budget", type=float, default=600)
     parser.add_argument("--experiment-timeout", type=float, default=240)
     parser.add_argument("--max-nodes", type=int, default=10, help="Число нод вместе с baseline; 1 — только baseline.")
+    parser.add_argument("--platform-output", action="store_true", help="Требовать submission.csv для платформы.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
     args = parser.parse_args(argv)
     if args.command == "ask" and not args.prompt:
@@ -41,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
                 report = asyncio.run(extract_task(args.task.resolve(), output, settings))
             else:
                 options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout,
-                                  output_dir=output, max_nodes=args.max_nodes)
+                                  output_dir=output, max_nodes=args.max_nodes, platform_output=args.platform_output)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")

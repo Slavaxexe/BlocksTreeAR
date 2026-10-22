@@ -18,11 +18,12 @@ from openai import AsyncOpenAI
 import pandas as pd
 
 from alfa_agent.config import Settings
-from alfa_agent.agents import baker_context, implementation_context
-from alfa_agent.contracts import Delta, Finish, Hypotheses, Hypothesis, Metric, Preparation, RunReport, Start
+from alfa_agent.agents import JSONAgents, baker_context, implementation_context
+from alfa_agent.contracts import Delta, Finish, Hypotheses, Hypothesis, Metric, OutputBinding, Preparation, Program, RunReport, Start
 from alfa_agent.data import LIBRARIES, check_code, file_hash, library_context, profile
 from alfa_agent.runner import Options, process, run, summarize
 from alfa_agent.storage import load
+from alfa_agent.worker import validate_submission
 from package_solution import build
 
 PREPARE = '''import numpy as np
@@ -94,10 +95,29 @@ def fixture(directory):
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_and_truncated_llm_answers_are_repaired(self):
+        for first in ([], [{'index': 0, 'finish_reason': 'length',
+                            'message': {'role': 'assistant', 'content': json.dumps({'code': PROGRAM})}}]):
+            seen = []
+            def handler(request):
+                seen.append(request)
+                choices = first if len(seen) == 1 else [{'index': 0, 'finish_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': json.dumps({'code': PROGRAM})}}]
+                return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0,
+                                               'model': 'model', 'choices': choices})
+            def client(**kwargs):
+                return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+            agents = JSONAgents(Settings('fake', 'http://proxy/v1', 'model'), time.monotonic() + 10)
+            with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+                result = await agents.ask(Program, 'Write code', 'implementer', code=True)
+            self.assertEqual(result.code, PROGRAM)
+            self.assertEqual(len(seen), 2)
+            self.assertEqual(agents.calls[0].status, 'invalid_json')
+
     async def exercise(self, directory, *, repair=False, missing_metric=False, blocked=False, broken_metric=False,
                        invalid_program=False, broken_code=False, execution_timeout=False, full_repair=False,
                        json_failure=False, network_failure=False, ast_failure=False, refused_once=False,
-                       refused_after_error=False, max_nodes=1):
+                       refused_after_error=False, wrong_columns=False, max_nodes=1):
         path, answers = fixture(directory)
         if missing_metric:
             answers['PreparationDraft']['metric']['status'] = 'needs_implementation'
@@ -129,6 +149,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 seen.append(title)
                 raise httpx.ConnectError('temporary disconnection', request=request)
             answer = answers[title]
+            if title == 'PreparationDraft' and wrong_columns and title not in seen:
+                answer = {**answer, 'output': {**answer['output'], 'columns': ['wrong']}}
             if title in {'PreparationDraft', 'Hypothesis', 'Program'}:
                 payload = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
                 self.assertEqual(payload['allowed_libraries'], LIBRARIES)
@@ -197,6 +219,12 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             result = await run(path, Options(time_budget=40, experiment_timeout=12, output_dir=run_directory, max_nodes=max_nodes),
                                Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         return result, seen
+
+    async def test_preparation_repairs_columns_that_disagree_with_task(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (_, report), seen = await self.exercise(Path(temporary), wrong_columns=True)
+            self.assertEqual(report.status, 'ready')
+            self.assertEqual(seen.count('PreparationDraft'), 2)
 
     async def test_new_names_formats_custom_metric_and_three_column_output(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -863,6 +891,18 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SubmissionTests(unittest.TestCase):
+    def test_submission_checks_serialized_columns_and_row_count(self):
+        output = OutputBinding(filename='submission.csv', format='CSV', columns=['id', 'prediction'])
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / output.filename
+            for content in ['', 'id,prediction\n', 'prediction,id\n1,001\n',
+                            'id,prediction\n001,1,extra\n', 'id,prediction\n001,1\n002,2\n']:
+                path.write_text(content)
+                with self.subTest(content=content), self.assertRaises(ValueError):
+                    validate_submission(path, output, 1)
+            path.write_text('id,prediction\n001,1\n')
+            validate_submission(path, output, 1)
+
     def test_platform_budgets_are_large_and_explicit_overrides_win(self):
         from solution import main
         with patch('solution.cli', return_value=0) as cli:
@@ -871,7 +911,7 @@ class SubmissionTests(unittest.TestCase):
             for option, value in {'--time-budget': '10500', '--experiment-timeout': '1200', '--max-nodes': '100'}.items():
                 self.assertEqual(arguments[arguments.index(option) + 1], value)
             main(['task.md', '--time-budget=300', '--experiment-timeout', '60', '--max-nodes', '1'])
-            self.assertEqual(cli.call_args.args[0], ['baseline', '--task', 'task.md', '--time-budget=300',
+            self.assertEqual(cli.call_args.args[0], ['baseline', '--task', 'task.md', '--platform-output', '--time-budget=300',
                 '--experiment-timeout', '60', '--max-nodes', '1'])
 
     def test_zip_contains_only_root_modules_and_original_requirements(self):
@@ -893,6 +933,18 @@ class SubmissionTests(unittest.TestCase):
             with ZipFile(build(root / 'submission.zip')) as bundle:
                 bundle.extractall(root)
             task, answers = fixture(root)
+            # Exercise the platform contract with nested inputs and a nonstandard target/ID.
+            replacements = {'samples.psv': 'data/train/samples.psv', 'query.jsonl': 'data/test/query.jsonl',
+                            'result.tsv': 'submission.csv', 'TSV': 'CSV'}
+            for source, target in list(replacements.items())[:2]:
+                (root / target).parent.mkdir(parents=True, exist_ok=True)
+                (root / source).rename(root / target)
+            text, serialized = task.read_text(), json.dumps(answers)
+            for source, target in replacements.items():
+                text, serialized = text.replace(source, target), serialized.replace(source, target)
+            task.write_text(text)
+            answers = json.loads(serialized)
+            answers['PreparationDraft']['code'] = answers['PreparationDraft']['code'].replace("sep='\\t'", "sep=','")
             task.rename(root / 'task.md')
             (root / 'mock_answers.json').write_text(json.dumps(answers))
             driver = '''import importlib.util,json,runpy,sys
@@ -902,7 +954,9 @@ import httpx
 from openai import AsyncOpenAI
 assert importlib.util.find_spec('alfa_agent') is None
 answers=json.loads(Path('mock_answers.json').read_text())
+preparations=0
 def handler(request):
+    global preparations
     assert str(request.url)=='http://llm-proxy:8080/v1/chat/completions'
     body=json.loads(request.content)
     assert body['model']=='qwen/qwen3.8-27b'
@@ -911,7 +965,14 @@ def handler(request):
     assert body['chat_template_kwargs']=={'enable_thinking':title=='Program'}
     assert body['temperature']==0 and body['max_tokens']==32768 and 'response_format' not in body
     context=json.loads(body['messages'][1]['content'].rsplit('\\n',1)[1])
-    if title=='Hypotheses':
+    if title=='PreparationDraft':
+        preparations+=1
+        assert context['platform_output']['filename']=='submission.csv'
+        assert {'data/train/samples.psv','data/test/query.jsonl'} <= {f['path'] for f in context['inventory']}
+        answer=json.loads(json.dumps(answers[title]))
+        if preparations==1: answer['output']['filename']='wrong.csv'
+        else: assert 'submission.csv' in context['execution_error']
+    elif title=='Hypotheses':
         count=sum(1 for _ in Path('artifacts').glob('*/nodes/*/start.json'))
         proposals=[]
         for offset,purpose in enumerate(context['requested_purposes']):
@@ -942,7 +1003,8 @@ with patch('alfa_agents.AsyncOpenAI',side_effect=client):
             self.assertEqual((report.status, report.completed_nodes), ('ready', 3))
             self.assertIn('working_baseline', report.checks)
             self.assertEqual(load(output / 'delta.json', Delta).best_node_id, 'node_000')
-            submission = pd.read_csv(root / 'result.tsv', sep='\t', dtype={'record': str})
+            submission = pd.read_csv(root / 'submission.csv', dtype={'record': str})
+            self.assertEqual(list(submission), ['record', 'estimate', 'comment'])
             self.assertEqual(list(submission.record), ['0100', '0101', '0102', '0103', '0104'])
 
 

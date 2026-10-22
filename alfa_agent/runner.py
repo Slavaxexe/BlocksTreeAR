@@ -30,6 +30,7 @@ class Options:
     experiment_timeout: float = 240
     output_dir: Path | None = None
     max_nodes: int = 10
+    platform_output: bool = False
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -188,9 +189,17 @@ async def run(task_path: Path, options: Options, settings: Settings):
         context = {'task_text': task_path.read_text(encoding='utf-8'),
                    'extraction': extraction.model_dump(mode='json'), 'inventory': inventory(task_path.parent),
                    **library_context()}
+        if options.platform_output:
+            context['platform_output'] = {'filename': 'submission.csv', 'format': 'CSV',
+                'requirement': 'Mandatory platform contract: comma-separated CSV, explicit ordered columns, one row per test object.'}
         for attempt in range(2):
             draft = await agents.prepare(context)
             try:
+                if options.platform_output and (draft.output.filename != 'submission.csv'
+                        or (draft.output.format or '').upper() != 'CSV' or not draft.output.columns):
+                    raise ValueError('Platform requires output.filename=submission.csv, output.format=CSV and explicit output.columns')
+                if extraction.output.columns and draft.output.columns != extraction.output.columns:
+                    raise ValueError('Output columns must match the ordered columns extracted from task.md')
                 check_code(draft.code, ('load_data', 'make_split', 'score', 'write_submission'))
                 for relative in draft.data.files.values():
                     within(task_path.parent, relative)
