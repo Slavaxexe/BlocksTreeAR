@@ -144,8 +144,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         def handler(request):
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
-            self.assertEqual(body['reasoning_effort'], 'medium' if title in {'Program', 'CodeReview'} else 'none')
-            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': title in {'Program', 'CodeReview'}})
+            self.assertEqual(body['reasoning_effort'], 'none')
+            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
             self.assertNotIn('response_format', body)
             if title == 'Program' and seen.count(title) < int(network_failure):
                 seen.append(title)
@@ -615,8 +615,8 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             nonlocal wrong_sent, rejected, simultaneous, peak
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
-            self.assertEqual(body['reasoning_effort'], 'medium' if title in {'Program', 'CodeReview'} else 'none')
-            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': title in {'Program', 'CodeReview'}})
+            self.assertEqual(body['reasoning_effort'], 'none')
+            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
             context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
             if title in {'Hypothesis', 'Hypotheses'}:
                 self.assertEqual(context['allowed_libraries'], LIBRARIES)
@@ -1064,8 +1064,8 @@ def handler(request):
     body=json.loads(request.content)
     assert body['model']=='qwen/qwen3.8-27b'
     title=json.loads(body['messages'][0]['content'].split('Schema: ',1)[1])['title']
-    assert body['reasoning_effort']==('medium' if title in ('Program','CodeReview') else 'none')
-    assert body['chat_template_kwargs']=={'enable_thinking':title in ('Program','CodeReview')}
+    assert body['reasoning_effort']=='none'
+    assert body['chat_template_kwargs']=={'enable_thinking':False}
     assert body['temperature']==0 and body['max_tokens']==(8192 if title=='CodeReview' else 32768) and 'response_format' not in body
     context=json.loads(body['messages'][1]['content'].rsplit('\\n',1)[1])
     if title=='PreparationDraft':

@@ -84,7 +84,6 @@ class JSONAgents:
                   request_limit: int | None = None, validation: dict | None = None,
                   attempts: int = 3, repairs: int = 1, refresh=None):
         reviewing = role in {'reviewer', 'preparation_reviewer'}
-        thinking = role == 'implementer' or reviewing
         messages = [
             {"role": "system", "content": (
                 "Return ONLY one JSON object matching the supplied JSON Schema. "
@@ -115,8 +114,8 @@ class JSONAgents:
                     response = await client.chat.completions.create(
                         model=self.settings.model, messages=messages, temperature=0,
                         max_tokens=min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens,
-                        extra_body={"reasoning_effort": "medium" if thinking else "none",
-                            "chat_template_kwargs": {"enable_thinking": thinking}})
+                        extra_body={"reasoning_effort": "none",
+                            "chat_template_kwargs": {"enable_thinking": False}})
             except asyncio.CancelledError:
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
                 raise

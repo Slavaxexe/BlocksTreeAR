@@ -79,9 +79,9 @@ uv run --locked python -m unittest discover -s tests -v
 
 `ping` / `ask` — отдельная текстовая диагностика. Для extraction / preparation /
 baseline работают асинхронные роли из `agents.py`: обычный Chat Completions,
-JSON-инструкция и локальная проверка контракта. Реализатор, включая исправления,
-и Reviewer используют `reasoning_effort=medium` и `chat_template_kwargs.enable_thinking=true`;
-extractor’ы, подготовка и Baker — `none` / `false`. `temperature=0`, максимум ответа
+JSON-инструкция и локальная проверка контракта. Все роли, включая реализатора,
+исправления и Reviewer, используют `reasoning_effort=none` и `chat_template_kwargs.enable_thinking=false`.
+`temperature=0`, максимум ответа
 32 768 токенов (8192 у Reviewer), таймаут до 300 с; SDK retries отключены, повторами управляет обвязка.
 Provider JSON-mode не используется: на новом прокси он давал посторонние поля.
 Из content снимается только целая внешняя Markdown-обёртка; поля JSON не удаляются.

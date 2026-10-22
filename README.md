@@ -48,9 +48,9 @@ PyTorch, AutoGluon, LightAutoML и FLAML. `allowed_libraries` содержит �
 генерация и исправления кода используют до 20 запросов в пределах общего бюджета.
 Таймаут запроса к Qwen — 300 с по умолчанию, настраивается через `QWEN_TIMEOUT_SECONDS`;
 оставшийся общий бюджет может сократить это ожидание.
-Максимум ответа — 32 768 токенов, `temperature=0`. Реализатор (включая исправления)
-и Reviewer используют `reasoning_effort=medium`, `enable_thinking=true`; extractor’ы, генерация подготовки
-и Baker — `none` / `false`. Provider JSON-mode выключен, разбирается только итоговый
+Максимум ответа — 32 768 токенов, `temperature=0`. Все роли, включая реализатора,
+исправления и Reviewer, используют `reasoning_effort=none`, `enable_thinking=false`.
+Расширенные рассуждения отключены для проверки задержек API. Provider JSON-mode выключен, разбирается только итоговый
 `content`, reasoning не используется вместо JSON. SDK retries отключены; повторами
 управляет обвязка в указанных бюджетах. Явные CLI-параметры имеют приоритет;
 отладочный `python -m alfa_agent baseline` сохраняет короткие defaults 10 нод / 600 с / 240 с.

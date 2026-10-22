@@ -164,7 +164,7 @@ bindings / типы столбцов / размеры / метрику / output,
 замечания. История, delta, родитель и диалог генерации исключены. Для подготовки
 используется отдельный запрос с prepare.py, извлечёнными требованиями без evidence
 и измеренным контрактом; экспериментальный план ему не нужен.
-Reviewer использует medium / thinking, до 8192 токенов и двух запросов с JSON-repair.
+Reviewer использует reasoning none / thinking false, до 8192 токенов и двух запросов с JSON-repair.
 Он не переписывает код и не предлагает лучшие алгоритмы. JSON содержит status
 pass/revise и до трёх findings: severity, code_quote, requirement, explanation, check.
 Python проверяет схему, наличие дословной цитаты в исходнике и согласованность
@@ -396,8 +396,8 @@ threadpoolctl задают по два потока BLAS / OpenMP; паралл�
 Сетевая ошибка, таймаут API или HTTP 5xx допускают повторы с паузами 2 с, затем по 4 с,
 в пределах 10 API-попыток Baker, двух у Reviewer или трёх на ответ остальных ролей. У остальных ролей
 по-прежнему один JSON-repair на ответ. Provider JSON-mode не используется;
-реализатор (и его исправления), а также Reviewer отправляют `reasoning_effort=medium` вместе с
-`chat_template_kwargs.enable_thinking=true`; остальные роли — `none` / `false`.
+все роли, включая реализатора, исправления и Reviewer, отправляют `reasoning_effort=none` вместе с
+`chat_template_kwargs.enable_thinking=false`.
 `temperature=0`, максимум ответа — 32 768 токенов, у Reviewer — 8192. SDK retries отключены.
 Разбирается только content, при необходимости без целой внешней Markdown-обёртки;
 проверки схемы и цитат сохраняются. Все запросы учитываются; причина соединения выводится как имя класса,
