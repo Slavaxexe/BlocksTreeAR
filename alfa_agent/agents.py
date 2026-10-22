@@ -115,7 +115,9 @@ class JSONAgents:
         ]
         invalid, feedback = 0, None
         limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
-        for attempt in range(1, attempts + 1):
+        attempt = 0
+        while attempt < attempts:  # 429 waits may extend attempts
+            attempt += 1
             remaining = self.deadline - time.monotonic()
             if remaining <= 0 or self.requests >= limit or self.budget['requests'] >= self.budget['limit']:
                 raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
@@ -144,6 +146,13 @@ class JSONAgents:
                 if status is None and error.__cause__ is not None:
                     suffix += ' / ' + type(error.__cause__).__name__
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
+                if status == 429 and self.deadline - time.monotonic() > 30:
+                    # Rate limiting is temporary server load; waiting does not spend the request budget.
+                    self.requests -= 1
+                    self.budget['requests'] -= 1
+                    await asyncio.sleep(min(15 * attempt, 60, max(0., self.deadline - time.monotonic() - 30)))
+                    attempts += attempt < 12
+                    continue
                 if attempt < attempts and (status is None or status >= 500):
                     await asyncio.sleep(min(2 ** attempt, 4, max(0., self.deadline - time.monotonic())))
                     continue

@@ -266,7 +266,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
     task_path = task_path.resolve()
     CHILD.update(threads=options.threads or (4 if options.autopilot else 2), shift_check=options.autopilot)
     final_deadline = time.monotonic() + options.time_budget
-    reserve = min(options.time_budget * .15, options.experiment_timeout, 1200) if options.final_refit else 0
+    # The blend adds selection and parallel member refits around the same reserve for the single-winner refit.
+    reserve = min(options.time_budget * .15, options.experiment_timeout + (300 if options.autopilot else 0),
+                  1500 if options.autopilot else 1200) if options.final_refit else 0
     deadline = final_deadline - reserve
     agents = JSONAgents(settings, deadline, max_calls=12 + (IMPLEMENTATION_CALLS + BAKER_ATTEMPTS) * options.max_nodes)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
@@ -493,7 +495,33 @@ async def run(task_path: Path, options: Options, settings: Settings):
                         if planning_failed or (not active and not waiting and len(delta.nodes) <= blocked_version):
                             update(errors=report.errors + [message])
                 planner = asyncio.create_task(anext(planning)) if planning is not None and time.monotonic() < deadline else None
-        if published and baseline_ready and options.final_refit and time.monotonic() < final_deadline:
+        blended = False
+        if (options.autopilot and published and baseline_ready and options.final_refit and time.monotonic() < final_deadline
+                and sum(n.result.value is not None for n in delta.nodes) > 1):
+            # A validation-chosen blend replaces the single winner only when it measurably improves the shared split.
+            update(stage='finalization')
+            worker = ['-m', 'alfa_agent.worker']
+            try:
+                await process(worker + ['--blend', str(directory), '--members', str(options.executors)], directory,
+                              directory / 'blend.log', final_deadline, 300)
+                plan = json.loads((directory / 'blend.json').read_text())
+                if plan['selected']:
+                    failures = await asyncio.gather(*(process(worker + ['--refit-member', str(directory / 'nodes' / node / 'start.json')],
+                        directory, directory / 'nodes' / node / 'refit.log', final_deadline, min(1200, options.experiment_timeout))
+                        for node in plan['weights']), return_exceptions=True)
+                    await process(worker + ['--blend-final', str(directory)], directory, directory / 'blend_final.log', final_deadline, 300)
+                    plan = json.loads((directory / 'blend.json').read_text())
+                    output = within(directory, plan['submission_file'])
+                    from .worker import validate_submission
+                    validate_submission(output, preparation.output, preparation.profile['test']['rows'])
+                    atomic_bytes(within(task_path.parent, preparation.output.filename), output.read_bytes())
+                    blended = True
+                    update(checks=report.checks + ['validated_blend', 'final_submission_validated'],
+                           warnings=report.warnings + [f'Blend member refit failed, fit-only predictions used: {str(e)[-300:]}'
+                                                       for e in failures if isinstance(e, Exception)])
+            except (ValueError, OSError, TimeoutError, KeyError) as error:
+                update(warnings=report.warnings + ['Blend skipped; refitting the single winner: ' + str(error)[-1000:]])
+        if not blended and published and baseline_ready and options.final_refit and time.monotonic() < final_deadline:
             selected = next(n.result for n in delta.nodes if n.node_id == published)
             final = Finalization(status='running', node_id=published, preparation_sha256=selected.preparation_sha256,
                                  start_sha256=selected.start_sha256, code_sha256=selected.code_sha256)

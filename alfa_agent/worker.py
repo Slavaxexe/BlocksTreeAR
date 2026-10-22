@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import pickle
 import sys
 import time
 import tempfile
@@ -308,6 +309,8 @@ def evaluate(start_path: Path, fit_model, *, start_sha256=None, code_sha256=None
             preparation, preparation_path.parent, fit_model)
         validation_file = within(directory, start.outputs['validation'])
         atomic_bytes(validation_file, valid_predictions.to_csv(index=False).encode())
+        # Exact frames (dtypes preserved) let the controller blend nodes without re-reading CSV text.
+        atomic_bytes(directory / 'predictions.pkl', pickle.dumps({'validation': valid_predictions, 'test': test_predictions}))
         submission_file = within(directory, start.outputs['submission'])
         submission_file.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(tables['test'], test_predictions, tables, config, submission_file)
@@ -338,7 +341,8 @@ def evaluate(start_path: Path, fit_model, *, start_sha256=None, code_sha256=None
     return result
 
 
-def refit(start_path: Path):
+def refit(start_path: Path, member: bool = False):
+    """Train the source on all labeled rows; a blend member keeps its raw test frame instead of a submission."""
     start, started = load(start_path, Start), time.monotonic()
     node, root = start_path.parent, start_path.parent.parent.parent
     preparation = load(root / 'preparation.json', Preparation)
@@ -362,6 +366,9 @@ def refit(start_path: Path):
             predictions = prediction_frame(predictor, test.copy())
             if preparation.prediction_scope == 'row':
                 check_predictor(predictor, test, predictions)
+        if member:
+            atomic_bytes(node / 'refit_predictions.pkl', pickle.dumps(predictions))
+            return
         destination = within(root / 'final', preparation.output.filename)
         destination.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(test, predictions, tables, config, destination)
@@ -369,11 +376,95 @@ def refit(start_path: Path):
         result = result.model_copy(update={'status': 'completed', 'fit_input_rows': len(train),
                                            'submission_file': destination.relative_to(root).as_posix()})
     except Exception as error:
+        if member:  # finalization.json belongs to the single-winner refit
+            raise
         result = result.model_copy(update={'status': 'failed', 'error': f'{type(error).__name__}: {error}'[-2000:]})
     result = result.model_copy(update={'duration_seconds': time.monotonic() - started})
     save(root / 'finalization.json', result)
     if result.status != 'completed':
         raise ValueError(result.error)
+
+
+def combine(frames, weights, classification):
+    """Weighted mean of numeric predictions; weighted vote for labels (and integer class codes)."""
+    result = frames[0].copy()
+    for column in result.columns:
+        values = [frame[column].to_numpy() for frame in frames]
+        numeric = all(np.issubdtype(v.dtype, np.number) and not np.issubdtype(v.dtype, np.bool_) for v in values)
+        whole = numeric and all(np.all(np.mod(v, 1) == 0) for v in values)
+        if numeric and not (classification and whole):
+            result[column] = sum(w * v.astype(float) for w, v in zip(weights, values)) / sum(weights)
+            continue
+        votes = pd.DataFrame({i: v for i, v in enumerate(values)})
+        tally = {}
+        for i, weight in enumerate(weights):
+            for label in pd.unique(votes[i]):
+                tally[label] = tally.get(label, 0) + weight * (votes[i] == label).to_numpy()
+        labels = list(tally)
+        result[column] = np.array(labels, dtype=object)[np.argmax(np.vstack([tally[l] for l in labels]), axis=0)]
+        result[column] = result[column].astype(frames[0][column].dtype, errors='ignore')
+    return result
+
+
+def blend(root: Path, limit: int):
+    """Greedy forward selection with replacement (Caruana) over scored nodes on the shared validation rows."""
+    preparation = load(root / 'preparation.json', Preparation)
+    reader = module(root / 'prepare.py', preparation.code_sha256)
+    config = preparation.model_dump(mode='json')
+    train = reader.load_data(Path(preparation.task_directory), config)['train']
+    with np.load(within(root, preparation.validation['split_file']), allow_pickle=False) as split:
+        reference = train.iloc[split['valid']].reset_index(drop=True)
+    sign = -1. if preparation.metric.direction == 'minimize' else 1.
+    classification = 'classif' in (preparation.task_type or '').casefold() or 'классиф' in (preparation.task_type or '').casefold()
+    delta = json.loads((root / 'delta.json').read_text())
+    scored = sorted((n for n in delta['nodes'] if n['result'].get('value') is not None and n['result']['status'] == 'completed'
+                     and (root / 'nodes' / n['node_id'] / 'predictions.pkl').exists()), key=lambda n: -sign * n['result']['value'])[:10]
+    frames = {n['node_id']: pickle.loads((root / 'nodes' / n['node_id'] / 'predictions.pkl').read_bytes())['validation'] for n in scored}
+    score = lambda counts: sign * float(reader.score(reference, combine([frames[k] for k in counts], list(counts.values()),
+                                                                        classification), config))
+    counts, best = {}, -np.inf
+    for _ in range(15):
+        trials = {}
+        for node in frames:
+            if node not in counts and len(counts) >= limit:
+                continue
+            trial = {**counts, node: counts.get(node, 0) + 1}
+            try:
+                trials[node] = score(trial)
+            except Exception:  # an incompatible frame is simply not a member
+                continue
+        if not trials or max(trials.values()) <= best + 1e-12:
+            break
+        node = max(trials, key=trials.get)
+        counts, best = {**counts, node: counts.get(node, 0) + 1}, trials[node]
+    single = sign * scored[0]['result']['value'] if scored else None
+    selected = len(counts) > 1 and single is not None and best > single + 1e-3 * abs(single)
+    plan = {'weights': counts, 'value': sign * best if counts else None, 'best_single': scored[0]['node_id'] if scored else None,
+            'best_single_value': sign * single if single is not None else None, 'selected': selected,
+            'rule': 'Caruana greedy selection with replacement; blend replaces the single winner when it improves validation by >0.1%'}
+    atomic_bytes(root / 'blend.json', json.dumps(plan, indent=1).encode())
+
+
+def blend_final(root: Path):
+    preparation = load(root / 'preparation.json', Preparation)
+    reader = module(root / 'prepare.py', preparation.code_sha256)
+    config = preparation.model_dump(mode='json')
+    tables = reader.load_data(Path(preparation.task_directory), config)
+    plan = json.loads((root / 'blend.json').read_text())
+    frames, sources = [], {}
+    for node, weight in plan['weights'].items():
+        refit_path = root / 'nodes' / node / 'refit_predictions.pkl'
+        frames.append(pickle.loads(refit_path.read_bytes()) if refit_path.exists() else
+                      pickle.loads((root / 'nodes' / node / 'predictions.pkl').read_bytes())['test'])
+        sources[node] = 'refit_all_train' if refit_path.exists() else 'fit_only'
+    kind = (preparation.task_type or '').casefold()
+    predictions = combine(frames, list(plan['weights'].values()), 'classif' in kind or 'классиф' in kind)
+    destination = within(root / 'final', preparation.output.filename)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    reader.write_submission(tables['test'], predictions, tables, config, destination)
+    validate_submission(destination, preparation.output, len(tables['test']))
+    plan.update(sources=sources, submission_file=destination.relative_to(root).as_posix())
+    atomic_bytes(root / 'blend.json', json.dumps(plan, indent=1).encode())
 
 
 def main(fit_model=None):
@@ -383,12 +474,22 @@ def main(fit_model=None):
         stage.add_argument('--prepare', type=Path)
         stage.add_argument('--check', type=Path)
         stage.add_argument('--refit', type=Path)
+        stage.add_argument('--refit-member', type=Path)
+        stage.add_argument('--blend', type=Path)
+        stage.add_argument('--blend-final', type=Path)
         parser.add_argument('--preparation', type=Path)
+        parser.add_argument('--members', type=int, default=3)
         args = parser.parse_args()
         if args.prepare:
             prepare(args.prepare.resolve())
         elif args.refit:
             refit(args.refit.resolve())
+        elif args.refit_member:
+            refit(args.refit_member.resolve(), member=True)
+        elif args.blend:
+            blend(args.blend.resolve(), args.members)
+        elif args.blend_final:
+            blend_final(args.blend_final.resolve())
         else:
             smoke(args.check.resolve(), args.preparation.resolve())
     else:

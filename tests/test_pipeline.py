@@ -312,6 +312,15 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((report['override'], report['shifted_features'][0], len(valid)), ('adversarial_holdout', 'x', 80))
         self.assertNotIn('override', shift_split(train, shifted, data, {'strategy': 'group'}, mixed[:320], mixed[320:])[2])
 
+    def test_blend_combines_numbers_by_weighted_mean_and_labels_by_weighted_vote(self):
+        from alfa_agent.worker import combine
+        numbers = [pd.DataFrame({'y': [1., 3.]}), pd.DataFrame({'y': [3., 7.]})]
+        self.assertEqual(combine(numbers, [3, 1], False)['y'].tolist(), [1.5, 4.])
+        labels = [pd.DataFrame({'y': ['a', 'b']}), pd.DataFrame({'y': ['b', 'b']}), pd.DataFrame({'y': ['b', 'a']})]
+        self.assertEqual(combine(labels, [3, 1, 1], True)['y'].tolist(), ['a', 'b'])
+        codes = [pd.DataFrame({'y': [0, 2]}), pd.DataFrame({'y': [1, 2]})]
+        self.assertEqual(combine(codes, [1, 2], True)['y'].tolist(), [1, 2])  # class codes are voted, not averaged
+
     async def test_full_refit_uses_all_train_without_overwriting_validation_score(self):
         with tempfile.TemporaryDirectory() as temporary:
             (root, report), _ = await self.exercise(Path(temporary), final_refit=True)
