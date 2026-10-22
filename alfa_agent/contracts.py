@@ -271,7 +271,7 @@ class Start(Contract):
     schema_version: Literal[3] = 3
     node_id: NodeID = "node_000"
     parent_id: NodeID | None = None
-    source: Literal["qwen"] = "qwen"
+    source: Literal["qwen", "controller"] = "qwen"
     preparation: str = "../../preparation.json"
     preparation_sha256: SHA256
     context: dict[str, Any] = Field(default_factory=dict, description="Source references, hashes and installed libraries; shared data is not duplicated")

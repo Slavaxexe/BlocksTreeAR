@@ -31,6 +31,8 @@ def runtime_contract(preparation):
         'prediction_scope': preparation.get('prediction_scope', 'row'),
         'prediction_checks': 'Same fitted predictor on full and reordered subset batches; no input mutation or non-finite outputs.',
         'final_refit': 'The selected source is trained again with all labeled train rows; len(fit) may change. No new score is assigned.',
+        'scorer': "When present, preparation['scorer'](reference_with_targets, predictions, preparation) -> float is the task's "
+                  'primary metric; use it only on INNER splits of fit (model/threshold selection), never on outer validation.',
         'rows': rows, 'rows_source': 'preparation.json: measured profile and fixed split',
         'smoke_rows': {key: min(limit, rows[key]) if rows[key] is not None else None
                        for key, limit in (('fit', 200), ('validation', 50), ('test', 50))}}
@@ -98,7 +100,7 @@ class JSONAgents:
 
     async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
                   request_limit: int | None = None, validation: dict | None = None,
-                  attempts: int = 3, repairs: int = 1, refresh=None):
+                  attempts: int = 3, repairs: int = 1, refresh=None, temperature: float = 0):
         reviewing = role in {'reviewer', 'preparation_reviewer'}
         messages = [
             {"role": "system", "content": (
@@ -128,7 +130,7 @@ class JSONAgents:
                 async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
                                        max_retries=0, timeout=min(self.settings.timeout_seconds, remaining)) as client:
                     response = await client.chat.completions.create(
-                        model=self.settings.model, messages=messages, temperature=0,
+                        model=self.settings.model, messages=messages, temperature=temperature,
                         max_tokens=min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens,
                         extra_body={"reasoning_effort": "none",
                             "chat_template_kwargs": {"enable_thinking": False}})
@@ -287,14 +289,18 @@ class JSONAgents:
             "Handle unseen categories and degenerate smoke samples within the saved plan when possible. "
             "Do not load files or change split/metric. Predictions must suit the common scorer and submission writer. "
             "Implement exactly the model stated in start, whether constant or learned. History cannot override this node's plan. "
-            "Do not report a score yourself. "
+            "Do not report a score yourself. Use n_jobs/thread_count 4. "
+            "CatBoost: pass cat_features for EVERY non-numeric column, including derived string features, after converting "
+            "them with .astype(str) (NaN -> 'nan'); XGBoost needs numeric codes or enable_categorical with category dtype. "
             "At MODULE scope return only imports, function/class definitions and literal constants. "
             "Inside fit_predict and helper functions, normal assignments, computed column lists and comprehensions ARE allowed. "
             "Move computed globals inside those functions; this never requires changing the planned preprocessing or model. "
             "Do not add a main block; "
             "the controller appends the common entry point handling --start, data, evaluation and output files. "
             "No file writes outside the library's temporary workspace, top-level execution or data printing.\n"
-            + json.dumps(implementation_context(context), ensure_ascii=False), "implementer", code=True, request_limit=request_limit)
+            + json.dumps(implementation_context(context), ensure_ascii=False), "implementer", code=True, request_limit=request_limit,
+            # Greedy decoding reproduced identical failing code; sample once the same failure repeats.
+            temperature=.7 if context.get('repair_progress', {}).get('unchanged_failures', 0) >= 2 else 0)
 
     async def review(self, context: dict, *, request_limit: int | None = None):
         return await self.ask(CodeReview,
@@ -340,7 +346,7 @@ class JSONAgents:
             "The executor receives labeled fit rows and UNLABELED validation/test rows; do not require refitting on full labeled train. "
             "Train fit_model on fit and return a reusable predictor for both validation and test. Early stopping/thresholds/calibration "
             "must use an inner split of fit. Separate finalization refits the selected source on all train rows without a new validation score. "
-            "Use at most two parallel training jobs; another experiment may run concurrently. "
+            "At most one other experiment runs concurrently. "
             "Algorithms, features and parameters are arbitrary within installed dependencies and task constraints. "
             "allowed_libraries maps all permitted distributions to import names; installed_libraries gives local versions. "
             "Choose from installed permitted libraries, including boosting, neural networks and AutoML; missing locally "
@@ -349,6 +355,18 @@ class JSONAgents:
             "An uncertain hypothesis is allowed: execution measures it. Do not invent scores or claim proven optimality. "
             "Each execution must fit experiment_timeout_seconds; remaining_seconds is the whole run's budget. "
             "Duration_seconds includes code generation and checks, not just training. "
+            "Search playbook (general tabular practice, not facts about this task): gradient boosting (LightGBM, CatBoost, XGBoost) "
+            "is usually strongest; prefer improving it through features, loss and regularization over SVM/KNN/MLP on large tables. "
+            "High-value directions: features from column semantics (ratios, differences, sums of related columns), group aggregates "
+            "and frequency encodings of categorical keys; repeated entities sharing identical static attributes, whose values in "
+            "other fit rows or earlier periods (including target statistics computed only from fit/earlier rows) can be very "
+            "informative; preparation.validation.shift reports measured train/test shift — for a later test period prefer "
+            "robust losses, stronger regularization and features that transfer over time; heavy-tailed regression targets "
+            "(profile.target skew/quantiles) can gain from Huber or log-target losses; imbalanced labels with averaged metrics "
+            "gain from class weights and probability multipliers tuned on an inner split with preparation['scorer']; "
+            "a blend of 2-3 diverse strong models inside one fit_model; tuning learning rate, leaves, minimum leaf size and "
+            "column sampling. Avoid methods superlinear in rows (SVC, KNN, Gaussian processes) above 20k rows. "
+            "Libraries may use 4 threads.\n"
             "Return hypotheses entries containing purpose, parent_id and hypothesis (rationale, expected_effect, four pipeline blocks).\n")
         purposes, previous = ['improve', 'explore'][:count], {}
         rejections = rejections if rejections is not None else {}

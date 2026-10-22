@@ -121,7 +121,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                        json_failure=False, network_failure=False, ast_failure=False, refused_once=False,
                        refused_after_error=False, wrong_columns=False, semantic_error=False, preparation_error=False,
                        review_warning=False, review_unavailable=False, never_fix=False, max_nodes=1,
-                       final_refit=False, refit_failure=False):
+                       final_refit=False, refit_failure=False, autopilot=False):
         path, answers = fixture(directory)
         if missing_metric:
             answers['PreparationDraft']['metric']['status'] = 'needs_implementation'
@@ -249,7 +249,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError('Experiment time limit')
             return await process(arguments, *args)
         with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client), patch('alfa_agent.runner.process', side_effect=launch):
-            result = await run(path, Options(time_budget=40, experiment_timeout=12, output_dir=run_directory, max_nodes=max_nodes, final_refit=final_refit),
+            result = await run(path, Options(time_budget=40, experiment_timeout=12, output_dir=run_directory, max_nodes=max_nodes, final_refit=final_refit,
+                                                     autopilot=autopilot),
                                Settings('fake-secret', 'https://qwen.example/v1', 'model'))
         return result, seen
 
@@ -263,6 +264,53 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(review.result.status, 'pass')
             self.assertEqual(review.code_sha256, file_hash(node / 'experiment.py'))
             self.assertEqual(load(node / 'finish.json', Finish).value, 47.)
+
+    async def test_autopilot_controller_baseline_runs_without_generated_code(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), autopilot=True, final_refit=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertNotIn('Program', seen)
+            self.assertNotIn('Hypothesis', seen)
+            self.assertEqual(seen.count('CodeReview'), 1)  # preparation review only
+            start, finish = load(root / 'nodes/node_000/start.json', Start), load(root / 'nodes/node_000/finish.json', Finish)
+            self.assertEqual((start.source, finish.status), ('controller', 'completed'))
+            self.assertTrue(np.isfinite(finish.value))
+            preparation = load(root / 'preparation.json', Preparation)
+            self.assertEqual(preparation.profile['target']['yield_value']['distinct'], 40)
+            self.assertEqual(json.loads((root / 'finalization.json').read_text())['status'], 'completed')
+            self.assertEqual(len(pd.read_csv(Path(temporary) / 'result.tsv', sep='\t')), 5)
+
+    async def test_autopilot_failed_controller_source_is_repaired_by_the_implementer(self):
+        from alfa_agent import autopilot
+        broken = lambda preparation, threads: ('def fit_model(fit, preparation):\n    raise ValueError("template broke")\n',
+                                               autopilot.template(preparation, threads)[1])
+        with tempfile.TemporaryDirectory() as temporary, patch('alfa_agent.runner.template', side_effect=broken):
+            (root, report), seen = await self.exercise(Path(temporary), autopilot=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertEqual(seen.count('Program'), 1)
+            self.assertEqual(load(root / 'nodes/node_000/finish.json', Finish).value, 47.)
+
+    def test_shift_split_detects_later_test_period_and_strong_covariate_shift(self):
+        from alfa_agent.contracts import DataBinding
+        from alfa_agent.worker import shift_split
+        data = DataBinding(files={}, target_columns=['y'], id_columns=['id'])
+        rng = np.random.RandomState(0)
+        train = pd.DataFrame({'id': range(400), 'period': np.repeat([1, 2, 3, 4], 100), 'x': rng.rand(400), 'y': rng.rand(400)})
+        test = pd.DataFrame({'id': range(400, 500), 'period': 5, 'x': rng.rand(100)})
+        fit, valid, report = shift_split(train, test, data, {'strategy': 'random'}, np.arange(300), np.arange(300, 400))
+        self.assertEqual((report['temporal_column'], report.get('override')), ('period', None))  # already temporal
+        mixed = rng.permutation(400)
+        fit, valid, report = shift_split(train, test, data, {'strategy': 'random'}, mixed[:320], mixed[320:])
+        self.assertEqual(report['override'], 'temporal_holdout')
+        self.assertTrue((train.period.iloc[valid] == 4).all() and (train.period.iloc[fit] < 4).all())
+        dated = train.assign(period=pd.date_range('2020-01-01', periods=400).astype(str))
+        later = test.assign(period=pd.date_range('2021-03-01', periods=100).astype(str))
+        self.assertEqual(shift_split(dated, later, data, {}, mixed[:320], mixed[320:])[2]['temporal_column'], 'period')
+        shifted = test.assign(period=rng.randint(1, 5, 100), x=rng.rand(100) + 3)
+        fit, valid, report = shift_split(train, shifted, data, {'strategy': 'random'}, mixed[:320], mixed[320:])
+        self.assertGreater(report['adversarial_auc'], .8)
+        self.assertEqual((report['override'], report['shifted_features'][0], len(valid)), ('adversarial_holdout', 'x', 80))
+        self.assertNotIn('override', shift_split(train, shifted, data, {'strategy': 'group'}, mixed[:320], mixed[320:])[2])
 
     async def test_full_refit_uses_all_train_without_overwriting_validation_score(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1134,8 +1182,8 @@ class SubmissionTests(unittest.TestCase):
             archive = build(Path(temporary) / 'submission.zip')
             with ZipFile(archive) as bundle:
                 self.assertEqual(set(bundle.namelist()), {'solution.py', 'requirements.txt', 'alfa_cli.py',
-                    'alfa_agents.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py', 'alfa_qwen.py',
-                    'alfa_runner.py', 'alfa_storage.py', 'alfa_worker.py'})
+                    'alfa_agents.py', 'alfa_autopilot.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py',
+                    'alfa_qwen.py', 'alfa_runner.py', 'alfa_storage.py', 'alfa_worker.py'})
                 self.assertEqual(bundle.read('requirements.txt'), Path('vendor/requirements_data_folder.txt').read_bytes())
                 for name in bundle.namelist():
                     if name.endswith('.py'):

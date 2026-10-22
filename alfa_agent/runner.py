@@ -16,14 +16,17 @@ import time
 from uuid import uuid4
 
 from .agents import BAKER_ATTEMPTS, JSONAgents, extract_task, runtime_contract
+from .autopilot import automl, template
 from .config import Settings
-from .contracts import Change, Comparison, Delta, Extraction, Finalization, Finish, NodeDelta, Preparation, ReviewRecord, Start
+from .contracts import (Change, Comparison, Delta, Extraction, Finalization, Finish, Hypothesis, NodeDelta, Preparation,
+                        Program, ReviewRecord, Start)
 from .qwen import QwenError
 from .data import check_code, file_hash, inventory, library_context, within
 from .storage import atomic_bytes, canonical, load, save
 
 ENTRY = "\nif __name__ == '__main__':\n    from alfa_agent.worker import main\n    main(fit_model)\n"
 IMPLEMENTATION_CALLS = 20
+CHILD = {'threads': 2, 'shift_check': False}  # set per run from Options; children inherit nothing else
 
 
 class RepairProgress:
@@ -64,6 +67,10 @@ class Options:
     max_nodes: int = 10
     platform_output: bool = False
     final_refit: bool = True
+    # Autopilot: measured shift-aware split, controller GBDT baseline, advisory code review, 4 threads per executor.
+    autopilot: bool = False
+    executors: int = 2  # concurrent experiment processes
+    threads: int | None = None  # library threads per process; default 4 with autopilot, else 2
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -73,7 +80,8 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
     # No inherited credentials. This is a bounded process, not an OS sandbox.
     env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
            'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1',
-           'OMP_NUM_THREADS': '2', 'OPENBLAS_NUM_THREADS': '2', 'MKL_NUM_THREADS': '2'}
+           'ALFA_THREADS': str(CHILD['threads']), 'ALFA_SHIFT_CHECK': '1' if CHILD['shift_check'] else '0',
+           **{name: str(CHILD['threads']) for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS')}}
     with log.open('wb') as stream:
         child = await asyncio.create_subprocess_exec(sys.executable, *arguments, cwd=cwd, env=env,
                                                      stdout=stream, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
@@ -133,7 +141,10 @@ def summarize(delta: Delta, start: Start, finish: Finish) -> tuple[NodeDelta, De
 
 
 def review_contract(preparation: dict) -> dict:
+    override = preparation.get('validation', {}).get('shift', {}).get('override')
     return {**{k: preparation[k] for k in ('data', 'validation', 'metric', 'output')},
+        **({'split_note': f'The controller measured train/test shift and replaced the make_split result ({override}); '
+                          'split.npz is authoritative, so make_split itself is not a finding.'} if override else {}),
         'columns': {name: stats['dtype'] for name, stats in preparation.get('profile', {}).get('train', {}).get('columns', {}).items()},
         'runtime': runtime_contract(preparation)}
 
@@ -158,7 +169,10 @@ async def review_source(agents, path: Path, source: Path, context: dict, *, requ
     return result
 
 
-async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents, deadline: float, checkpoint) -> Finish:
+async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents, deadline: float, checkpoint,
+                     *, code: str | None = None, blocking_review: bool = True, repairable: bool = True,
+                     check_seconds: float = 45) -> Finish:
+    """code: controller-written first source; the implementer repairs it only when repairable."""
     start_hash, started = file_hash(node / 'start.json'), time.monotonic()
     checkpoint()
     code_hash, notes, stage = None, [], 'implementation'
@@ -173,7 +187,9 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 raise TimeoutError('Run time budget exhausted')
             stage = 'implementation'
             context['requests_left'] = request_limit - agents.requests
-            program = await agents.implement(context, request_limit=request_limit)
+            program = Program(code=code, notes=['Controller-written source']) if code else \
+                await agents.implement(context, request_limit=request_limit)
+            code = None
             notes = list(dict.fromkeys(notes + program.notes))
             if program.plan_conflict and not program.code.strip():
                 conflict = program.plan_conflict
@@ -198,19 +214,20 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 code_hash = file_hash(node / start.implementation)
                 check_code(program.code, ('fit_model',))
                 await process(['-m', 'alfa_agent.worker', '--check', str(node), '--preparation', str(preparation_path)],
-                              node, node / 'execution.log', deadline, min(45, start.timeout_seconds))
+                              node, node / 'execution.log', deadline, min(check_seconds, start.timeout_seconds))
                 if file_hash(node / 'start.json') != start_hash or file_hash(preparation_path) != start.preparation_sha256:
                     raise ValueError('Saved plan or preparation changed during implementation')
                 stage = 'review'
-                review = await review_source(agents, node / 'review.json', node / start.implementation,
+                review = None if not blocking_review else await review_source(agents, node / 'review.json', node / start.implementation,
                     {'kind': 'experiment', 'plan': start.hypothesis.pipeline.model_dump(), 'code': program.code,
                      'contract': review_contract(shared['preparation']),
                      'smoke': json.loads((node / 'smoke.json').read_text()) if (node / 'smoke.json').exists()
                               else {'status': 'passed', 'checks': ['worker_exit_0']}}, request_limit=request_limit)
-                context['review_findings'] = [f.model_dump() for f in review.findings]
-                if review.status == 'revise':
-                    raise ValueError('Reviewer requested correction: ' + canonical(context['review_findings']))
-                notes.extend('Reviewer warning: ' + f.explanation for f in review.findings)
+                if review is not None:
+                    context['review_findings'] = [f.model_dump() for f in review.findings]
+                    if review.status == 'revise':
+                        raise ValueError('Reviewer requested correction: ' + canonical(context['review_findings']))
+                    notes.extend('Reviewer warning: ' + f.explanation for f in review.findings)
                 stage = 'execution'
                 await process([str(node / start.implementation), '--start', str(node / 'start.json'),
                                '--start-sha256', start_hash, '--code-sha256', code_hash], node,
@@ -225,7 +242,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
             except (ValueError, OSError, TimeoutError) as error:
                 atomic_bytes(node / 'execution.log', str(error).encode())
                 context['repair_progress'] = progress.observe(stage, program.code, error)
-                if agents.requests >= request_limit or time.monotonic() >= deadline:
+                if not repairable or agents.requests >= request_limit or time.monotonic() >= deadline:
                     raise
                 context.update(previous_code=program.code, execution_error=str(error)[-5000:], failed_stage=stage)
                 checkpoint(f'{start.node_id}: code repair after {stage}; saved start is unchanged')
@@ -247,6 +264,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
     if type(options.max_nodes) is not int or not 1 <= options.max_nodes <= 1000:
         raise ValueError('max_nodes must be an integer between 1 and 1000')
     task_path = task_path.resolve()
+    CHILD.update(threads=options.threads or (4 if options.autopilot else 2), shift_check=options.autopilot)
     final_deadline = time.monotonic() + options.time_budget
     reserve = min(options.time_budget * .15, options.experiment_timeout, 1200) if options.final_refit else 0
     deadline = final_deadline - reserve
@@ -258,6 +276,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         return directory, report
 
     active, waiting, starts, planner, planning = {}, deque(), {}, None, None
+    sources, baseline_id, references = {}, None, set()  # controller code by node; search gate; AutoML nodes
 
     def update(**changes):
         nonlocal report
@@ -324,6 +343,37 @@ async def run(task_path: Path, options: Options, settings: Settings):
         delta = Delta(preparation_sha256=file_hash(directory / 'preparation.json'), metric=preparation.metric)
         save(directory / 'delta.json', delta)
 
+        def create(parent_id, purpose, hypothesis, source='qwen', seen=0):
+            start = Start(node_id=f'node_{len(starts):03d}', parent_id=parent_id, hypothesis=hypothesis, source=source,
+                preparation_sha256=delta.preparation_sha256,
+                context={'task': str(task_path), 'task_sha256': report.task_sha256, 'purpose': purpose,
+                    'delta_nodes': seen, 'extraction': '../../extraction.json',
+                    'extraction_sha256': file_hash(directory / 'extraction.json'),
+                    'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries'],
+                    'runtime_interface': 'fit_model_v1',
+                    'allowed_libraries': shared['allowed_libraries']},
+                outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
+                timeout_seconds=float(options.experiment_timeout))
+            node = directory / 'nodes' / start.node_id
+            node.mkdir(parents=True)
+            save(node / 'start.json', start)
+            starts[start.node_id] = start
+            waiting.append(start)
+            return start
+
+        if options.autopilot and preparation.metric.status == 'ready':
+            prepared = template(preparation.model_dump(mode='json'), CHILD['threads'])
+            if prepared:
+                start = create(None, 'baseline', Hypothesis.model_validate(prepared[1]), 'controller')
+                sources[start.node_id], baseline_id = prepared[0], start.node_id
+                # AutoML references run beside the LLM search; half the process limit leaves room for prediction checks.
+                # Small debug runs keep their node budget for the LLM search; AutoML needs at least 6 nodes.
+                for code, plan in automl(preparation.model_dump(mode='json'), CHILD['threads'],
+                                         .5 * options.experiment_timeout)[:max(0, min(3, options.max_nodes - 3))]:
+                    start = create(None, 'reference', Hypothesis.model_validate(plan), 'controller')
+                    sources[start.node_id] = code
+                    references.add(start.node_id)
+
         def checkpoint(warning=None):
             update(warnings=report.warnings + ([warning] if warning else []))
 
@@ -383,16 +433,20 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 for task in [*active, *([planner] if planner else [])]:
                     if not task.done():
                         task.cancel()
-            while waiting and len(active) < 2:
+            while waiting and len(active) < options.executors:
                 start = waiting.popleft()
                 context = {**shared, **({'parent': parent_view(start.parent_id)} if start.parent_id else {})}
                 local = JSONAgents(settings, deadline, IMPLEMENTATION_CALLS, shared=agents, node_id=start.node_id)
-                task = asyncio.create_task(experiment(directory / 'nodes' / start.node_id, start, context, local, deadline, checkpoint))
+                task = asyncio.create_task(experiment(directory / 'nodes' / start.node_id, start, context, local, deadline, checkpoint,
+                                                      code=sources.pop(start.node_id, None), blocking_review=not options.autopilot,
+                                                      repairable=start.node_id not in references,
+                                                      check_seconds=150 if start.node_id in references else 45))
                 active[task] = start
-            if (not expired and not planning_failed and planner is None and not waiting and len(active) < 2
-                    and len(starts) < options.max_nodes and len(delta.nodes) > blocked_version and (not starts or baseline_ready)):
+            if (not expired and not planning_failed and planner is None and (options.autopilot or len(active) < options.executors)
+                    and all(s.node_id in references for s in waiting)  # autopilot: one batch may queue behind running nodes
+                    and len(starts) < options.max_nodes and len(delta.nodes) > blocked_version and (baseline_id is None or baseline_ready)):
                 batch_version, stop_reason = len(delta.nodes), 'node_limit'
-                if starts:
+                if baseline_ready:
                     planning = agents.plan_next(planning_context, min(2, options.max_nodes - len(starts)), rejections=rejections)
                     planner = asyncio.create_task(anext(planning))
                 else:
@@ -407,10 +461,13 @@ async def run(task_path: Path, options: Options, settings: Settings):
             for task in sorted((t for t in done if t in active), key=lambda t: active[t].node_id):
                 start, finish = active.pop(task), task.result()
                 record(start, finish)
-                if start.node_id == 'node_000':
+                if start.node_id == baseline_id:
                     baseline_ready = finish.status == 'completed' and finish.evaluation_status != 'failed'
                     if baseline_ready:
                         update(checks=report.checks + ['working_baseline'])
+                    elif start.source == 'controller':  # fall back to the LLM baseline
+                        baseline_id = None
+                        update(warnings=report.warnings + ['Controller baseline failed; requesting an LLM baseline'])
                     else:
                         planning_failed = True
                         stop_reason = 'time_budget' if time.monotonic() >= deadline else 'baseline_failed'
@@ -418,24 +475,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
             if planner in done:
                 try:
                     result = planner.result()
-                    proposals = [(None, 'baseline', result)] if not starts else [(p.parent_id, p.purpose, p.hypothesis) for p in result]
+                    proposals = [(None, 'baseline', result)] if baseline_id is None else [(p.parent_id, p.purpose, p.hypothesis) for p in result]
                     if time.monotonic() < deadline:
                         for parent_id, purpose, hypothesis in proposals:
-                            start = Start(node_id=f'node_{len(starts):03d}', parent_id=parent_id, hypothesis=hypothesis,
-                                preparation_sha256=delta.preparation_sha256,
-                                context={'task': str(task_path), 'task_sha256': report.task_sha256, 'purpose': purpose,
-                                    'delta_nodes': len(snapshot['delta']['nodes']), 'extraction': '../../extraction.json',
-                                    'extraction_sha256': file_hash(directory / 'extraction.json'),
-                                    'preparation_code': '../../prepare.py', 'installed_libraries': shared['installed_libraries'],
-                                    'runtime_interface': 'fit_model_v1',
-                                    'allowed_libraries': shared['allowed_libraries']},
-                                outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
-                                timeout_seconds=float(options.experiment_timeout))
-                            node = directory / 'nodes' / start.node_id
-                            node.mkdir(parents=True)
-                            save(node / 'start.json', start)
-                            starts[start.node_id] = start
-                            waiting.append(start)
+                            start = create(parent_id, purpose, hypothesis, seen=len(snapshot['delta']['nodes']))
+                            baseline_id = baseline_id or start.node_id
                 except StopAsyncIteration:
                     planning = None
                 except (Exception, asyncio.CancelledError) as error:

@@ -4,10 +4,12 @@ import argparse
 import csv
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import time
 import tempfile
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -16,6 +18,10 @@ from threadpoolctl import threadpool_limits
 from .contracts import Finalization, Finish, Preparation, Start
 from .data import file_hash, input_hashes, module, profile, within
 from .storage import atomic_bytes, load, save
+
+# Two executors share the platform's 8 CPUs; the controller passes these through the child environment.
+THREADS = int(os.environ.get('ALFA_THREADS', '2'))
+SHIFT_CHECK = os.environ.get('ALFA_SHIFT_CHECK') == '1'
 
 
 def validate_submission(path: Path, output, expected_rows: int):
@@ -35,6 +41,105 @@ def validate_submission(path: Path, output, expected_rows: int):
             count += 1
         if count != expected_rows:
             raise ValueError(f'Submission row count {count} differs from test row count {expected_rows}')
+
+
+def ordinal(series):
+    """Numeric or parseable date values; None for other columns."""
+    if pd.api.types.is_bool_dtype(series):
+        return None
+    if pd.api.types.is_numeric_dtype(series):
+        return series.astype(float)
+    if not (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+        return None
+    present = series.dropna().astype(str)
+    if not len(present) or present.str.fullmatch(r'[\d\s:/.T+-]{6,}').mean() < .95:
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        parsed = pd.to_datetime(series, errors='coerce', format='mixed')
+    if parsed.notna().sum() < .95 * len(present):
+        return None
+    return pd.Series(parsed.to_numpy().astype('datetime64[ns]').astype(np.int64), index=series.index).where(parsed.notna()).astype(float)
+
+
+def adversarial(train, test, columns):
+    """Out-of-fold probability that a train row looks like test; AUC near 0.5 means no measurable shift."""
+    import lightgbm
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import StratifiedKFold
+    frame = pd.concat([train[columns], test[columns]], ignore_index=True)
+    for column in columns:
+        values = ordinal(frame[column])
+        frame[column] = values if values is not None else frame[column].astype(str).astype('category').cat.codes
+    labels = np.r_[np.zeros(len(train)), np.ones(len(test))]
+    probability, gains = np.zeros(len(frame)), np.zeros(len(columns))
+    for fit, valid in StratifiedKFold(3, shuffle=True, random_state=0).split(frame, labels):
+        model = lightgbm.LGBMClassifier(n_estimators=100, learning_rate=.1, subsample=.8, subsample_freq=1,
+                                        colsample_bytree=.8, importance_type='gain', n_jobs=THREADS, verbose=-1)
+        model.fit(frame.iloc[fit], labels[fit])
+        probability[valid] = model.predict_proba(frame.iloc[valid])[:, 1]
+        gains += model.feature_importances_
+    top = [columns[i] for i in np.argsort(-gains)[:5]]
+    return float(roc_auc_score(labels, probability)), probability[:len(train)], top
+
+
+def shift_split(train, test, data, validation, fit, valid):
+    """Measure train/test shift; make validation resemble test when the generated split clearly does not.
+
+    A test period strictly after all train values requires a temporal holdout. Otherwise strong covariate
+    shift (adversarial AUC >= 0.8) selects the most test-like train rows, unless a group/time split was chosen.
+    """
+    excluded = set(data.target_columns) | set(data.id_columns)
+    columns = [c for c in test.columns if c in train.columns and c not in excluded]
+    report, temporal = {}, []
+    for column in columns:
+        before, after = ordinal(train[column]), ordinal(test[column])
+        if before is None or after is None or before.nunique() < 2 or not after.notna().any():
+            continue
+        # Period codes and timestamps are whole numbers; an out-of-range continuous feature is covariate shift.
+        whole = np.all(np.mod(before.dropna().to_numpy(), 1) == 0) and np.all(np.mod(after.dropna().to_numpy(), 1) == 0)
+        if whole and after.min() > before.max():
+            temporal.append((before.nunique(), column, before))
+    if temporal:
+        _, column, values = max(temporal, key=lambda item: item[0])
+        report.update(temporal_column=column, train_range=[float(values.min()), float(values.max())],
+                      test_range=[float(ordinal(test[column]).min()), float(ordinal(test[column]).max())])
+        if not values.iloc[fit].max() <= values.iloc[valid].min():
+            positions = np.flatnonzero(values.notna().to_numpy())
+            threshold = np.quantile(values.iloc[positions], .8, method='higher')
+            later = values.iloc[positions].to_numpy() >= threshold
+            fit, valid = positions[~later], positions[later]
+            report.update(override='temporal_holdout', reason=f'All test values of {column} are later than train; '
+                          f'validation is the latest train period(s) {column} >= {threshold:g}.')
+        return fit, valid, report
+    try:
+        auc, probability, top = adversarial(train, test, columns)
+    except Exception as error:  # Diagnostics must not block a task the generated split already supports.
+        return fit, valid, {'adversarial_error': f'{type(error).__name__}: {error}'[:300]}
+    report.update(adversarial_auc=round(auc, 4), shifted_features=top)
+    described = json.dumps(validation, default=str).casefold()
+    if auc >= .8 and not any(word in described for word in ('group', 'time', 'temporal', 'date', 'chrono', 'order')):
+        later = np.zeros(len(train), bool)
+        later[np.argsort(-probability, kind='stable')[:max(1, round(.2 * len(train)))]] = True
+        fit, valid = np.flatnonzero(~later), np.flatnonzero(later)
+        report.update(override='adversarial_holdout', reason='Train and test differ strongly; validation is the '
+                      '20% of train rows a classifier finds most test-like.')
+    return fit, valid, report
+
+
+def target_summary(train, targets):
+    result = {}
+    for column in targets:
+        series = train[column]
+        summary = {'distinct': int(series.nunique()), 'missing': int(series.isna().sum())}
+        if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+            values = series.dropna().astype(float)
+            summary.update(mean=float(values.mean()), std=float(values.std()), skew=float(values.skew()),
+                           quantiles={str(q): float(values.quantile(q)) for q in (0, .01, .25, .5, .75, .99, 1)})
+        if summary['distinct'] <= 50:
+            summary['counts'] = {str(k): int(v) for k, v in series.value_counts().items()}
+        result[column] = json.loads(json.dumps(summary).replace('NaN', 'null'))
+    return result
 
 
 def prepare(directory: Path):
@@ -57,14 +162,21 @@ def prepare(directory: Path):
             raise ValueError('Split contains duplicate or out-of-range rows')
     if np.intersect1d(fit, valid).size:
         raise ValueError('Fit and validation rows overlap')
+    issues, shift = [], {}
+    if SHIFT_CHECK and preparation.prediction_scope == 'row':
+        fit, valid, shift = shift_split(train, test, preparation.data, preparation.validation, fit, valid)
+        if shift.get('override'):
+            issues.append('Validation split replaced: ' + shift['reason'])
+        measured['target'] = target_summary(train, preparation.data.target_columns)
     buffer = io.BytesIO()
     np.savez(buffer, fit=fit.astype(np.int64), valid=valid.astype(np.int64))
     atomic_bytes(directory / 'split.npz', buffer.getvalue())
     validation = {**preparation.validation, 'split_file': 'split.npz', 'fit_rows': len(fit),
-                  'validation_rows': len(valid), 'split_sha256': file_hash(directory / 'split.npz')}
+                  'validation_rows': len(valid), 'split_sha256': file_hash(directory / 'split.npz'),
+                  **({'shift': shift} if shift else {})}
     metric_ready = preparation.metric.status == 'ready' and callable(getattr(reader, 'score', None))
     metric = preparation.metric.model_copy(update={'status': 'ready' if metric_ready else 'needs_implementation'})
-    issues = [] if metric_ready else ['Metric implementation is unavailable; predictions can still be generated']
+    issues += [] if metric_ready else ['Metric implementation is unavailable; predictions can still be generated']
     prepared = preparation.model_copy(update={'status': 'ready' if metric_ready else 'partial',
         'profile': measured, 'source_hashes': hashes, 'validation': validation, 'metric': metric, 'issues': issues})
     save(path, prepared)
@@ -122,6 +234,11 @@ def diagnostics(reference, predictions, preparation):
     return {}
 
 
+def with_scorer(config, reader, preparation):
+    """In-process callable for inner-split selection inside fit_model; it never sees outer validation rows."""
+    return {**config, 'scorer': reader.score} if preparation.metric.status == 'ready' else config
+
+
 def predict(preparation: Preparation, root: Path, fit_model, *, small=False):
     source = Path(preparation.task_directory)
     if input_hashes(source, preparation.data.files) != preparation.source_hashes:
@@ -142,8 +259,8 @@ def predict(preparation: Preparation, root: Path, fit_model, *, small=False):
         test = tables['test']
     reference = train.iloc[valid].reset_index(drop=True)
     validation_input = reference.drop(columns=preparation.data.target_columns)
-    with threadpool_limits(limits=2):
-        predictor = fit_model(train.iloc[fit].copy(), config)
+    with threadpool_limits(limits=THREADS):
+        predictor = fit_model(train.iloc[fit].copy(), with_scorer(config, reader, preparation))
         if not callable(predictor):
             raise ValueError('fit_model must return a fitted callable: predict(features) -> DataFrame')
         valid_predictions = prediction_frame(predictor, validation_input.copy())
@@ -240,8 +357,8 @@ def refit(start_path: Path):
         tables = reader.load_data(source, config)
         train, test = tables['train'], tables['test']
         config['runtime'] = {'stage': 'final_refit', 'fit_rows': len(train)}
-        with threadpool_limits(limits=2):
-            predictor = program.fit_model(train.copy(), config)
+        with threadpool_limits(limits=THREADS):
+            predictor = program.fit_model(train.copy(), with_scorer(config, reader, preparation))
             predictions = prediction_frame(predictor, test.copy())
             if preparation.prediction_scope == 'row':
                 check_predictor(predictor, test, predictions)
