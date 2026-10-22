@@ -903,6 +903,7 @@ from openai import AsyncOpenAI
 assert importlib.util.find_spec('alfa_agent') is None
 answers=json.loads(Path('mock_answers.json').read_text())
 def handler(request):
+    assert str(request.url)=='http://llm-proxy:8080/v1/chat/completions'
     body=json.loads(request.content)
     assert body['model']=='qwen/qwen3.8-27b'
     title=json.loads(body['messages'][0]['content'].split('Schema: ',1)[1])['title']
@@ -932,7 +933,7 @@ with patch('alfa_agents.AsyncOpenAI',side_effect=client):
     runpy.run_path('solution.py',run_name='__main__')
 '''
             env = {'PATH': os.defpath, 'PYTHONPATH': '', 'PYTHONDONTWRITEBYTECODE': '1',
-                   'OPENAI_API_KEY': 'fake-secret', 'OPENAI_BASE_URL': 'https://qwen.example/v1',
+                   'OPENAI_API_KEY': 'fake-secret', 'OPENAI_BASE_URL': 'http://llm-proxy:8080/v1',
                    'OMP_NUM_THREADS': '2', 'OPENBLAS_NUM_THREADS': '2', 'MKL_NUM_THREADS': '2'}
             result = subprocess.run([sys.executable, '-c', driver], cwd=root, env=env, capture_output=True, text=True, timeout=90)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

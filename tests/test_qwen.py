@@ -44,9 +44,16 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(settings.model, 'qwen/qwen3.8-27b')
             self.assertEqual(settings.timeout_seconds, 300)
 
-    def test_plain_http_credentials_and_query_are_rejected(self):
-        for url in ["http://remote.example/v1", "https://user:secret@qwen.example/v1",
-                    "https://qwen.example/v1?token=secret", "not-a-url"]:
+    def test_platform_http_and_https_proxies_are_accepted(self):
+        for url in ["http://llm-proxy:8080/v1", "http://10.0.0.2:8000/v1/",
+                    "http://[fd00::1]:8080/v1", "http://remote.example/v1", "https://qwen.example/v1"]:
+            with self.subTest(url=url):
+                Settings("test-secret", url, "qwen-model").validate()
+
+    def test_invalid_urls_credentials_and_query_are_rejected(self):
+        for url in ["ftp://remote.example/v1", "https://user:secret@qwen.example/v1",
+                    "https://qwen.example/v1?token=secret", "https://qwen.example/v1#fragment",
+                    "http://proxy:invalid/v1", "http://proxy:99999/v1", "http:///v1", "not-a-url"]:
             with self.subTest(url=url), self.assertRaises(ConfigurationError):
                 Settings("test-secret", url, "qwen-model").validate()
 
