@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import random
 import re
 from pathlib import Path
 import time
@@ -147,11 +148,12 @@ class JSONAgents:
                     suffix += ' / ' + type(error.__cause__).__name__
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
                 if status == 429 and self.deadline - time.monotonic() > 30:
-                    # Rate limiting is temporary server load; waiting does not spend the request budget.
+                    # A shared server may refuse while its owner has priority: wait while the run budget allows,
+                    # without spending the request budget.
                     self.requests -= 1
                     self.budget['requests'] -= 1
-                    await asyncio.sleep(min(15 * attempt, 60, max(0., self.deadline - time.monotonic() - 30)))
-                    attempts += attempt < 12
+                    await asyncio.sleep(min(10 * attempt + random.uniform(0, 10), 60, max(0., self.deadline - time.monotonic() - 30)))
+                    attempts += 1
                     continue
                 if attempt < attempts and (status is None or status >= 500):
                     await asyncio.sleep(min(2 ** attempt, 4, max(0., self.deadline - time.monotonic())))
