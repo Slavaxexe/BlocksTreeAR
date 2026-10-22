@@ -225,7 +225,9 @@ def fit_model(fit, preparation):
         from lightautoml.automl.presets.tabular_presets import TabularAutoML
         from lightautoml.tasks import Task
         kind = 'reg' if TASK == 'regression' else 'binary' if len(classes) == 2 else 'multiclass'
+        # Boosting only: LightAutoML's linear model indexes past its embedding table on unseen categories.
         model = TabularAutoML(task=Task(kind), timeout=limit, cpu_limit=THREADS,
+                              general_params={{'use_algos': [['lgb', 'lgb_tuned', 'cb_tuned']]}},
                               reader_params={{'n_jobs': THREADS, 'cv': 5, 'random_state': 0}})
         ids = [c for c in preparation['data'].get('id_columns') or [] if c in fit]
         if TASK == 'classification':  # stratified 5-fold CV needs at least five rows per class
