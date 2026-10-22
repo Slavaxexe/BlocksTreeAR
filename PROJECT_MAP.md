@@ -16,10 +16,10 @@ AlfaHakaton/
 │   ├── qwen.py              Текстовые диагностические вызовы API
 │   ├── contracts.py         Контракты фактов, подготовки, start / finish, review, delta и report
 │   ├── agents.py            Роли Qwen, компактное ревью, контексты, память ошибок / времени, гипотезы
-│   ├── autopilot.py         Шаблон GBDT-baseline контроллера: loss / веса по scorer, множители классов
+│   ├── autopilot.py         GBDT-baseline контроллера и AutoML-ноды (AutoGluon / LightAutoML / FLAML)
 │   ├── data.py              Инвентаризация, профиль, хеши, разрешённые библиотеки / версии, проверка кода
 │   ├── runner.py            Два исполнителя, guard повторов, replan, delta / лидер, резерв refit
-│   ├── worker.py            Подготовка, shift-проверка split, fitted predictor / проверки, scorer, refit
+│   ├── worker.py            Подготовка, shift-проверка split, predictor / проверки, scorer, refit, бленд
 │   └── storage.py           Атомарная запись, сериализация и загрузка контрактов
 ├── tests/
 │   ├── test_extraction.py   Источники / схемы, параллельность, свободные имена / метрики / форматы
@@ -56,7 +56,8 @@ AlfaHakaton/
 
 Генерируемый Python хранится внутри запуска. Это не новые исходные модули проекта.
 Autopilot (по умолчанию в CLI / `solution.py`): временной / adversarial split при измеренном
-сдвиге, `node_000` от контроллера без LLM, Reviewer нод выключен, 4 потока на исполнителя.
+сдвиге, `node_000` и AutoML-ноды от контроллера без LLM, Reviewer нод выключен, финальный бленд.
+`--executors` / `--threads` задают параллельность (по умолчанию 2 × 4 для 8 CPU платформы).
 Сборщик экспортирует пакет в корневые `alfa_*.py`, включая `alfa_cli.py` вместо
 `__main__.py`; `solution.py` и subprocess используют эти плоские модули.
 В ZIP нет каталогов. `requirements.txt` копируется без изменений из vendor;
