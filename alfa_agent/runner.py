@@ -79,6 +79,7 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
         raise TimeoutError('Run time budget exhausted')
     # No inherited credentials. This is a bounded process, not an OS sandbox.
     env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
+           **{name: os.environ[name] for name in ('TMPDIR',) if name in os.environ},  # AutoML model workspaces
            'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1',
            'ALFA_THREADS': str(CHILD['threads']), 'ALFA_SHIFT_CHECK': '1' if CHILD['shift_check'] else '0',
            **{name: str(CHILD['threads']) for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS')}}
