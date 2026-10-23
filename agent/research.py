@@ -2,15 +2,16 @@
 
 import asyncio
 import json
-import re
 import time
 import traceback
 
 from .agents import JSONAgents
 from .contracts import ResearchPlan, ResearchReview
-from .context import research_profile_view
-from .data import check_code, file_hash
-from .storage import atomic_bytes, fingerprint, save
+from .context import (compact, research_history, research_profile_view, select_research,
+                      table, task_context)
+from .data import file_hash
+from .storage import fingerprint, save
+from .eda import CATALOG
 
 
 RESEARCH_RULES = (
@@ -24,12 +25,6 @@ RESEARCH_RULES = (
 )
 
 
-def question_key(phase, question):
-    # Preserve numeric thresholds and comparison operators when normalizing prose.
-    normalized = ' '.join(re.findall(r'\w+(?:\.\w+)*|!=|[<>=+*/%\-]+', question.casefold()))
-    return fingerprint({'phase': phase, 'question': normalized})
-
-
 class Research:
     def __init__(self, agents, directory, options, shared, process, notify, refresh):
         self.agents, self.directory, self.options = agents, directory, options
@@ -41,7 +36,6 @@ class Research:
         self.stop_reason = None
         # Research shares the global API budget and reserves most calls for model search.
         self.call_limit = min(24, max(0, (options.max_llm_calls - 8) // 3))
-        self.used = set()
         self.persist()
 
     @property
@@ -76,7 +70,7 @@ class Research:
             reserved = sum(self.clients[row['node_id']].max_calls - self.clients[row['node_id']].requests
                            for row in self.active.values())
             allowance = min(6, self.call_limit - spent - reserved)
-            # A question/program and its review each need an API call. Preserve model-search headroom.
+            # A structured analysis plan and its review each need an API call. Preserve model-search headroom.
             if allowance < 2 or self.agents.remaining_calls < reserved + allowance + 4:
                 if not self.active:
                     self.stop_reason = 'llm_limit'
@@ -109,108 +103,81 @@ class Research:
         started = time.monotonic()
         node = self.directory / 'research' / 'nodes' / row['node_id']
         node.mkdir(parents=True, exist_ok=True)
-        context = {**self.shared, 'phase': row['phase'], 'node_id': row['node_id'],
+        context = {**task_context(self.shared, profile=False), 'phase': row['phase'], 'node_id': row['node_id'],
                    'model_feedback': self.model_feedback,
+                   'data_research': select_research(self.view(), [row['focus'], self.model_feedback]),
                    'profile': research_profile_view(json.loads((self.directory / 'research' / 'profile.json').read_text(encoding='utf-8'))),
+                   'analysis_catalog': CATALOG,
+                   'history': research_history([item for item in self.nodes if item is not row]),
                    'target_access': {'fit': row['phase'] == 'fit', 'validation': False, 'test': False},
-                   'focus': row['focus'],
-                   'timeout_seconds': self.options.research_timeout}
-        previous, error = None, None
-        own_questions = set()
+                   'focus': row['focus'], 'timeout_seconds': self.options.research_timeout}
+        context.pop('installed_libraries', None)  # AnalysisRequest already enumerates its ready estimators.
+        context = compact(context)
         try:
-            for attempt in range(1, min(3, self.options.max_code_attempts) + 1):
-                # Other researchers may have finished while this node was being repaired.
-                context['data_research'] = self.view()
-                context['history'] = [{**{k: item[k] for k in ('node_id', 'phase', 'stage', 'question', 'method')
-                                         if k in item}, 'outcome': item.get('review', {}).get('outcome')}
-                                      for item in self.nodes if item is not row]
-                context['pending'] = [{k: item[k] for k in ('node_id', 'focus', 'question', 'method') if k in item}
-                                      for item in self.active.values() if item is not row]
-                request = {**context, 'previous_code': previous, 'execution_error': error}
-                save(node / 'attempts' / f'{attempt:02d}' / 'request.json', request)
-                plan = await client.ask(ResearchPlan, RESEARCH_RULES +
-                    'Propose ONE specific question and falsifiable hypothesis, plus a short Python module run(state). '
-                    'Explain which decision the answer changes. Use previous research; avoid duplicate or pending questions. '
-                    'A different expected answer or reworded hypothesis does not make the same measurement new. '
-                    'Compare population, columns, statistic and comparison with history and pending work. '
-                    'Use already measured facts by their research IDs instead of recomputing them. '
-                    'For a follow-up, name its parent and explain in method exactly which missing population, '
-                    'statistic or comparison is new and why existing measurements cannot answer the question. '
-                    'A new name, opposite prediction or changed conclusion alone is not a new investigation. '
-                    'parent_id may reference a completed research node, or be null for an independent question. '
-                    'state contains fit, validation, test, preparation, auxiliary and profile. '
-                    'Use only supplied tables and installed libraries. No file access, printing, network, '
-                    'subprocesses, installs, pretrained models or expensive model search. '
-                    'Return a small dict of named measurements using native JSON values; avoid raw rows. '
-                    'State question, hypothesis, method and decision briefly, one concrete point each. '
-                    'Repair the same question after code errors; choose a new question if it is already tested. '
-                    'Do not replace an unavailable measurement with a different statistic and call it equivalent.\n' +
-                    json.dumps(request, ensure_ascii=False, separators=(',', ':')), 'data_researcher', code=True)
-                previous = plan.code
-                atomic_bytes(node / 'attempts' / f'{attempt:02d}' / 'probe.py', plan.code.encode('utf-8'))
-                try:
-                    check_code(plan.code, ('run',))
-                    parents = {r['node_id'] for r in self.nodes if r['stage'] == 'completed'}
-                    if plan.parent_id is not None and plan.parent_id not in parents:
-                        raise ValueError('Research parent must be a completed node')
-                    key = question_key(row['phase'], plan.question)
-                    if key in self.used and key not in own_questions:
-                        raise ValueError('This research question was already tested; choose a new question')
-                    self.used.add(key)
-                    own_questions.add(key)  # Code repairs may keep this node's own question.
-                    atomic_bytes(node / 'probe.py', plan.code.encode('utf-8'))
-                    start = {'node_id': row['node_id'], 'phase': row['phase'], 'context_revision': row['context_revision'],
-                             **plan.model_dump(exclude={'code'}), 'code_sha256': file_hash(node / 'probe.py'),
-                             'preparation_sha256': file_hash(self.directory / 'preparation.json')}
-                    save(node / 'start.json', start)
-                    row.update({k: start[k] for k in ('parent_id', 'question', 'hypothesis', 'method', 'decision')})
-                    self.stage(row, 'execution')
-                    await self.process(['-m', 'agent.research_worker', '--root', str(self.directory), '--node', str(node)],
-                                       node, node / 'attempts' / f'{attempt:02d}' / 'execution.log',
-                                       self.agents.deadline, self.options.research_timeout)
-                    measured = json.loads((node / 'measurements.json').read_text(encoding='utf-8'))
-                    if (measured['code_sha256'], measured['preparation_sha256']) != (start['code_sha256'], start['preparation_sha256']):
-                        raise ValueError('Measurements do not match the recorded research program')
-                    break
-                except (ValueError, TimeoutError) as problem:
-                    error = str(problem)[-4000:]
-                    save(node / 'attempts' / f'{attempt:02d}' / 'error.json', {'error': error})
-                    if attempt == min(3, self.options.max_code_attempts):
-                        raise
-                    self.stage(row, 'planning')
+            save(node / 'request.json', context)
+            plan = await client.ask(ResearchPlan, RESEARCH_RULES +
+                'Choose a specific decision-relevant question and invoke the supplied analysis catalog through analyses. '
+                'Return structured requests, NEVER Python code. Each request selects kind, input columns and parameters. '
+                'dataset selects fit/validation/test for descriptive checks. compare selects the second table ONLY for shift; '
+                'a name containing test does not select test. Label-dependent checks always use fit. '
+                'Use a few related checks instead of an exhaustive Cartesian search. Prefer existing measurements '
+                'over repeating them; a changed question does not make identical measurements new. '
+                'Use feature recipes to test proposed features, ablation to test removal, interactions for joint '
+                'signal missed by univariate tests, permutation for held-out importance, and stability for groups. '
+                'Use validation=auto for proxy models to respect the task time/group policy. '
+                'sample_rows/top_k control the computation and result size; set null when the full result is needed. '
+                'Proxy scores are internal fit-only evidence, never an experiment outer score or test score. '
+                'parent_id may reference a completed research node. Keep hypothesis, method and decision concise.\n' +
+                json.dumps(context, ensure_ascii=False, separators=(',', ':')), 'data_researcher')
+            parents = {item['node_id'] for item in self.nodes if item['stage'] == 'completed'}
+            if plan.parent_id is not None and plan.parent_id not in parents:
+                raise ValueError('Research parent must be a completed node')
+            start = {'node_id': row['node_id'], 'phase': row['phase'], 'context_revision': self.revision,
+                     **plan.model_dump(), 'task_type': self.shared.get('requirements', {}).get('problem', {}).get('task_type'),
+                     'preparation_sha256': file_hash(self.directory / 'preparation.json')}
+            start['analysis_sha256'] = fingerprint(start['analyses'])
+            save(node / 'start.json', start)
+            row.update({key: start[key] for key in ('parent_id', 'question', 'hypothesis', 'method', 'decision', 'analyses')})
+            self.stage(row, 'execution')
+            try:
+                await self.process(['-m', 'agent.research_worker', '--root', str(self.directory), '--node', str(node)],
+                                   node, node / 'execution.log', self.agents.deadline, self.options.research_timeout)
+            except TimeoutError:
+                if not (node / 'measurements.json').exists():
+                    raise
+            measured = json.loads((node / 'measurements.json').read_text(encoding='utf-8'))
+            if (measured['analysis_sha256'], measured['preparation_sha256']) != (start['analysis_sha256'], start['preparation_sha256']):
+                raise ValueError('Measurements do not match the saved requests/preparation')
             self.stage(row, 'review')
-            review_context = {'plan': start, 'code': plan.code, 'measurements': measured,
-                              'data_research': self.view()}
+            review_context = {'plan': {key: value for key, value in start.items()
+                                      if key not in {'analysis_sha256', 'preparation_sha256', 'context_revision'}},
+                              'measurements': table(measured),
+                              'data_research': select_research(self.view(), plan.model_dump(), limit=8)}
+            review_context['plan']['analyses'] = [request.model_dump(exclude_defaults=True, exclude_none=True)
+                                                  for request in plan.analyses]
             review = await client.ask(ResearchReview, RESEARCH_RULES +
-                'Evaluate the hypothesis using ONLY recorded measurements. Distinguish observation from interpretation. '
-                'Check that the executed code actually computes the claimed quantities from its inputs; '
-                'hardcoded claims are not measured facts about the data. '
-                'Check populations, units, denominators and input scope before interpreting comparisons. '
-                'If the required labels or quantities are unavailable, mark that claim inconclusive; '
-                'a proxy or a class-to-global comparison does not measure a class-to-class distribution shift. '
-                'Repetition and correlation alone do not prove a sentinel, a data error or a causal mechanism. '
-                'A failed univariate test or low outlier coverage does not establish absence of predictive '
-                'signal or class inseparability; interactions and other distributions remain untested. '
-                'Do not reverse conditional probabilities: a feature shared by all rows of one class '
-                'need not identify that class among all rows with the feature. State the measured scope only. '
-                'Every insight must cite exact top-level keys in measurements.values. Do not invent causes, '
-                'model scores or statistical significance. Return 1-2 short summary sentences and at most '
-                '3 genuinely new, decision-relevant insights; zero is valid for repeated or inconclusive work. '
-                'Use one concise statement and implication per insight. Do not repeat known facts or raw tables. '
-                'Give at most 3 short unresolved questions. Aim for about 450 characters in summary, '
-                '350 per statement, 250 per implication and 300 per open question. '
-                'These are brevity guidelines; preserve essential evidence and qualifications. '
-                'Use supersedes only for existing insight IDs contradicted or refined by this evidence; '
-                'use resolves to close previously open questions that these measurements answer.\n' +
+                'Interpret ONLY completed recorded measurements from the standard analysis catalog. '
+                'Failed/unavailable requests are not evidence. Respect rows, sampling, scope and metric direction. '
+                'A difference on one proxy holdout does not prove noise, causality, universal feature harm or safety of removal. '
+                'Do not infer a mechanism from a score change. An unmeasured ablation cannot be replaced by a correlation argument. '
+                'Proxy model improvements describe only the stated inner holdout and estimator; propose an '
+                'outer experiment before claiming better solution quality. Internal fit/validation must not '
+                'be confused with the experiment outer validation. Correlation, MI and shift do not prove causality. '
+                'A weak single feature may be useful jointly; marginal distributions do not establish class-conditional shift. '
+                'Return 1-2 concise summary sentences, up to 3 genuinely new insights with exact top-level '
+                'evidence_keys from measurements.values, and up to 3 unresolved questions. Zero insights is valid. '
+                'Mark interpretations explicitly. Do not rephrase cached/repeated findings as new discoveries. '
+                'Use supersedes/resolves only for existing IDs/questions.\n' +
                 json.dumps(review_context, ensure_ascii=False, separators=(',', ':')), 'data_reviewer',
-                validation={'measurements': measured['values'], 'insight_ids': [r['id'] for r in self.insights],
+                validation={'measurements': measured['values'], 'insight_ids': [item['id'] for item in self.insights],
                             'open_questions': self.questions})
             return {'status': 'completed', 'review': review.model_dump(), 'duration_seconds': time.monotonic() - started}
         except (Exception, asyncio.CancelledError) as problem:
             save(node / 'error.json', {'error': str(problem), 'traceback': traceback.format_exc()})
             return {'status': 'cancelled' if isinstance(problem, asyncio.CancelledError) else 'failed',
-                    'error': (str(problem) or 'Research cancelled').replace(self.agents.settings.api_key, '[REDACTED]')[-4000:],
+                    'error': (str(problem) or 'Research cancelled').replace(self.agents.settings.api_key, '[REDACTED]'),
                     'duration_seconds': time.monotonic() - started}
+
 
     def stage(self, row, stage):
         row['stage'] = stage

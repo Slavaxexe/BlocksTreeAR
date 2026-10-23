@@ -3,6 +3,8 @@
 from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
+from .plans import AutoMLPlan, AnalysisRequest, ToolCall, EnsemblePlan
+
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 NodeID = Annotated[str, Field(pattern=r"^node_[0-9]{3}$")]
 INITIAL_STATE = frozenset({'fit', 'validation', 'test', 'preparation', 'auxiliary'})
@@ -174,6 +176,7 @@ class Hypothesis(Contract):
 
 
 class Block(Contract):
+    operation: ToolCall | None = None
     name: str = Field(pattern=r'^[a-z][a-z0-9_]{0,63}$')
     source_node: NodeID | None = None
     description: str = Field(min_length=1, description='Behavior and exact input/output types, shapes, column conventions and object APIs')
@@ -228,6 +231,8 @@ class Idea(Contract):
     change: str = Field(min_length=1, description='One concrete change, including intended algorithm or parameters')
     change_blocks: list[str] = Field(default_factory=list, description='Existing or proposed block names to change')
     expected_effect: str = Field(min_length=1)
+    automl: AutoMLPlan | None = Field(default=None, description='Executable AutoML configuration; null for composed trusted operations')
+    ensemble: EnsemblePlan | None = Field(default=None, description='Combine completed prediction sources; compiled without a node-planner call')
     priority: int = Field(default=50, ge=0, le=100, description='Queue priority; higher runs first, not an expected score')
     research_ids: list[str] = Field(default_factory=list, description='IDs of only the research insights needed for this change; empty when unrelated')
 
@@ -276,6 +281,25 @@ class Ideas(Contract):
         if len(self.ideas) > context.get('max_new_ideas', len(context['purposes'])):
             raise ValueError('Too many new ideas for this request')
         for idea in self.ideas:
+            if idea.ensemble is not None:
+                if idea.purpose == 'baseline' or idea.automl is not None:
+                    raise ValueError('An ensemble is a separate non-baseline hypothesis')
+                sources = {item['node_id']: item for item in context.get('prediction_sources', [])}
+                if 'prediction_sources' in context:
+                    if not set(idea.ensemble.source_nodes) <= sources.keys():
+                        raise ValueError('Select completed sources from prediction_sources')
+                    selected = [sources[node] for node in idea.ensemble.source_nodes]
+                    if idea.ensemble.method in {'stacking', 'gating'} and not all(item['oof_recipe'] for item in selected):
+                        raise ValueError('Learned ensembles need trainable source recipes for fit-only OOF')
+                    if (idea.ensemble.method == 'probabilities' or idea.ensemble.combine == 'probabilities') and not all(
+                            item['probabilities'] for item in selected):
+                        raise ValueError('These sources have no saved probabilities; use vote/mean')
+            if idea.automl is not None:
+                if idea.purpose == 'baseline':
+                    raise ValueError('The initial baseline must remain a cheap predictor')
+                package = 'flaml' if idea.automl.engine == 'flaml' else 'autogluon.tabular'
+                if 'installed_libraries' in context and package not in context['installed_libraries']:
+                    raise ValueError(f'AutoML engine is not installed: {package}')
             if 'research_ids' in context and not set(idea.research_ids).issubset(context['research_ids']):
                 raise ValueError('Reference only supplied research insight IDs')
             if idea.purpose not in context['purposes']:
@@ -319,7 +343,8 @@ class Proposals(Contract):
                     if source is None:
                         raise ValueError(f'Unknown saved block: {block.source_node}/{block.name}')
                     if block.name not in proposal.assembly.write_blocks and block.model_dump(exclude={'source_node'}) != {
-                            k: source[k] for k in ('name', 'description', 'requires', 'provides')}:
+                            **{k: source[k] for k in ('name', 'description', 'requires', 'provides')},
+                            'operation': source.get('operation')}:
                         raise ValueError('Keep the declared interface of reused blocks unchanged')
         return self
 
@@ -338,6 +363,15 @@ class NodePlan(Contract):
     @model_validator(mode='before')
     @classmethod
     def legacy_hypothesis(cls, value):
+        if isinstance(value, dict):
+            written = []
+            for block in value.get('write', []):
+                if isinstance(block, dict) and block.get('operation'):
+                    call = ToolCall.model_validate(block['operation'])
+                    required, provided = call.interface()
+                    block = {**block, 'requires': required, 'provides': provided}
+                written.append(block)
+            value = {**value, 'write': written}
         if isinstance(value, dict) and 'hypothesis' in value and 'pipeline' not in value:
             hypothesis = value['hypothesis']
             pipeline = hypothesis.pipeline if isinstance(hypothesis, Hypothesis) else hypothesis['pipeline']
@@ -352,7 +386,8 @@ class NodePlan(Contract):
             if source is None:
                 raise ValueError(f'Unknown saved block: {reference.source_node}/{reference.name}')
             blocks[reference.name] = Block(source_node=reference.source_node,
-                **{key: source[key] for key in ('name', 'description', 'requires', 'provides')})
+                **{key: source[key] for key in ('name', 'description', 'requires', 'provides')},
+                operation=source.get('operation'))
         hypothesis = Hypothesis(rationale=idea.change, expected_effect=idea.expected_effect,
                                 pipeline=self.pipeline.configuration(), research_ids=idea.research_ids)
         return Proposal(purpose=idea.purpose, parent_id=idea.parent_id, hypothesis=hypothesis,
@@ -361,6 +396,18 @@ class NodePlan(Contract):
 
     @model_validator(mode='after')
     def assembled_plan(self, info: ValidationInfo):
+        if any(block.operation is None for block in self.write):
+            raise ValueError('Every written block must select a trusted operation; Python generation is disabled')
+        from .operations import CATALOG
+        for block in self.write:
+            call = block.operation
+            entry = CATALOG[call.kind]
+            required = {call.inputs.get(key, key) for key in entry['requires']}
+            if call.kind == 'ensemble':
+                required.update(key for pair in call.parameters.get('sources', []) for key in pair)
+            provided = {call.outputs.get(key, key) for key in entry['provides']}
+            if not required <= set(block.requires) or not provided <= set(block.provides):
+                raise ValueError(f'{block.name}: interface must include the operation inputs/outputs after aliases')
         names = [block.name for block in self.write] + [block.name for block in self.reuse]
         if len(names) != len(set(names)) or len(self.order) != len(set(self.order)) or set(names) != set(self.order):
             raise ValueError('order must contain every written or reused block exactly once')
@@ -402,7 +449,14 @@ class ResearchPlan(Contract):
     hypothesis: str = Field(min_length=1)
     method: str = Field(min_length=1)
     decision: str = Field(min_length=1)
-    code: str = Field(min_length=1, description='Complete Python module: run(state) -> dict of measurements')
+    analyses: list[AnalysisRequest] = Field(min_length=1, description='Executable feature-analysis requests; no generated Python')
+
+    @model_validator(mode='after')
+    def unique_requests(self):
+        names = [item.name for item in self.analyses]
+        if len(names) != len(set(names)):
+            raise ValueError('Analysis result names must be unique')
+        return self
 
 
 class DataInsight(Contract):
@@ -427,6 +481,10 @@ class ResearchReview(Contract):
             for insight in self.insights:
                 if not set(insight.evidence_keys).issubset(context['measurements']):
                     raise ValueError('Insight evidence must name measured output keys')
+                if any(isinstance(context['measurements'][key], dict) and
+                       context['measurements'][key].get('status') in {'failed', 'unavailable'}
+                       for key in insight.evidence_keys):
+                    raise ValueError('Failed or unavailable measurements cannot support an insight')
         if 'insight_ids' in context and not set(self.supersedes).issubset(context['insight_ids']):
             raise ValueError('Only existing insights can be superseded')
         if self.supersedes and not self.insights:
@@ -439,7 +497,7 @@ class Start(Contract):
     schema_version: Literal[4, 5] = 5
     node_id: NodeID = "node_000"
     parent_id: NodeID | None = None
-    source: Literal["qwen"] = "qwen"
+    source: Literal["qwen", "builtin"] = "qwen"
     preparation: str = "../../preparation.json"
     preparation_sha256: SHA256
     context: dict[str, Any] = Field(default_factory=dict)
@@ -545,6 +603,8 @@ class RunReport(Contract):
     analyzing_nodes: list[NodeID] = Field(default_factory=list)
     planning: bool = False
     max_parallel_nodes: int = 6
+    search_parallel_limit: int = 6
+    api_budget: dict[str, Any] = Field(default_factory=dict)
     max_parallel_agents: int = 8
     active_agents: list[dict[str, Any]] = Field(default_factory=list)
     node_states: dict[str, dict[str, Any]] = Field(default_factory=dict)

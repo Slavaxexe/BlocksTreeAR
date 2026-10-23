@@ -2,13 +2,16 @@
 
 import asyncio
 from collections import Counter, deque
+import json
 import time
 import traceback
 
 from .agents import JSONAgents, plan_key
 from .assembly import block_catalog
-from .context import catalog_view, idea_history_view
-from .contracts import Idea, Ideas
+from .context import (catalog_view, compact, experiment_index, idea_history_view,
+                      operation_view, select_experiments)
+from .contracts import Assembly, Block, Hypothesis, Idea, Ideas, Pipeline, Proposal
+from .plans import AutoMLPlan, ToolCall
 from .qwen import QwenTemporaryError
 from .storage import fingerprint, save
 
@@ -27,8 +30,85 @@ class Search:
         self.baker_research_revision = 0
         self.baker_feedback = None
         self.occupied = {}
+        self.parallel_limit = min(3, options.parallel)
+        self.budget_wait = None
+        self.automl_seeded = False
+        self.prediction_cache = {}
         explore = int(options.parallel > 1)
         self.caps = {'improve': options.parallel - explore, 'explore': explore}
+
+    def seed_automl(self):
+        """Queue the fixed portfolio once, after a working initial predictor exists."""
+        self.automl_seeded = True
+        if not self.options.automl:
+            return
+        preparation = self.shared['preparation']
+        requirements = self.shared['requirements']
+        problem = requirements.get('problem', {})
+        task = str(problem.get('task_type') or '').lower()
+        metric = str(preparation['metric'].get('name') or '').lower().replace('-', '_').replace(' ', '_')
+        validation = preparation.get('validation', {})
+        split_description = ' '.join(str(validation.get(key) or '') for key in
+                                     ('strategy', 'method', 'scheme', 'split_type')).lower()
+        if (len(preparation['data']['target_columns']) != 1
+                or not any(kind in task for kind in ('regression', 'classification', 'binary', 'multiclass'))
+                or any(kind in task for kind in ('multioutput', 'multilabel', 'forecast', 'rank'))
+                or validation.get('group_columns')
+                or validation.get('time_column') or validation.get('time_columns')
+                or any(kind in split_description for kind in ('temporal', 'time_series', 'chronological', 'time_based', 'group', 'time'))
+                or metric not in {'rmse', 'root_mean_squared_error', 'mae', 'mean_absolute_error',
+                                  'mse', 'mean_squared_error', 'r2', 'r2_score', 'accuracy', 'accuracy_score',
+                                  'roc_auc', 'auc', 'log_loss', 'logloss', 'f1', 'f1_macro', 'macro_f1'}):
+            return
+        libraries = self.shared['installed_libraries']
+        engines = [engine for engine, package in (('flaml', 'flaml'), ('autogluon', 'autogluon.tabular'))
+                   if package in libraries]
+        remaining = self.options.max_experiments - self.next_node
+        for engine in engines[:remaining]:
+            idea = Idea(purpose='improve', parent_id=self.leader,
+                        change=f'Built-in {engine} fit-only AutoML portfolio',
+                        change_blocks=[f'builtin_{engine}'], priority=100,
+                        expected_effect='Compare an automatically selected tabular model on the fixed outer split')
+            record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(),
+                      'status': 'queued', 'builtin_engine': engine, 'research_revision': 0}
+            self.records.append(record)
+            self.queue.append(record)
+            self.used_ideas[fingerprint(idea.model_dump(exclude={'expected_effect'}))] = record['id']
+
+        self.save()
+
+    async def builtin_plan(self, idea, engine):
+        name = f'builtin_{engine}'
+        plan = idea.automl or AutoMLPlan(engine=engine)
+        problem = self.shared['requirements']['problem']
+        output = self.shared['requirements']['output']
+        return Proposal(purpose=idea.purpose, parent_id=idea.parent_id,
+            hypothesis=Hypothesis(rationale=idea.change, expected_effect=idea.expected_effect, research_ids=idea.research_ids,
+                pipeline=Pipeline(data={'source': 'prepared fit only'},
+                    preprocessing={'owner': engine, 'fit_only': True},
+                    model={'name': 'FLAML AutoML' if engine == 'flaml' else 'AutoGluon Tabular',
+                           'engine': engine, 'task_type': problem.get('task_type'),
+                           'prediction_type': output.get('prediction_type'),
+                           'class_labels': problem.get('class_labels', [])},
+                    training={'builtin_adapter': True, 'automl': plan.model_dump(), 'internal_validation': 'fit only', 'cpu_limit': 1})),
+            assembly=Assembly(blocks=[Block(name=name, operation=ToolCall(kind='automl', parameters=plan.model_dump()),
+                description=f'Built-in {engine}: fit-only AutoML and prediction DataFrames in fixed row order',
+                requires=['fit', 'validation', 'test', 'preparation', 'auxiliary'],
+                provides=['validation_predictions', 'test_predictions'])], write_blocks=[name]))
+
+    async def ensemble_plan(self, idea):
+        plan = idea.ensemble
+        return Proposal(purpose=idea.purpose, parent_id=idea.parent_id,
+            hypothesis=Hypothesis(rationale=idea.change, expected_effect=idea.expected_effect,
+                research_ids=idea.research_ids,
+                pipeline=Pipeline(data={'prediction_sources': plan.source_nodes},
+                    preprocessing={'owner': 'saved_ensemble'},
+                    model={'name': plan.method + ' ensemble', 'sources': plan.source_nodes},
+                    training={'ensemble': plan.model_dump(), 'fit_scope': 'OOF inside fit for learned methods'})),
+            assembly=Assembly(blocks=[Block(name='combine', description='Combine completed sources: ' + ', '.join(plan.source_nodes),
+                operation=ToolCall(kind='saved_ensemble', parameters=plan.model_dump()),
+                requires=['fit', 'validation', 'test', 'preparation', 'auxiliary'],
+                provides=['validation_predictions', 'test_predictions'])], write_blocks=['combine']))
 
     @property
     def tasks(self):
@@ -37,7 +117,29 @@ class Search:
     def report(self):
         return {'planning': self.baker is not None,
                 'planning_nodes': [record['node_id'] for record in self.planners.values()],
-                'queued_ideas': self.queued_view()}
+                'queued_ideas': self.queued_view(), 'search_parallel_limit': self.parallel_limit}
+
+    def estimate_calls(self, blocks, *, planning=True):
+        per_block = 1  # Reserve a configuration repair per block; initial source is compiled locally.
+        # Include a repair margin; measured calls include tool continuations and JSON retries.
+        return (3 if planning else 0) + per_block * blocks + 2
+
+    def complete(self, start):
+        self.agents.release_calls(start.node_id)
+
+    def wait_for_budget(self, calls):
+        state = (calls, self.agents.free_calls)
+        if state != self.budget_wait:
+            self.agents.log('node_budget_wait', needed_calls=calls, free_calls=self.agents.free_calls,
+                            reservations=dict(self.agents.root.call_reservations))
+            self.budget_wait = state
+        self.stop_reason = 'llm_limit'
+
+    def slot_limits(self):
+        if self.parallel_limit == self.options.parallel:
+            return self.caps
+        explore = min(1, self.caps['explore'])
+        return {'improve': self.parallel_limit - explore, 'explore': explore}
 
     def queued_view(self):
         return [{'id': record['id'], **record['idea']} for record in
@@ -63,31 +165,50 @@ class Search:
         else:
             self.leader = self.parents[-1] if self.parents else None
         self.catalog = block_catalog(self.directory, rows)
+        baseline = next((row for row in eligible if row.node_id == 'node_000'), None)
+        leader = next((row for row in eligible if row.node_id == self.leader), None)
+        if baseline and leader and delta.metric.direction:
+            better = (leader.result.value < baseline.result.value if delta.metric.direction == 'minimize'
+                      else leader.result.value > baseline.result.value)
+            if better and self.parallel_limit < self.options.parallel:
+                self.parallel_limit = self.options.parallel
+                self.agents.log('search_parallel_expanded', limit=self.parallel_limit, leader=self.leader)
+
+        if self.parents and not self.automl_seeded:
+            self.seed_automl()
 
         # A new leader invalidates queued improvements, but never interrupts work already started.
         for record in list(self.queue):
-            stale_parent = record['idea']['purpose'] == 'improve' and record['idea']['parent_id'] != self.leader
+            stale_parent = (not record.get('builtin_engine') and record['idea']['purpose'] == 'improve'
+                            and record['idea']['parent_id'] != self.leader)
             if stale_parent:
                 record['status'] = 'superseded'
                 self.queue.remove(record)
                 self.agents.log('idea_superseded', idea_id=record['id'], leader_id=self.leader)
                 self.save()
-        self.request_ideas()
         self.dispatch(running)
+        self.request_ideas()
 
     def dispatch(self, running):
         occupied = [start.purpose for start in running] + [record['idea']['purpose'] for record in self.planners.values()]
-        while (self.queue and len(occupied) < self.options.parallel
+        caps = self.slot_limits()
+        while (self.queue and len(occupied) < self.parallel_limit
                and self.next_node < self.options.max_experiments and self.agents.remaining_calls >= 2):
             record = max((record for record in self.queue
                 if record['idea']['purpose'] == 'baseline'
-                or occupied.count(record['idea']['purpose']) < self.caps[record['idea']['purpose']]),
+                or occupied.count(record['idea']['purpose']) < caps[record['idea']['purpose']]),
                 key=lambda row: row['idea'].get('priority', 50), default=None)
             if record is None:
                 break
-            self.queue.remove(record)
             idea = Idea.model_validate(record['idea'])
+            blocks = max(1, len(idea.change_blocks))
+            calls = 2 if record.get('builtin_engine') or record.get('builtin_ensemble') else self.estimate_calls(blocks)
             node_id = f'node_{self.next_node:03d}'
+            if not self.agents.reserve_calls(node_id, calls):
+                self.wait_for_budget(calls)
+                break
+            self.budget_wait = None
+            self.queue.remove(record)
             self.next_node += 1
             record.update(status='planning', node_id=node_id)
             parent = next((row for row in self.rows if row.node_id == idea.parent_id), None)
@@ -103,8 +224,13 @@ class Search:
                 'experiment_timeout_seconds': self.options.experiment_timeout,
                 'idea': record['idea']}
             save(self.directory / 'planning' / node_id / 'idea.json', record)
-            client = JSONAgents(self.agents.settings, self.agents.deadline, 3, shared=self.agents, node_id=node_id)
-            task = asyncio.create_task(client.plan_node(context, idea, self.catalog))
+            if record.get('builtin_ensemble'):
+                task = asyncio.create_task(self.ensemble_plan(idea))
+            elif record.get('builtin_engine'):
+                task = asyncio.create_task(self.builtin_plan(idea, record['builtin_engine']))
+            else:
+                client = JSONAgents(self.agents.settings, self.agents.deadline, 3, shared=self.agents, node_id=node_id)
+                task = asyncio.create_task(client.plan_node(context, idea, self.catalog))
             self.planners[task] = record
             occupied.append(idea.purpose)
             self.agents.log('node_planning_started', node_id=node_id, idea_id=record['id'])
@@ -114,25 +240,31 @@ class Search:
     def idea_history(self, *, active_only=False):
         result = []
         experiments = {row.node_id for row in self.rows}
-        for record in self.records:
+        records = self.records
+        if not active_only:
+            active = [row for row in records if row['status'] in {'queued', 'planning', 'planned'}
+                      and row.get('node_id') not in experiments]
+            recent = [row for row in records if row['status'] in {'failed', 'rejected', 'superseded', 'removed'}][-8:]
+            records = active + recent
+        for record in records:
             if active_only and record['status'] not in {'queued', 'planning'}:
                 continue
             item = {'id': record['id'], 'status': record['status'], **record['idea']}
             # Past forecasts are not observations; retain the concrete change to prevent repeats.
             item.pop('expected_effect')
-            if record.get('node_id') in experiments:
-                # The complete change and configuration are already in experiments.
+            if record['status'] == 'queued' or record.get('node_id') in experiments:
+                # Queue details and completed nodes already have their own views.
                 item = {'id': record['id'], 'status': record['status']}
             for key in ('node_id', 'error', 'duplicate_of', 'decision'):
                 if record.get(key) is not None:
                     item[key] = record[key]
-            result.append(item)
+            result.append(compact(item))
         return result
 
     def request_ideas(self):
         if self.baker or self.failed or self.misses >= 3:
             return
-        if self.agents.remaining_calls < 2:
+        if self.agents.free_calls < self.estimate_calls(1) + 1:
             self.stop_reason = 'llm_limit'
             return
         remaining = self.options.max_experiments - self.next_node
@@ -140,25 +272,69 @@ class Search:
             return
         if not self.parents and (self.next_node or self.queue):
             return
-        needs_ideas = len(self.queue) < min(self.options.parallel, remaining)
-        new_feedback = self.revision != self.baker_feedback
-        if not needs_ideas and not new_feedback and not self.failures:
+        free_slots = max(0, self.parallel_limit - sum(self.occupied.values()))
+        needs_ideas = len(self.queue) < min(free_slots, remaining)
+        new_analysis = self.baker_feedback is None or self.revision[0] != self.baker_feedback[0]
+        if not needs_ideas and not (self.queue and new_analysis):
             return
         self.round += 1
-        self.baker = asyncio.create_task(self.ask_ideas('new_analysis' if new_feedback else 'queue_low'))
+        self.baker = asyncio.create_task(self.ask_ideas('new_analysis' if new_analysis else 'queue_low'))
+
+    def experiment_history(self):
+        cards = [{'node_id': row.node_id, 'parent_id': getattr(row, 'parent_id', None),
+                  **idea_history_view(row)} for row in self.rows]
+        direction = self.shared.get('preparation', {}).get('metric', {}).get('direction')
+        selected = select_experiments(cards, self.leader, direction)
+        fields = {'best_estimator', 'best_model', 'best_config', 'best_parameters', 'inner_score',
+                  'inner_best_loss', 'inner_validation', 'requested_trials', 'completed_trials', 'estimator',
+                  'selected_columns', 'input_feature_count', 'output_feature_count', 'unused_created_features',
+                  'method', 'source_nodes', 'oof_rows', 'fit_rows', 'folds', 'meta_training_scope',
+                  'gate_loss', 'passthrough', 'feature_columns'}
+        for item in selected:
+            manifest = self.directory / 'nodes' / item['node_id'] / 'assembly.json'
+            if manifest.exists():
+                blocks = json.loads(manifest.read_text(encoding='utf-8'))['blocks']
+                if all(block.get('operation') is not None for block in blocks):
+                    item['saved_operations'] = [{'name': block['name'], 'operation': operation_view(block['operation'])}
+                                                for block in blocks]
+                    model = item['hypothesis']['pipeline']['model']
+                    # Configuration appears once in saved_operations; measured tuning stays in execution_facts.
+                    item['hypothesis']['pipeline'] = {'model': {key: model[key] for key in ('name', 'engine') if key in model}}
+            if item.get('analysis') and item['node_id'] not in {self.leader, *(row['node_id'] for row in cards[-2:])}:
+                item['analysis'] = {key: value for key, value in item['analysis'].items() if key != 'next_ideas'}
+            item['execution_facts'] = []
+            for path in sorted((self.directory / 'nodes' / item['node_id']).glob('*_full_diagnostics.json')):
+                facts = json.loads(path.read_text(encoding='utf-8'))
+                item['execution_facts'].append({key: value for key, value in facts.items() if key in fields})
+        return [compact(item) for item in selected], experiment_index(cards)
 
     def baker_context(self):
+        from .predictions import prediction_catalog
         remaining = self.options.max_experiments - self.next_node
+        problem = self.shared.get('requirements', {}).get('problem', {})
+        prediction_sources = prediction_catalog(self.directory, self.rows, self.leader, self.prediction_cache,
+            {**problem, **self.shared.get('requirements', {}).get('output', {})},
+            self.shared.get('preparation', {}).get('metric', {}).get('name'))
+        experiments, index = self.experiment_history()
+        selected = {item['node_id'] for item in experiments}
         return {**self.shared, 'purposes': ['baseline'] if self.next_node == 0 else
                 [purpose for purpose, cap in self.caps.items() if cap],
-            'max_new_ideas': min(1 if self.next_node == 0 else 3, remaining),
-            'queue_capacity': min(self.options.parallel, remaining), 'remaining_experiments': remaining,
-            'slot_limits': self.caps, 'occupied_slots': self.occupied,
+            'max_new_ideas': min(1 if self.next_node == 0 else 3, remaining,
+                                 max(0, self.parallel_limit - sum(self.occupied.values()) - len(self.queue))),
+            'queue_capacity': min(self.parallel_limit, remaining), 'remaining_experiments': remaining,
+            'slot_limits': self.slot_limits(), 'occupied_slots': self.occupied,
+            'api_budget': self.agents.budget_view(),
+            'automl_portfolio': [{'engine': record['builtin_engine'], 'status': record['status'],
+                                 'node_id': record.get('node_id')}
+                                for record in self.records if record.get('builtin_engine')],
+            'prediction_sources': prediction_sources,
             'queued_ideas': self.queued_view(), 'leader_id': self.leader,
-            'available_parents': self.parents, 'experiments': [idea_history_view(row) for row in self.rows],
+            'available_parents': self.parents, 'experiments': experiments, 'experiment_index': index,
             'module_catalog': {node: [{key: block[key] for key in ('name', 'requires', 'provides')} for block in blocks]
-                               for node, blocks in catalog_view(self.catalog).items()},
-            'previous_ideas': self.idea_history(), 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
+                               for node, blocks in catalog_view({node: blocks for node, blocks in self.catalog.items()
+                                                               if node in selected}).items()},
+            'previous_ideas': self.idea_history(), 'idea_coverage': dict(Counter(row['status'] for row in self.records)),
+            'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
             'feedback_revision': {'experiments': self.revision[0],
                                   'data_research': self.shared.get('data_research', {}).get('revision', 0)},
             'experiment_timeout_seconds': self.options.experiment_timeout}
@@ -201,7 +377,7 @@ class Search:
                 self.apply_updates(response.updates)
                 accepted = 0
                 for idea in response.ideas:
-                    if len(self.queue) >= min(self.options.parallel, self.options.max_experiments - self.next_node):
+                    if len(self.queue) >= min(self.parallel_limit, self.options.max_experiments - self.next_node):
                         self.agents.log('idea_capacity_reached')
                         break
                     identity = idea.model_dump(exclude={'expected_effect', 'priority', 'research_ids'})
@@ -213,6 +389,10 @@ class Search:
                         continue
                     record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(), 'status': 'queued',
                               'research_revision': self.baker_research_revision}
+                    if idea.automl is not None:
+                        record['builtin_engine'] = idea.automl.engine
+                    if idea.ensemble is not None:
+                        record['builtin_ensemble'] = True
                     self.records.append(record)
                     self.queue.append(record)
                     self.used_ideas[key] = record['id']
@@ -238,14 +418,22 @@ class Search:
         for task in [task for task in done if task in self.planners]:
             record = self.planners.pop(task)
             node_id = record['node_id']
+            accepted = False
             try:
                 proposal = task.result()
-                key = plan_key(proposal)
+                key = (fingerprint({'automl': proposal.hypothesis.pipeline.training['automl']})
+                       if record.get('builtin_engine') else plan_key(proposal))
                 if key in self.used_plans:
                     record.update(status='rejected', duplicate_of=self.used_plans[key])
                     self.notify(f'{node_id}: duplicate plan matching {self.used_plans[key]}')
                     continue
+                calls = 2 if record.get('builtin_engine') or record.get('builtin_ensemble') else self.estimate_calls(len(proposal.assembly.write_blocks), planning=False)
+                if not self.agents.reserve_calls(node_id, calls):
+                    record.update(status='rejected', error='Insufficient API budget for the planned blocks')
+                    self.wait_for_budget(calls)
+                    continue
                 self.used_plans[key] = node_id
+                accepted = True
                 record['status'] = 'planned'
                 save(self.directory / 'planning' / node_id / 'proposal.json', proposal)
                 ready.append((node_id, proposal))
@@ -259,5 +447,7 @@ class Search:
                 if not isinstance(error, asyncio.CancelledError):
                     self.notify(f'{node_id} planner: {message}')
             finally:
+                if not accepted:
+                    self.agents.release_calls(node_id)
                 self.save()
         return ready

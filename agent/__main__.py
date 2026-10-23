@@ -29,8 +29,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--research-timeout", type=float, default=60, help="Лимит выполнения одного исследования, секунд.")
     parser.add_argument("--parallel-agents", type=int, default=8, help="Одновременных обращений к Qwen для всех ролей.")
     parser.add_argument("--max-llm-calls", type=int, default=80, help="Лимит всех запросов Qwen, включая повторы.")
-    parser.add_argument("--max-code-attempts", type=int, default=5,
-                        help="Версий кода на блок: первая и исправления; по умолчанию 5.")
+    parser.add_argument("--automl", action=argparse.BooleanOptionalAction, default=True,
+                        help="Готовые FLAML/AutoGluon-кандидаты после первого baseline; отключение: --no-automl.")
+    parser.add_argument("--max-code-attempts", "--max-config-attempts", type=int, default=5,
+                        help="Версий конфигурации блока: первая и исправления; по умолчанию 5.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
     args = parser.parse_args(argv)
     if args.command == "ask" and not args.prompt:
@@ -53,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
                     output_dir=output, max_experiments=args.max_experiments if args.command == "search" else 1,
                     parallel=args.parallel, parallel_agents=args.parallel_agents, max_llm_calls=args.max_llm_calls,
                     max_code_attempts=args.max_code_attempts, research_parallel=args.research_parallel,
-                    max_research_nodes=args.max_research_nodes, research_timeout=args.research_timeout)
+                    max_research_nodes=args.max_research_nodes, research_timeout=args.research_timeout, automl=args.automl)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")

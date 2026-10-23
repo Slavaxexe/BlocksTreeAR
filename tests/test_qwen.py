@@ -36,9 +36,15 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "OPENAI_BASE_URL"):
             Settings("test-secret", "", "qwen-model").validate()
 
-    def test_plain_http_credentials_and_query_are_rejected(self):
-        for url in ["http://remote.example/v1", "https://user:secret@qwen.example/v1",
-                    "https://qwen.example/v1?token=secret", "not-a-url"]:
+    def test_http_internal_addresses_and_url_components_are_allowed(self):
+        for url in ["http://llm-proxy:8000/v1", "http://10.0.0.5:8000/v1",
+                    "http://remote.example/v1", "https://user:secret@qwen.example/v1",
+                    "https://qwen.example/v1?token=placeholder", "https://qwen.example/v1#section"]:
+            with self.subTest(url=url):
+                Settings("test-secret", url, "qwen-model").validate()
+
+    def test_invalid_endpoint_format_is_rejected(self):
+        for url in ["not-a-url", "ftp://proxy/v1", "http://proxy:invalid/v1", "http:///v1"]:
             with self.subTest(url=url), self.assertRaises(ConfigurationError):
                 Settings("test-secret", url, "qwen-model").validate()
 
@@ -145,6 +151,57 @@ class QwenTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("HTTP 401", err.getvalue())
         self.assertNotIn("test-secret", err.getvalue())
+
+
+class ReferenceRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_tool_continuation_retries_as_plain_context_once(self):
+        import time
+        from openai import AsyncOpenAI
+        from agent.agents import JSONAgents
+        from agent.contracts import Program
+
+        for empty, succeeds in [(None, True), ('\n\n', True), (None, False)]:
+            with self.subTest(empty=empty, succeeds=succeeds):
+                requests = []
+                code = 'def run(state):\n    return {}'
+
+                def handler(request):
+                    requests.append(json.loads(request.content))
+                    message = {'role': 'assistant', 'content': empty}
+                    if len(requests) == 1:
+                        message.update(content=None, reasoning_content='prior reasoning', tool_calls=[{
+                            'id': 'ref', 'type': 'function', 'function': {'name': 'search_api',
+                            'arguments': '{"query":"example"}'}}])
+                    elif len(requests) == 3 and succeeds:
+                        message['content'] = json.dumps({'code': code})
+                    return httpx.Response(200, json={'id': 'mock', 'object': 'chat.completion',
+                        'created': 0, 'model': 'model', 'choices': [{'index': 0, 'message': message,
+                        'finish_reason': 'tool_calls' if len(requests) == 1 else 'stop'}]})
+
+                def client(**kwargs):
+                    return AsyncOpenAI(**kwargs,
+                        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+                agents = JSONAgents(Settings('fake', 'http://qwen.example/v1', 'model'),
+                                    time.monotonic() + 10, 10, node_id='node_001', block='fit')
+                with patch('agent.agents.AsyncOpenAI', side_effect=client), \
+                        patch('agent.agents.call_reference', return_value='{"matches":[{"symbol":"example.API"}]}'):
+                    if succeeds:
+                        result = await agents.ask(Program, 'original task', 'implementer', code=True, reference=True)
+                        self.assertEqual(result.code, code)
+                    else:
+                        with self.assertRaises(QwenError):
+                            await agents.ask(Program, 'original task', 'implementer', code=True, reference=True)
+                self.assertEqual(len(requests), 3)
+                final = requests[-1]
+                self.assertNotIn('tools', final)
+                self.assertNotIn('tool_choice', final)
+                self.assertEqual([m['role'] for m in final['messages']], ['system', 'user', 'user'])
+                self.assertEqual(final['messages'][1]['content'], 'original task')
+                self.assertIn('example.API', final['messages'][2]['content'])
+                self.assertNotIn('prior reasoning', json.dumps(final['messages']))
+                self.assertEqual(agents.reference_rounds[('node_001', 'fit')], 1)
+                self.assertEqual(agents.budget['requests'], 3)
 
 
 if __name__ == "__main__":

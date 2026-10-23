@@ -55,19 +55,12 @@ class Settings:
             raise ConfigurationError("Заполните настройки: " + ", ".join(missing))
         try:
             url = urlsplit(self.base_url)
-            valid_url = (
-                bool(url.hostname)
-                and not url.username and not url.password
-                and not url.query and not url.fragment
-                and (url.scheme == "https" or (
-                    url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
-                ))
-            )
-            url.port  # Also validate an explicitly supplied port.
+            valid_url = bool(url.hostname) and url.scheme in {'http', 'https'}
+            url.port  # Validate an explicitly supplied port.
         except ValueError:
             valid_url = False
         if not valid_url:
-            raise ConfigurationError("OPENAI_BASE_URL: нужен HTTPS base URL без логина, пароля и query-параметров.")
+            raise ConfigurationError("OPENAI_BASE_URL: нужен абсолютный HTTP/HTTPS URL с корректным адресом и портом.")
         if self.timeout_seconds is not None and (not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть конечным положительным числом.")
         if self.max_tokens is not None and self.max_tokens <= 0:

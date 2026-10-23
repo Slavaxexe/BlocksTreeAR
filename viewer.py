@@ -60,7 +60,7 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
             directory = folder / 'research' / 'nodes' / row['node_id']
             run['research_nodes'].append({**row, 'start': read(directory / 'start.json'),
                 'finish': read(directory / 'finish.json'), 'measurements': read(directory / 'measurements.json'),
-                'code': source(directory / 'probe.py'),
+                'code': json.dumps(row['analyses'], ensure_ascii=False, indent=2) if row.get('analyses') else source(directory / 'probe.py'),
                 'attempts': [{'number': p.name, 'error': read(p / 'error.json'), 'code': source(p / 'probe.py')}
                              for p in sorted((directory / 'attempts').glob('*'))]})
         block_directory = folder / 'extraction' if (folder / 'extraction').is_dir() else folder
@@ -490,7 +490,7 @@ function drawTree(r) {
     if (p && n.start.parent_id !== n.id) edge(c, `M ${p.x+240} ${p.y+55} C ${p.x+265} ${p.y+55} ${q.x-25} ${q.y+55} ${q.x} ${q.y+55}`);
   }
   const chosen=nodes.find(n=>n.id===selected), destination=positions.get(selected);
-  const origins=new Set((chosen?.start.assembly?.blocks??[]).map(b=>b.source_node).filter(Boolean));
+  const origins=new Set((chosen?.assembly?.blocks??chosen?.start.assembly?.blocks??[]).flatMap(b=>[b.source_node,...(b.operation?.kind==='saved_ensemble'?(b.operation.parameters.source_nodes??[]):[])]).filter(Boolean));
   for(const id of origins){const p=positions.get(id);if(p&&destination&&id!==selected)c.append(svg('path',{
     d:`M ${p.x+240} ${p.y+110} C ${p.x+290} ${p.y+135} ${destination.x-45} ${destination.y+135} ${destination.x} ${destination.y+110}`,
     class:'source-edge','marker-end':`url(#${c.id}-arrow)`}));}
@@ -515,7 +515,7 @@ function drawTree(r) {
     g.append(svg('text', {x:p.x+15, y:p.y+95, class:'caption'}, status + duration));
     const block=execution?.stage==='execution'?n.progress?.block:execution?.block;
     const writing=Object.values(execution?.blocks??{}).filter(b=>b.stage==='implementation').length;
-    const line=analyzing?'Анализатор работает':writing?'Пишутся блоки: '+writing:analysisLabels[n.delta?.analysis_status]??(n.analysis?'Анализ готов':block?'Блок: '+block:'');
+    const line=analyzing?'Анализатор работает':writing?'Подготавливаются операции: '+writing:analysisLabels[n.delta?.analysis_status]??(n.analysis?'Анализ готов':block?'Блок: '+block:'');
     g.append(svg('text', {x:p.x+15, y:p.y+119, class:'phase-label'}, String(line).slice(0,35)));
     const select = () => { selected = n.id; render(); };
     g.addEventListener('click', select);
@@ -524,13 +524,13 @@ function drawTree(r) {
   }
 }
 function drawAssembly(r){
- const panel=$('assembly-overview'),n=r.nodes.find(n=>n.id===selected),blocks=n?.start.assembly?.blocks??[];
+ const panel=$('assembly-overview'),n=r.nodes.find(n=>n.id===selected),blocks=n?.assembly?.blocks??n?.start.assembly?.blocks??[];
  panel.replaceChildren();panel.hidden=!blocks.length;if(!blocks.length)return;
  panel.append(element('h2','',n.id+' · сборка решения'),element('small','',
   'Основной предок: '+(n.start.parent_id??'нет · baseline')+'. Блоки выполняются слева направо; источники могут различаться.'));
  const chain=element('div','assembly-chain'),repaired=new Set((n.attempts??[]).filter(a=>Number(a.number)>1||a.request?.execution_error).map(a=>a.request?.block));
  const writes=new Set(n.start.assembly.write_blocks??[n.start.assembly.edit_block]);
- const agents=new Set((r.report?.active_agents??[]).filter(a=>a.node_id===n.id&&a.role==='implementer').map(a=>a.block));
+ const agents=new Set((r.report?.active_agents??[]).filter(a=>a.node_id===n.id&&a.role==='configuration_repair').map(a=>a.block));
  blocks.forEach((b,i)=>{
   if(i)chain.append(element('span','module-arrow','→'));
   const edited=writes.has(b.name),card=element('div','module-card'+(edited?' changed':'')+(repaired.has(b.name)?' repaired':''));
@@ -538,8 +538,9 @@ function drawAssembly(r){
   card.append(element('small','',b.description),element('small','', 'Вход: '+(b.requires.join(', ')||'—')),
    element('small','', 'Выход: '+b.provides.join(', ')));
   const progress=r.report?.node_states?.[n.id]?.blocks?.[b.name];
-  if(progress){const label=progress.stage==='implementation'?(agents.has(b.name)?'Агент пишет код':'Ожидает места для Qwen'):(phases[progress.stage]??progress.stage);
+  if(progress){const label=progress.stage==='implementation'?(agents.has(b.name)?'Агент исправляет настройки':'Подготовка операции'):(phases[progress.stage]??progress.stage);
    card.append(element('small','',label+(progress.attempt?' · версия '+progress.attempt+'/'+(n.start.context?.max_code_attempts??3):'')));}
+  if(b.operation?.kind==='saved_ensemble')for(const id of b.operation.parameters.source_nodes??[]){const button=element('button','','Прогнозы из '+id);button.onclick=()=>{selected=id;render()};card.append(button);}
   if(b.source_node){const button=element('button','',(edited||repaired.has(b.name)?'Основа: ':'Из ')+b.source_node);button.onclick=()=>{selected=b.source_node;render()};card.append(button);}
   else card.append(element('small','','Создан в этой ноде'));
   chain.append(card);
@@ -556,8 +557,8 @@ function drawDetail(r) {
   d.append(element('h2', '', n.id), element('small', '', `Родитель: ${n.start.parent_id ?? 'нет · baseline'}`));
   const purpose=n.start.purpose??n.start.context?.purpose;
   if (purpose) d.append(element('p', 'muted', 'Роль: '+(purposes[purpose]??purpose)));
-  const calls = r.report?.llm_calls?.filter(call=>call.node_id===n.id&&call.role==='implementer')??[];
-  if (calls.length) d.append(element('small', '', 'Запросов реализаторов: '+calls.length+' · версий блоков: '+(n.attempts?.length??0)+' · до '+(n.start.context?.max_code_attempts??3)+' на каждый блок'));
+  const calls = r.report?.llm_calls?.filter(call=>call.node_id===n.id&&call.role==='configuration_repair')??[];
+  if (calls.length) d.append(element('small', '', 'Запросов исправления настроек: '+calls.length+' · версий блоков: '+(n.attempts?.length??0)+' · до '+(n.start.context?.max_code_attempts??3)+' на каждый блок'));
   if (n.finish) d.append(element('p', 'metric', `${n.finish.metric?.name??'Метрика'}: ${fmt(n.finish.value)} · ${n.finish.evaluation_status??n.finish.status}`));
   d.append(element('h3', '', 'Гипотеза'), element('p', '', n.start.hypothesis?.rationale ?? '—'));
   d.append(element('small', '', n.start.hypothesis?.expected_effect ?? ''));
@@ -567,7 +568,7 @@ function drawDetail(r) {
   if(!n.finish&&phase)d.append(element('p','badge',(phases[phase.stage]??phase.stage)+(phase.block?' · '+phase.block:'')));
   if (n.finish?.notes?.length) {
     const list = element('ul', 'changes'); for (const note of n.finish.notes) list.append(element('li', '', note));
-    d.append(element('h3', '', 'Заметки реализатора'), list);
+    d.append(element('h3', '', 'Заметки выполнения'), list);
   }
   const analysisCard=element('div','analysis-card');
   analysisCard.append(element('b','','Анализатор · '+(analysisLabels[n.delta?.analysis_status]??(n.analysis?'Анализ готов':'Ожидает результата'))));

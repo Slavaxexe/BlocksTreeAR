@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import traceback
+import time
 from types import MappingProxyType
 
 import pandas as pd
@@ -54,6 +55,9 @@ def initialize(node: Path, start: Start):
         if file_hash(source) != expected:
             raise BlockError(block.name, 'Source block changed after planning')
         atomic_bytes(node / 'modules' / source.name, source.read_bytes())
+        configuration = source.with_suffix('.json')
+        if configuration.exists():
+            atomic_bytes(node / 'modules' / configuration.name, configuration.read_bytes())
     atomic_bytes(node / start.implementation, WRAPPER.encode('utf-8'))
 
 
@@ -65,7 +69,10 @@ def assemble(node: Path, start: Start) -> str:
             check_code(path.read_text(encoding='utf-8'), ('run',))
         except (OSError, ValueError) as error:
             raise BlockError(block.name, str(error)) from error
-        blocks.append({**block.model_dump(), 'sha256': file_hash(path)})
+        actual = block.model_dump()
+        if path.with_suffix('.json').exists():
+            actual['operation'] = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+        blocks.append({**actual, 'sha256': file_hash(path)})
     manifest = {'schema_version': 2, 'write_blocks': start.assembly.write_blocks, 'blocks': blocks}
     atomic_bytes(node / 'assembly.json', json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8'))
     return implementation_hash(node)
@@ -94,8 +101,18 @@ def execute(node: Path, fit, validation, test, preparation, auxiliary=None):
     if [b['name'] for b in manifest['blocks']] != [b.name for b in start.assembly.blocks]:
         raise ValueError('Assembly order differs from the saved plan')
     state = dict(fit=fit, validation=validation, test=test, preparation=preparation, auxiliary=auxiliary or {})
-    for block in manifest['blocks']:
+    for position, block in enumerate(manifest['blocks']):
         name = block['name']
+        state['preparation'] = preparation
+        runtime = preparation.get('runtime', {})
+        if (block.get('operation') or {}).get('kind') in {'fit', 'automl'} and runtime.get('deadline'):
+            stages = sum((item.get('operation') or {}).get('kind') in {'fit', 'automl'}
+                         for item in manifest['blocks'][position:])
+            # Each model gets a share of the remaining training time, not the full node budget.
+            remaining = max(0., runtime['deadline'] - time.monotonic()) / stages
+            state['preparation'] = {**preparation, 'runtime': {**runtime,
+                'deadline': time.monotonic() + remaining, 'time_budget_seconds': remaining,
+                'remaining_training_stages': stages}}
         atomic_bytes(node / 'progress.json', json.dumps({'block': name}).encode('utf-8'))
         try:
             missing = set(block['requires']) - state.keys()

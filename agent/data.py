@@ -99,7 +99,7 @@ def check_code(code: str, functions: tuple[str, ...]):
     for node in ast.walk(tree):
         imports = [a.name for a in node.names] if isinstance(node, ast.Import) else (
             [node.module or ''] if isinstance(node, ast.ImportFrom) else [])
-        if any(name.split('.')[0] not in allowed for name in imports):
+        if any(name.split('.')[0] not in allowed and name not in {'agent.automl', 'agent.operations'} for name in imports):
             raise ValueError('Unsupported generated import: ' + ', '.join(imports))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {'eval', 'exec', '__import__'}:
             raise ValueError('Dynamic code execution is not part of the generated interface')

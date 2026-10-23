@@ -35,13 +35,54 @@ def delta():
 class QueueTests(unittest.IsolatedAsyncioTestCase):
     def make_search(self, directory, shared=None):
         agents = JSONAgents(Settings('fake', 'https://qwen.example/v1', 'model'), time.monotonic()+20, 100)
-        return Search(agents, Path(directory), Options(parallel=2, max_experiments=10),
+        return Search(agents, Path(directory), Options(parallel=2, max_experiments=10, automl=False),
                       shared if shared is not None else {}, lambda message, **kwargs: None)
 
     async def collect_baker(self, search):
         task = search.baker
         await asyncio.wait_for(task, 2)
         search.collect({task})
+
+    async def test_reserved_calls_are_private_to_the_node_and_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.make_search(temporary).agents
+            node = JSONAgents(root.settings, root.deadline, 20, shared=root, node_id='node_001')
+            self.assertTrue(root.reserve_calls('node_001', 8))
+            root.budget['requests'] = 92
+            self.assertEqual(root.remaining_calls, 0)
+            self.assertEqual(node.remaining_calls, 8)
+            self.assertFalse(root.reserve_calls('node_002', 1))
+            root.release_calls('node_001')
+            self.assertEqual(root.remaining_calls, 8)
+
+    async def test_dispatch_keeps_idea_waiting_when_completion_reserve_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            search = self.make_search(temporary)
+            record = queued(0)
+            search.queue.append(record)
+            search.agents.budget['requests'] = 95
+            search.dispatch([])
+            self.assertEqual(list(search.queue), [record])
+            self.assertEqual(search.next_node, 0)
+            self.assertEqual(search.tasks, [])
+            self.assertEqual(search.stop_reason, 'llm_limit')
+
+    async def test_warmup_expands_after_a_measured_improvement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            search = self.make_search(temporary)
+            search.options = Options(parallel=6, max_experiments=10, automl=False)
+            search.parallel_limit = 3
+            search.caps = {'improve': 5, 'explore': 1}
+            rows = [SimpleNamespace(node_id='node_000', result=SimpleNamespace(status='completed', value=10),
+                                    analysis_status='completed')]
+            history = SimpleNamespace(nodes=rows, metric=SimpleNamespace(direction='minimize'))
+            with patch('agent.search.block_catalog', return_value={}), patch.object(search, 'request_ideas'):
+                search.fill(history, [], 1)
+                self.assertEqual(search.parallel_limit, 3)
+                rows.append(SimpleNamespace(node_id='node_001', result=SimpleNamespace(status='completed', value=9),
+                                            analysis_status='completed'))
+                search.fill(history, [], 2)
+                self.assertEqual(search.parallel_limit, 6)
 
     async def test_fresh_research_keeps_queued_ideas(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -161,9 +202,9 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(search.baker)
                 shared['data_research'] = {'revision': 2}
                 search.fill(history, occupied, 1)
-                await self.collect_baker(search)
-            self.assertEqual(propose.call_count, 2)
-            self.assertEqual(propose.call_args.args[0]['data_research']['revision'], 2)
+                self.assertIsNone(search.baker)
+            self.assertEqual(propose.call_count, 1)
+            self.assertEqual(propose.call_args.args[0]['data_research']['revision'], 1)
             self.assertEqual(list(search.queue), records)
 
     async def test_feedback_during_baker_is_coalesced_into_one_followup(self):
@@ -212,6 +253,49 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(contexts[1]['experiments'][0]['analysis'], row.analysis)
             self.assertEqual(list(search.queue), records)
 
+
+
+class AutoMLQueueTests(unittest.IsolatedAsyncioTestCase):
+    make_search = QueueTests.make_search
+
+    async def test_portfolio_uses_native_plans_without_llm_and_seeds_only_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            shared = {'preparation': {'data': {'target_columns': ['target']},
+                                     'metric': {'name': 'RMSE'}, 'validation': {'strategy': 'random'}},
+                      'requirements': {'problem': {'task_type': 'regression'}, 'output': {}},
+                      'installed_libraries': {'flaml': '2.3.6', 'autogluon.tabular': '1.3.1'}}
+            search = self.make_search(temporary, shared)
+            search.options = Options(parallel=2, max_experiments=3)
+            search.next_node, search.leader = 1, 'node_000'
+            search.seed_automl()
+            self.assertEqual([r['builtin_engine'] for r in search.queue], ['flaml', 'autogluon'])
+            with patch.object(JSONAgents, 'plan_node', side_effect=AssertionError('LLM planner called')):
+                search.dispatch([])
+                tasks = search.tasks
+                await asyncio.gather(*tasks)
+                ready = search.collect(set(tasks))
+            self.assertEqual(len(ready), 1)  # One improve slot; the other engine stays queued.
+            self.assertEqual(search.agents.budget['requests'], 0)
+            self.assertEqual(ready[0][1].hypothesis.pipeline.model['engine'], 'flaml')
+            self.assertEqual(search.agents.root.call_reservations, {'node_001': 2})
+            search.leader = 'node_001'
+            with patch('agent.search.block_catalog', return_value={}), patch.object(search, 'request_ideas'):
+                search.fill(delta(), [SimpleNamespace(purpose='improve')], 1)
+            self.assertEqual(len(search.records), 2)
+            self.assertEqual(search.queue[0]['builtin_engine'], 'autogluon')
+
+    async def test_time_group_and_unknown_metric_do_not_use_random_inner_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for validation, metric in [({'strategy': 'time_based'}, 'RMSE'),
+                                       ({'group_columns': ['subject']}, 'RMSE'), ({}, 'custom')]:
+                shared = {'preparation': {'data': {'target_columns': ['target']},
+                                         'metric': {'name': metric}, 'validation': validation},
+                          'requirements': {'problem': {'task_type': 'regression'}, 'output': {}},
+                          'installed_libraries': {'flaml': '2.3.6'}}
+                search = self.make_search(temporary, shared)
+                search.options = Options(max_experiments=3)
+                search.seed_automl()
+                self.assertEqual(list(search.queue), [])
 
 class ContractTests(unittest.TestCase):
     def test_fewer_ideas_and_updates_only_are_valid_but_unknown_ids_are_not(self):

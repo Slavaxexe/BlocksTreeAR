@@ -1,4 +1,4 @@
-"""Measured data profiles and bounded research programs, without holdout labels."""
+"""Measured data profiles and declarative feature analyses, without holdout labels."""
 
 import argparse
 import json
@@ -11,7 +11,9 @@ from threadpoolctl import threadpool_limits
 from .contracts import Preparation
 from .context import research_profile_view
 from .data import file_hash, input_hashes, module, within
-from .storage import canonical, load, save
+from .plans import AnalysisRequest
+from .eda import analyze_features, analysis_key
+from .storage import canonical, fingerprint, load, save
 
 
 def describe(frame):
@@ -79,17 +81,35 @@ def execute(root, node):
              'auxiliary': {role: frame for role, frame in tables.items() if role not in {'train', 'test'}},
              'preparation': preparation.model_dump(mode='json'),
              'profile': research_profile_view(json.loads((root / 'research' / 'profile.json').read_text(encoding='utf-8')))}
-    # Holdout labels and the full labelled train are never passed to the generated program.
-    program = module(node / 'probe.py', start['code_sha256'])
-    with threadpool_limits(limits=1):
-        measurements = program.run(state)
-    if not isinstance(measurements, dict) or not measurements:
-        raise ValueError('Research run(state) must return a nonempty measurement dict')
-    if len(canonical(measurements).encode('utf-8')) > 64000:
-        raise ValueError('Research output exceeds 64 KB; return aggregates instead of raw rows')
-    save(node / 'measurements.json', {'values': measurements, 'phase': start['phase'],
-         'fit_rows': len(fit), 'validation_rows': len(validation), 'test_rows': len(tables['test']),
-         'code_sha256': start['code_sha256'], 'preparation_sha256': start['preparation_sha256']})
+    if fingerprint(start['analyses']) != start['analysis_sha256']:
+        raise ValueError('Saved analysis requests changed')
+    values, cache, hits = {}, {}, []
+    destination = root / 'research' / 'cache'
+    for value in start['analyses']:
+        request = AnalysisRequest.model_validate(value)
+        key = fingerprint({'request': analysis_key(request), 'preparation': start['preparation_sha256'],
+                           'phase': start['phase'], 'task_type': start.get('task_type')})
+        cached = destination / (key + '.json')
+        if cached.exists():
+            result = json.loads(cached.read_text(encoding='utf-8'))
+            hits.append(request.name)
+        else:
+            try:
+                with threadpool_limits(limits=1):
+                    result = analyze_features(state, request, task_type=start.get('task_type'), cache=cache)
+                save(cached, result)
+            except Exception as error:
+                result = {'kind': request.kind, 'status': 'failed', 'error': str(error)}
+        values[request.name] = result
+        measured = {'values': values, 'phase': start['phase'], 'analysis_sha256': start['analysis_sha256'],
+                    'preparation_sha256': start['preparation_sha256'], 'cache_hits': hits,
+                    'target_access': {'fit': start['phase'] == 'fit', 'validation': False, 'test': False},
+                    'fit_rows': len(fit), 'validation_rows': len(validation), 'test_rows': len(tables['test'])}
+        if len(canonical(measured).encode('utf-8')) > 64000:
+            raise ValueError('Research output exceeds 64 KB; select features/top_k or fewer checks')
+        # Preserve completed measurements even if a later expensive check hits its deadline.
+        save(node / 'measurements.json', measured)
+
 
 
 def main():

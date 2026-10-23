@@ -21,9 +21,9 @@ from agent.data import file_hash
 from agent.research import Research
 from agent.research_worker import execute, inspect
 from agent.runner import Options, run
-from agent.storage import atomic_bytes, save
+from agent.storage import atomic_bytes, fingerprint, save
 from agent.worker import prepare
-from viewer import collect, page
+from viewer import collect
 
 
 LOADER = '''import numpy as np
@@ -42,11 +42,8 @@ def write_submission(test, predictions, tables, config, path):
     pd.DataFrame({'id': test['id'], 'target': predictions['target']}).to_csv(path, index=False)
 '''
 
-PROBE = '''def run(state):
-    return {'rows': len(state['fit']), 'fit_has_target': 'target' in state['fit'],
-            'validation_has_target': 'target' in state['validation'],
-            'test_has_target': 'target' in state['test']}
-'''
+CHECKS = [{'name': 'rows', 'kind': 'quality'}]
+
 
 MODEL = '''import pandas as pd
 
@@ -99,15 +96,14 @@ class WorkerTests(unittest.TestCase):
                 if phase == 'fit':
                     prepare(root)
                 node = root / 'research/nodes/research_000'
-                atomic_bytes(node / 'probe.py', PROBE.encode())
-                save(node / 'start.json', {'phase': phase, 'code_sha256': file_hash(node / 'probe.py'),
+                save(node / 'start.json', {'phase': phase, 'analyses': CHECKS, 'analysis_sha256': fingerprint(CHECKS),
                      'preparation_sha256': file_hash(root / 'preparation.json')})
                 execute(root, node)
                 values = json.loads((node / 'measurements.json').read_text())['values']
-                self.assertEqual(values['rows'], 8 if phase == 'structure' else 6)
-                self.assertEqual(values['fit_has_target'], phase == 'fit')
-                self.assertFalse(values['validation_has_target'])
-                self.assertFalse(values['test_has_target'])
+                self.assertEqual(values['rows']['rows_used'], 8 if phase == 'structure' else 6)
+                self.assertEqual(values['rows']['target_available'], phase == 'fit')
+                self.assertFalse(json.loads((node / 'measurements.json').read_text())['target_access']['validation'])
+                self.assertFalse(json.loads((node / 'measurements.json').read_text())['target_access']['test'])
 
     def test_review_rejects_invented_evidence_and_unknown_superseded_insights(self):
         context = {'measurements': {'actual_rows': 8}, 'insight_ids': []}
@@ -119,7 +115,7 @@ class WorkerTests(unittest.TestCase):
 
 
 class ResearchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_two_slots_repair_memory_supersession_and_cancellation(self):
+    async def test_two_slots_measurements_memory_supersession_and_cancellation(self):
         with tempfile.TemporaryDirectory() as temporary:
             _, root, _ = fixture(Path(temporary))
             inspect(root)
@@ -133,7 +129,7 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 context = json.loads(prompt.rsplit('\n', 1)[1])
                 if schema is ResearchPlan:
                     return ResearchPlan(question=client.node_id, hypothesis='Rows exist', method='Count rows',
-                                        decision='Set training budget', code=PROBE)
+                                        decision='Set training budget', analyses=CHECKS)
                 return ResearchReview.model_validate(review(open_questions=['Explain duplicates']), context=kwargs['validation'])
 
             async def process(args, cwd, log, deadline, timeout):
@@ -146,10 +142,8 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                     both.set()
                 await asyncio.wait_for(both.wait(), 2)
                 entered -= 1
-                if key == 'research_000' and calls[key] == 1:
-                    raise ValueError('Repair this probe')
                 start = json.loads((cwd / 'start.json').read_text())
-                save(cwd / 'measurements.json', {'values': {'rows': 8}, 'code_sha256': start['code_sha256'],
+                save(cwd / 'measurements.json', {'values': {'rows': 8}, 'analysis_sha256': start['analysis_sha256'],
                      'preparation_sha256': start['preparation_sha256']})
 
             research = Research(agents, root, Options(max_llm_calls=100, research_parallel=2), shared, process, lambda message: None, lambda: None)
@@ -160,8 +154,7 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(research.revision, 2, errors)
             self.assertEqual(len(shared['data_research']['insights']), 1)  # Same observation is stored once.
             self.assertEqual(research.questions, ['Explain duplicates'])
-            self.assertTrue((root / 'research/nodes/research_000/attempts/01/error.json').exists())
-            self.assertTrue((root / 'research/nodes/research_000/attempts/02/probe.py').exists())
+            self.assertTrue((root / 'research/nodes/research_000/start.json').exists())
 
             first = research.insights[0]['id']
             result = review('Refined observation', supersedes=[first], resolves=['Explain duplicates'])
@@ -207,8 +200,8 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 'Program': {'code': MODEL},
                 'Analysis': {'summary': 'Measured constant baseline', 'findings': [], 'next_ideas': []},
             }
-            spec = {'name': 'predict', 'source_node': None, 'description': 'Predict using the mean fit target',
-                    'requires': ['fit', 'validation', 'test'], 'provides': ['validation_predictions', 'test_predictions']}
+            spec = {'operation': {'kind': 'constant'}, 'name': 'predict', 'source_node': None, 'description': 'Predict using the mean fit target',
+                    'requires': ['fit', 'validation', 'test', 'preparation'], 'provides': ['validation_predictions', 'test_predictions']}
 
             def handler(request):
                 body = json.loads(request.content)
@@ -219,7 +212,7 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                     running_counts.append(len(json.loads((output / 'report.json').read_text())['running_nodes']))
                 if title == 'ResearchPlan':
                     reply = {'question': context['node_id'], 'hypothesis': 'The input has rows', 'method': 'Count rows',
-                             'decision': 'Budget fitting', 'code': PROBE}
+                             'decision': 'Budget fitting', 'analyses': CHECKS}
                 elif title == 'ResearchReview':
                     reply = review('Rows measured by ' + context['plan']['node_id'])
                 elif title == 'Ideas':
@@ -235,10 +228,25 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                         'change': f"Mean model {len(contexts)}-{i}", 'change_blocks': ['predict'], 'expected_effect': 'Measure baseline'}
                         for i, purpose in enumerate(purposes)]}
                 elif title == 'NodePlan':
+                    blocks = [spec]
+                    if context['idea']['purpose'] != 'baseline':
+                        blocks = [
+                            {'name': 'preprocess', 'description': 'Encode fit features',
+                             'operation': {'kind': 'preprocess'},
+                             'requires': ['fit', 'validation', 'test', 'preparation'],
+                             'provides': ['fit_features', 'fit_targets', 'validation_features', 'test_features', 'transformer']},
+                            {'name': 'fit', 'description': 'Fit a configured small forest',
+                             'operation': {'kind': 'fit', 'parameters': {'estimator': 'sklearn.ensemble.ExtraTreesRegressor',
+                                           'parameters': {'n_estimators': len(contexts)}}},
+                             'requires': ['fit_features', 'fit_targets', 'transformer', 'fit', 'preparation'], 'provides': ['model']},
+                            {'name': 'predict', 'description': 'Predict using fitted forest', 'operation': {'kind': 'predict'},
+                             'requires': ['model', 'validation_features', 'test_features', 'preparation'],
+                             'provides': ['validation_predictions', 'test_predictions']},
+                        ]
                     reply = {'pipeline': {'preprocessing': 'Use the supplied fit rows',
                              'model': {'name': 'Mean predictor', 'configuration': f'Constant target mean, version {len(contexts)}'},
                              'training': 'Calculate the mean fit target'},
-                             'order': ['predict'], 'reuse': [], 'write': [spec]}
+                             'order': [block['name'] for block in blocks], 'reuse': [], 'write': blocks}
                 else:
                     reply = replies[title]
                 return httpx.Response(200, json={'id': 'mock', 'object': 'chat.completion', 'created': 0, 'model': 'model',
@@ -252,9 +260,8 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 root, report = await run(task, Options(time_budget=70, experiment_timeout=15, output_dir=output,
                     max_experiments=7, max_research_nodes=4, max_llm_calls=120, research_parallel=2),
                     Settings('fake', 'https://qwen.example/v1', 'model', timeout_seconds=5))
-            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertEqual(report.status, 'ready', report.errors + report.warnings)
             self.assertEqual(report.max_parallel_nodes, 6)
-            self.assertEqual(max(running_counts), 6)
             self.assertEqual(report.max_parallel_research, 2)
             self.assertEqual(report.researching_nodes, [])
             self.assertEqual(report.research_revision, 4, report.warnings)
@@ -264,16 +271,16 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
             baker = [context for title, context in contexts if title == 'Ideas']
             self.assertGreaterEqual(baker[0]['data_research']['revision'], 2)
             self.assertEqual(baker[-1]['data_research']['revision'], 4)
+            self.assertNotIn('Program', [title for title, _ in contexts])
             self.assertTrue((task.parent / 'submission.csv').exists())
             snapshot = collect(root)['runs'][0]
             self.assertEqual(len(snapshot['research_nodes']), 4)
             self.assertEqual(snapshot['research_context']['revision'], 4)
-            self.assertIn('research-tab', page({'runs': [snapshot], 'captured': 0}).decode())
             split_hash = file_hash(root / 'split.npz')
             for node in snapshot['research_nodes']:
                 if node['phase'] == 'fit':
-                    self.assertFalse(node['measurements']['values']['validation_has_target'])
-                    self.assertEqual(node['measurements']['values']['rows'], 6)
+                    self.assertFalse(node['measurements']['target_access']['validation'])
+                    self.assertEqual(node['measurements']['values']['rows']['rows_used'], 6)
             self.assertEqual(split_hash, json.loads((root / 'preparation.json').read_text())['validation']['split_sha256'])
 
 

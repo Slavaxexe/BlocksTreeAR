@@ -1,5 +1,206 @@
 """Role-specific JSON views. Full provenance stays on disk, outside model prompts."""
 
+import re
+
+
+def compact(value):
+    """Omit empty metadata, preserving false, zero and complete strings."""
+    if isinstance(value, dict):
+        return {key: compact(item) for key, item in value.items() if item not in (None, '', [], {})}
+    if isinstance(value, list):
+        return [compact(item) for item in value]
+    return value
+
+
+def table(rows):
+    """Lossless column-oriented JSON for uniform records; no row selection."""
+    if isinstance(rows, dict):
+        return {key: table(value) for key, value in rows.items()}
+    if not isinstance(rows, list):
+        return rows
+    if len(rows) >= 3 and all(isinstance(row, dict) and set(row) == set(rows[0]) for row in rows):
+        columns = list(rows[0])
+        return {'columns': columns, 'rows': [[table(row[key]) for key in columns] for row in rows]}
+    return [table(row) for row in rows]
+
+
+def prompt_schema(schema, *, root=True):
+    # Property names such as "title" must survive; only schema annotations are removed.
+    if isinstance(schema, dict):
+        return {key: ({name: prompt_schema(item, root=False) for name, item in value.items()}
+                      if key in {'properties', '$defs'} else prompt_schema(value, root=False))
+                for key, value in schema.items() if key != 'title' or root}
+    if isinstance(schema, list):
+        return [prompt_schema(item, root=False) for item in schema]
+    return schema
+
+
+def operation_view(value):
+    from .plans import AutoMLPlan, EnsemblePlan
+    value = value.model_dump() if hasattr(value, 'model_dump') else dict(value or {})
+    parameters = value.get('parameters', {})
+    schema = {'automl': AutoMLPlan, 'saved_ensemble': EnsemblePlan}.get(value.get('kind'))
+    if schema is not None:
+        parameters = schema.model_validate(parameters).model_dump(exclude_defaults=True, exclude_none=True)
+    return compact({**value, 'parameters': parameters,
+                    'inputs': {key: name for key, name in value.get('inputs', {}).items() if key != name},
+                    'outputs': {key: name for key, name in value.get('outputs', {}).items() if key != name}})
+
+
+def task_context(context, *, profile=True):
+    preparation = context.get('preparation', {})
+    keys = ['data', 'metric', 'output', 'validation', 'issues'] + (['profile'] if profile else [])
+    return compact({'requirements': context.get('requirements', {}),
+                    'preparation': {key: preparation[key] for key in keys if key in preparation},
+                    'installed_libraries': context.get('installed_libraries', {})})
+
+
+def family(card):
+    model = card.get('hypothesis', {}).get('pipeline', {}).get('model', {})
+    return str(model.get('engine') or model.get('estimator') or model.get('name') or 'unknown')
+
+
+def select_experiments(cards, leader_id, direction, limit=8):
+    """Leader, recent evidence, a fresh failure, diverse best models and ancestry."""
+    by_id = {card['node_id']: card for card in cards}
+    selected = []
+    def add(card):
+        if card is not None and card['node_id'] not in selected and len(selected) < limit:
+            selected.append(card['node_id'])
+    add(by_id.get(leader_id))
+    for card in cards[-2:]:
+        add(card)
+    add(next((card for card in reversed(cards) if card.get('result', {}).get('status') != 'completed'), None))
+    ranked = sorted([card for card in cards if card.get('result', {}).get('value') is not None],
+                    key=lambda card: card['result']['value'], reverse=direction == 'maximize')
+    families = {family(by_id[node]) for node in selected}
+    diverse = 0
+    for card in ranked:
+        if family(card) not in families and diverse < 2:
+            add(card)
+            families.add(family(card))
+            diverse += 1
+    parent = by_id.get(leader_id, {}).get('parent_id')
+    for _ in range(2):
+        add(by_id.get(parent))
+        parent = by_id.get(parent, {}).get('parent_id')
+    for card in ranked:
+        add(card)
+    return [card for card in cards if card['node_id'] in selected]
+
+
+def experiment_index(cards):
+    return table([{'node_id': card['node_id'], 'parent_id': card.get('parent_id'), 'model': family(card),
+                   'status': card.get('result', {}).get('status'), 'value': card.get('result', {}).get('value'),
+                   'seconds': card.get('result', {}).get('duration_seconds')}
+                  for card in cards])
+
+
+def select_research(memory, query, limit=12):
+    insights = memory.get('insights', [])
+    if len(insights) <= limit:
+        return memory
+    words = lambda text: set(re.findall(r'\w{3,}', str(text).lower()))
+    focus = words(query)
+    selected = [item for item in insights if item.get('kind') == 'observation'][:2] + insights[-4:]
+    ranked = sorted(insights, key=lambda item: (len(words(item['statement']) & focus),
+                                               item.get('kind') == 'observation'), reverse=True)
+    ids = list(dict.fromkeys(item['id'] for item in selected))
+    for item in ranked:
+        if len(ids) >= limit:
+            break
+        if item['id'] not in ids:
+            ids.append(item['id'])
+    return {**memory, 'insights': [item for item in insights if item['id'] in ids],
+            'omitted_insight_count': len(insights) - len(ids)}
+
+
+def planner_catalog(catalog, idea, limit=24):
+    from .storage import fingerprint
+    selected = {idea.parent_id: list(catalog[idea.parent_id])} if idea.parent_id in catalog else {}
+    count = sum(len(blocks) for blocks in selected.values())
+    identity = lambda block: fingerprint({'name': block['name'], 'requires': block['requires'],
+                                         'provides': block['provides'], 'operation': operation_view(block.get('operation'))})
+    seen = {identity(block) for blocks in selected.values() for block in blocks}
+    wanted = set(idea.change_blocks)
+    candidates = [(node, block) for node, blocks in reversed(list(catalog.items()))
+                  if node != idea.parent_id for block in blocks]
+    candidates.sort(key=lambda pair: pair[1]['name'] not in wanted)
+    for node, block in candidates:
+        if count >= limit:
+            break
+        key = identity(block)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.setdefault(node, []).append(block)
+        count += 1
+    return {node: [{**{key: block[key] for key in ('name', 'requires', 'provides')},
+                    'operation': operation_view(block.get('operation'))} for block in blocks]
+            for node, blocks in selected.items()}
+
+
+def repair_context(context):
+    context = node_context(context, context['hypothesis'].get('research_ids', []))
+    target = context['target_block']
+    keys = set(target['requires']) | set(target['provides'])
+    neighbors = [block for block in context['assembly']['blocks']
+                 if block['name'] != target['name'] and keys.intersection(block['requires'] + block['provides'])]
+    kind = (context.get('previous_operation') or target.get('operation') or {}).get('kind')
+    return compact({**task_context(context, profile=False),
+        'node_id': context['node_id'], 'purpose': context['purpose'],
+        'hypothesis': {'rationale': context['hypothesis']['rationale'],
+                       'pipeline': {key: context['hypothesis']['pipeline'].get(key) for key in ('model', 'training')}},
+        'target_block': {key: target[key] for key in ('name', 'requires', 'provides')},
+        'previous_operation': operation_view(context.get('previous_operation')),
+        'neighbors': [{**{key: block[key] for key in ('name', 'requires', 'provides')},
+                       'operation': operation_view(block.get('operation'))} for block in neighbors],
+        'execution_error': context['execution_error'], 'failed_stage': context['failed_stage'],
+        'experiment_timeout_seconds': context['experiment_timeout_seconds'],
+        'operations': {kind: context['operations'][kind]} if kind else context['operations'],
+        'data_research': context.get('data_research')})
+
+
+def analyzer_context(context):
+    row = context['experiment']
+    context = node_context(context, row['hypothesis'].get('research_ids', []))
+    manifest = context.get('executed_assembly') or row['assembly']
+    actual = context.get('tool_configurations', {})
+    operations = [{**{key: block[key] for key in ('name', 'requires', 'provides')},
+                   'operation': operation_view(actual.get(block['name'], block.get('operation')))}
+                  for block in manifest['blocks']]
+    comparisons = []
+    for comparison in context.get('comparisons', []):
+        changes = []
+        for change in comparison.get('changes', []):
+            if change['path'] == 'assembly.blocks':
+                change = {**change, **{side: [{'name': block['name'], 'operation': operation_view(block.get('operation'))}
+                                             for block in change[side]] for side in ('before', 'after')}}
+            changes.append(change)
+        comparisons.append({**comparison, 'changes': changes})
+    return compact({**task_context(context, profile=False),
+        'experiment': {'node_id': row['node_id'], 'parent_id': row['parent_id'],
+                       'hypothesis': {'rationale': row['hypothesis']['rationale'],
+                                      'pipeline': row['hypothesis']['pipeline']}, 'result': row['result']},
+        'saved_operations': operations, 'comparisons': comparisons,
+        'automl_diagnostics': [{key: value for key, value in facts.items() if key not in {'configuration', 'model_directory'}}
+                              for facts in context.get('automl_diagnostics', [])],
+        'repair_attempts': context.get('repair_attempts', []), 'execution_stages': context.get('execution_stages', []),
+        'input_facts': context.get('input_facts', {}), 'data_research': context.get('data_research')})
+
+
+def research_history(nodes):
+    from .plans import AnalysisRequest
+    return [{'node_id': row['node_id'], 'phase': row['phase'], 'stage': row['stage'],
+             'analyses': [AnalysisRequest.model_validate(value).model_dump(exclude_defaults=True, exclude_none=True)
+                          for value in row.get('analyses', [])]} for row in nodes]
+
+
+def model_feedback(row):
+    return compact({'node_id': row.node_id, 'change': row.hypothesis.rationale,
+                    'model': row.hypothesis.pipeline.model, 'result': result_view(row.result),
+                    'analysis': row.analysis.summary if row.analysis else None})
+
 
 def requirements(extraction, *, prepared=False):
     result = {role: facts.model_dump(exclude={'evidence'}) for role, facts in (
@@ -81,7 +282,8 @@ def catalog_view(catalog):
         for block in blocks:
             identity = (block['name'], block['sha256'], tuple(block['requires']), tuple(block['provides']))
             if identity not in seen:
-                result.setdefault(node_id, []).append({key: block[key] for key in ('name', 'description', 'requires', 'provides')})
+                result.setdefault(node_id, []).append({**{key: block[key] for key in ('name', 'description', 'requires', 'provides')},
+                                                       'operation': block.get('operation')})
                 seen.add(identity)
     return result
 

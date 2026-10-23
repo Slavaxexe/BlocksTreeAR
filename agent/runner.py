@@ -17,7 +17,7 @@ from ml_reference_tools import MAX_REFERENCE_ROUNDS
 from .agents import JSONAgents, extract_task
 from .assembly import BlockError, assemble, block_catalog, initialize, sources
 from .config import Settings
-from .context import (execution_contract, history_view, idea_history_view, preparation_view,
+from .context import (execution_contract, history_view, model_feedback, preparation_view,
                       requirements, research_profile_view)
 from .contracts import Delta, Extraction, Finish, NodeDelta, Preparation, Start
 from .data import check_code, file_hash, installed_libraries, inventory, within
@@ -37,6 +37,7 @@ class Options:
     parallel_agents: int = 8
     max_llm_calls: int = 80
     max_code_attempts: int = 5
+    automl: bool = True
     research_parallel: int = 0
     max_research_nodes: int = 12
     research_timeout: float = 60
@@ -132,60 +133,43 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
         checkpoint(blocks={key: dict(value) for key, value in block_states.items()})
 
     async def write_block_source(name, error=None, failed_stage=None):
-        spec = next(b for b in start.assembly.blocks if b.name == name)
+        from .operations import CATALOG
+        from .plans import ToolCall
+
+        spec = next(block for block in start.assembly.blocks if block.name == name)
+        operation = spec.operation
         path = node / 'modules' / f'{name}.py'
-        if name not in clients:
-            clients[name] = JSONAgents(agents.settings, deadline, max_code_attempts * (3 + MAX_REFERENCE_ROUNDS), shared=agents,
-                                      node_id=start.node_id, block=name)
+        previous = node / 'modules' / f'{name}.json'
+        if previous.exists():
+            operation = ToolCall.model_validate(json.loads(previous.read_text(encoding='utf-8')))
+        defaults = {key: shared['requirements'].get('problem' if key != 'prediction_type' else 'output', {}).get(key)
+                    for key in ('task_type', 'class_labels', 'prediction_type')}
         while attempts.get(name, 0) < max_code_attempts:
             attempt = attempts[name] = attempts.get(name, 0) + 1
             attempt_dir = node / 'attempts' / name / f'{attempt:02d}'
-            request = {**context, 'target_block': spec.model_dump(),
-                       'previous_code': path.read_text(encoding='utf-8') if path.exists() else None,
-                       'execution_error': error, 'failed_stage': failed_stage,
-                       'remaining_run_seconds': max(0., deadline - time.monotonic())}
-            if error and failed_stage in {'check', 'execution'}:
-                providers = {}
-                for block in start.assembly.blocks:
-                    if block.name == name:
-                        break
-                    providers.update({key: block.name for key in block.provides})
-                dependencies = dict.fromkeys(providers[key] for key in spec.requires if key in providers)
-                request['dependency_code'] = {dependency: (node / 'modules' / f'{dependency}.py').read_text(encoding='utf-8')
-                                              for dependency in dependencies}
-            save(attempt_dir / 'request.json', {'block': name, 'stage': failed_stage, 'execution_error': error})
+            if error is not None:
+                if name not in clients:
+                    clients[name] = JSONAgents(agents.settings, deadline, max_code_attempts * (3 + MAX_REFERENCE_ROUNDS),
+                                              shared=agents, node_id=start.node_id, block=name)
+                operation = await clients[name].repair_operation({**context, 'target_block': spec.model_dump(),
+                    'previous_operation': operation.model_dump() if operation else None, 'execution_error': error,
+                    'failed_stage': failed_stage, 'operations': CATALOG})
+            if operation is None:
+                raise BlockError(name, 'New blocks must select an operation; Python generation is disabled')
             block_update(name, stage='implementation', attempt=attempt)
-            agents.log('block_generation_started', node_id=start.node_id, block=name, attempt=attempt,
-                       failed_stage=failed_stage)
-            try:
-                program = await clients[name].implement(request)
-                if program.blocked_reason:
-                    raise QwenError('Implementation blocked: ' + program.blocked_reason)
-            except (QwenError, asyncio.CancelledError) as problem:
-                message = (str(problem) or 'Implementation cancelled').replace(agents.settings.api_key, '[REDACTED]')
-                save(attempt_dir / 'error.json', {'stage': 'implementation', 'block': name,
-                     'kind': 'generation', 'error': message})
-                block_update(name, stage='failed')
-                if isinstance(problem, asyncio.CancelledError):
-                    raise
-                raise BlockError(name, message) from problem
-            # Artifact I/O failures must not request another version of correct model code.
-            atomic_bytes(attempt_dir / f'{name}.py', program.code.encode('utf-8'))
-            atomic_bytes(path, program.code.encode('utf-8'))
-            notes.extend(f'{name}: {note}' for note in program.notes)
-            try:
-                check_code(program.code, ('run',))
-            except ValueError as problem:
-                error, failed_stage = str(problem)[-5000:], 'implementation'
-                save(attempt_dir / 'error.json', {'stage': failed_stage, 'block': name, 'kind': 'code',
-                     'error': error, 'traceback': traceback.format_exc()})
-                if attempt == max_code_attempts or time.monotonic() >= deadline:
-                    raise BlockError(name, error) from problem
-                continue
-            block_update(name, stage='ready')
-            agents.log('block_code_saved', node_id=start.node_id, block=name, attempt=attempt)
+            save(attempt_dir / 'configuration.json', operation.model_dump())
+            save(previous, operation.model_dump())
+            code = ('from agent.operations import run_operation\n\n\n'
+                    'def run(state):\n'
+                    f'    return run_operation(state, {operation.model_dump()!r}, {defaults!r})\n')
+            atomic_bytes(path, code.encode('utf-8'))
+            check_code(code, ('run',))
+            block_update(name, stage='ready', attempt=attempt)
+            agents.log('block_configuration_saved', node_id=start.node_id, block=name, attempt=attempt,
+                       operation=operation.kind)
             return
-        raise BlockError(name, f'Block exhausted its {max_code_attempts} code versions')
+        raise BlockError(name, f'Block exhausted its {max_code_attempts} configuration versions')
+
 
     async def write_block(name, error=None, failed_stage=None):
         try:
@@ -341,7 +325,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
             **(research.report() if research else {}),
             'max_parallel_nodes': options.parallel, 'max_parallel_agents': options.parallel_agents,
             'max_parallel_research': options.research_parallel,
-            'active_agents': list(agents.active.values()),
+            'active_agents': list(agents.active.values()), 'api_budget': agents.budget_view(),
             'experiments': len(starts), 'best_node': delta.best_node_id if delta else None})
         try:
             save(directory / 'report.json', report)
@@ -366,7 +350,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         save(directory / 'delta.json', delta)
         save(directory / 'journal.json', {'nodes': [n.model_dump(mode='json') for n in delta.nodes]})
         if research:
-            research.model_feedback = [idea_history_view(row) for row in delta.nodes[-8:]]
+            research.model_feedback = [model_feedback(row) for row in delta.nodes[-8:]]
         for row in delta.nodes:
             save(directory / 'nodes' / row.node_id / 'delta.json', row)
 
@@ -390,6 +374,12 @@ async def run(task_path: Path, options: Options, settings: Settings):
         node = directory / 'nodes' / row.node_id
         modules = sources(node)
         context = {**shared, 'experiment': history_view(row), 'comparisons': comparisons, 'modules': modules}
+        manifest = node / 'assembly.json'
+        context['executed_assembly'] = json.loads(manifest.read_text(encoding='utf-8')) if manifest.exists() else None
+        context['automl_diagnostics'] = [json.loads(path.read_text(encoding='utf-8'))
+                                        for path in sorted(node.glob('*_full_diagnostics.json'))]
+        context['tool_configurations'] = {p.stem: json.loads(p.read_text(encoding='utf-8'))
+                                          for p in sorted((node / 'modules').glob('*.json'))}
         context['repair_attempts'] = []
         for path in sorted((node / 'attempts').rglob('error.json')):
             error = json.loads(path.read_text(encoding='utf-8'))
@@ -486,6 +476,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 research.collect(done)
             for task in [task for task in done if task in active]:
                 start = active.pop(task)
+                search.complete(start)
                 record(start, task.result())
                 row = next(row for row in delta.nodes if row.node_id == start.node_id)
                 if not expired and agents.remaining_calls:
@@ -519,6 +510,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 hashes = {block.name: next(item['sha256'] for item in catalog[block.source_node] if item['name'] == block.name)
                           for block in proposal.assembly.blocks if block.source_node is not None}
                 start = Start(node_id=node_id, parent_id=proposal.parent_id, purpose=proposal.purpose,
+                    source="builtin",
                     hypothesis=proposal.hypothesis, assembly=proposal.assembly,
                     preparation_sha256=delta.preparation_sha256,
                     context={'task': str(task_path), 'task_sha256': report.task_sha256, 'source_hashes': hashes,
@@ -557,4 +549,6 @@ async def run(task_path: Path, options: Options, settings: Settings):
             await asyncio.gather(*tasks, return_exceptions=True)
         if research:
             await research.close(stop_reason)
+        for node_id in list(agents.root.call_reservations):
+            agents.release_calls(node_id)
     return directory, report

@@ -89,7 +89,8 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False, t
     training_budget = max(1., time_budget * 0.8)
     metadata['runtime'] = {'time_budget_seconds': training_budget, 'deadline': started + training_budget,
                            'num_cpus': 1, 'num_gpus': 0, 'is_smoke_check': small,
-                           'work_directory': str(Path.cwd())}
+                           'work_directory': str(Path.cwd()), 'run_directory': str(root.resolve()),
+                           'preparation_sha256': file_hash(root / 'preparation.json')}
     with threadpool_limits(limits=1):
         auxiliary = {role: frame.copy() for role, frame in tables.items() if role not in {'train', 'test'}}
         valid_predictions, test_predictions = fit_predict(train.iloc[fit].copy(), validation_input.copy(), test.copy(),
@@ -136,7 +137,9 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
             preparation, preparation_path.parent, fit_predict, time_budget=time_budget or start.timeout_seconds,
             facts_path=directory / 'execution_inputs.json')
         validation_file = within(directory, start.outputs['validation'])
-        atomic_bytes(validation_file, valid_predictions.to_csv(index=False).encode())
+        from .predictions import save_pair
+        save_pair(directory, {'validation': valid_predictions, 'test': test_predictions},
+                  start.preparation_sha256, code_sha256, start.outputs['validation'])
         submission_file = within(directory, start.outputs['submission'])
         submission_file.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(tables['test'], test_predictions, tables, config, submission_file)
