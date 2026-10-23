@@ -63,6 +63,15 @@ CLASSIFICATION_RULES = (
     'Never pass label names as numeric class_weight indices: backend label encoding is internal. '
     'For automatic CatBoost class balancing use auto_class_weights=Balanced, not class_weights=Balanced. '
     'Use stratified inner folds and ensure rare classes are present. Use inner holdout for FLAML/AutoGluon. '
+    'An experiment estimate includes every inner fold, the outer-fit model and prediction on train, validation '
+    'and hidden test. Multiclass boosting can be much more expensive than regression at the same tree count. '
+    'Candidate parameters override selected_models.parameters; omitting a key retains the upstream value. '
+    'XGBoost class_weight is a backend policy translated to fold-local sample_weight, not a native XGBoost '
+    'constructor option. Use class_weight=null to turn an upstream balancing policy off explicitly. '
+    'HistGradientBoosting uses backend threadpool limits; it has no native n_jobs constructor argument. '
+    'actual_parameters.backend_threads and class_weight_adapter describe backend behavior; do not copy '
+    'those reporting fields into candidate.parameters. Inspect actual_inner_folds and warnings before '
+    'claiming that all requested inner CV folds completed. The common outer score remains comparable. '
     'Preserve the fixed outer_split and do not tune thresholds/calibration on its labels. '
     'The backend aligns probabilities to classes; submit labels or probabilities according to submission.prediction_type. ')
 
@@ -116,7 +125,7 @@ async def run_job(job_path, output, deadline, budget, *, module='training_worker
     remaining = min(budget, deadline-time.monotonic())
     if remaining <= 0:
         raise TimeoutError('Stage deadline exhausted')
-    env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
+    env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parent),
            'PYTHONIOENCODING': 'utf-8', 'OMP_NUM_THREADS': '2', 'OPENBLAS_NUM_THREADS': '2',
            'MKL_NUM_THREADS': '2', 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1'}
     for key in ('SystemRoot', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'HOME'):
@@ -218,7 +227,7 @@ async def run_training(input_path, output, *, time_budget=4800., trial_timeout=3
     agents.root.log_directory = output
     role_rules = RULES + (CLASSIFICATION_RULES if contract.task_type == 'classification' else '')
     analyst, planner = TrainingAnalyst(agents, role_rules), TrainingPlanner(agents, role_rules)
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parent
     excluded = {contract.target, *contract.id_columns, *contract.validation_constraints.group_columns}
     if contract.validation_constraints.time_column:
         excluded.add(contract.validation_constraints.time_column)

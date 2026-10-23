@@ -49,7 +49,8 @@ def trial_summaries(trials):
             'actual_training_rows', 'outer_validation_rows', 'feature_columns', 'excluded_columns',
             'wall_duration_seconds', 'parameter_warnings', 'error', 'diagnostic',
             'target_transform', 'selection_metadata', 'classification_report', 'confusion_matrix',
-            'class_labels', 'probability_metrics', 'classification_diagnostics')
+            'class_labels', 'probability_metrics', 'classification_diagnostics',
+            'requested_inner_folds', 'actual_inner_folds', 'planned_inner_folds', 'inner_cv_complete', 'warnings')
     return [{key: result[key] for key in keys if key in result} for result in trials]
 
 

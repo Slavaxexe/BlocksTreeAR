@@ -53,7 +53,9 @@ class TrainingCoordinator:
         # Leave room for at least a small actual trial after the two API calls.
         floor = min(self.trial_timeout, max(2., self.trial_timeout*.1))
         measured = max(self.role_durations[-6:], default=30.)
-        requested = min(180., max(60., 4*measured))
+        # Keep the merged 180s cap, but do not infer a tiny next-plan budget
+        # from fast validation/repair responses with much smaller context.
+        requested = 180.
         if self.remaining_search() < 2*measured+floor:
             return 0.
         # A real EDA handoff can require much longer than a tiny synthetic task.

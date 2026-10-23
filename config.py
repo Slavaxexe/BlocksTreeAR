@@ -28,7 +28,7 @@ class Settings:
         env_file: Path | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> "Settings":
-        path = env_file if env_file is not None else Path(__file__).resolve().parents[1] / ".env"
+        path = env_file if env_file is not None else Path(__file__).resolve().parent / ".env"
         # Disable expansion so credentials containing '$' stay literal.
         values = dict(dotenv_values(path, encoding="utf-8", interpolate=False))
         values.update(os.environ if environ is None else environ)

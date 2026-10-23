@@ -243,7 +243,7 @@ def main(argv=None, *, runtime_root=None):
         parser.error('--time-budget must be positive and at most 4800 seconds (80 minutes)')
     if not math.isfinite(args.trial_timeout) or args.trial_timeout <= 0 or args.max_trials < 1:
         parser.error('--trial-timeout and --max-trials must be positive')
-    report = asyncio.run(run_platform(args.task, runtime_root or Path(__file__).resolve().parents[1],
+    report = asyncio.run(run_platform(args.task, runtime_root or Path(__file__).resolve().parent,
         time_budget=args.time_budget, trial_timeout=args.trial_timeout, max_trials=args.max_trials))
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report['status'] == 'completed' else 2

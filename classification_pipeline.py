@@ -259,7 +259,7 @@ async def run_classification_pipeline(task_dir, output, *, target, metric, id_co
                    stage='model_selection')
         selection_output = output/'model_selection'
         selection_output.mkdir()
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parent
         requirements = (root/'requirements.txt').read_text(encoding='utf-8-sig')
         available = _available_classifiers(requirements, installed_libraries())
         if not available:

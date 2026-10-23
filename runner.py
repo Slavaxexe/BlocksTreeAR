@@ -47,7 +47,7 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
     remaining = min(timeout or math.inf, deadline - time.monotonic())
     if remaining <= 0:
         raise TimeoutError('Run time budget exhausted')
-    env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
+    env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parent),
            'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1',
            'OMP_NUM_THREADS': '2', 'OPENBLAS_NUM_THREADS': '2', 'MKL_NUM_THREADS': '2'}
     # Some ML libraries need the user/temp directories even without API credentials.
@@ -442,7 +442,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         context = {'task_text': task_path.read_text(encoding='utf-8'), 'task_directory': str(task_path.parent),
                    'extraction': requirements(extraction), 'inventory': inventory(task_path.parent),
                    'installed_libraries': installed_libraries(),
-                   'allowed_requirements': (Path(__file__).resolve().parents[1] / 'requirements.txt').read_text(encoding='utf-8')}
+                   'allowed_requirements': (Path(__file__).resolve().parent / 'requirements.txt').read_text(encoding='utf-8')}
         for attempt in count():
             draft = await agents.prepare(context)
             try:
