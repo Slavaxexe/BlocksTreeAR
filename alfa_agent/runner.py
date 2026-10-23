@@ -48,6 +48,24 @@ class RepairProgress:
         return {'unchanged_failures': self.repeats, 'stop_after': 3, 'require_changed_code': True}
 
 
+def apply_edits(code: str, edits) -> str:
+    """Replace numbered line ranges of the original code; first_line guards against misnumbering."""
+    lines, taken = code.split('\n'), set()
+    for edit in edits:  # validate everything against the original before changing anything
+        if not edit.from_line <= edit.to_line <= len(lines):
+            raise ValueError(f'Edit lines {edit.from_line}-{edit.to_line} are outside 1-{len(lines)}')
+        span = set(range(edit.from_line, edit.to_line + 1))
+        if taken & span:
+            raise ValueError(f'Edit lines {edit.from_line}-{edit.to_line} overlap another edit')
+        actual = lines[edit.from_line - 1]
+        if edit.first_line.strip() and ' '.join(edit.first_line.split()) != ' '.join(actual.split()):
+            raise ValueError(f'first_line does not match line {edit.from_line}; that line is actually: {actual!r}')
+        taken |= span
+    for edit in sorted(edits, key=lambda e: -e.from_line):  # bottom-up keeps earlier numbers valid
+        lines[edit.from_line - 1:edit.to_line] = edit.new.split('\n') if edit.new else []
+    return '\n'.join(lines)
+
+
 class NeedsReplan(ValueError):
     pass
 
@@ -193,6 +211,14 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 await agents.implement(context, request_limit=request_limit)
             code = None
             notes = list(dict.fromkeys(notes + program.notes))
+            if program.edits and not program.code.strip():
+                try:
+                    program = program.model_copy(update={'code': apply_edits(context.get('previous_code', ''), program.edits)})
+                except ValueError as error:  # unusable edits: ask for the complete source next
+                    context.update(execution_error='Edits not applied: ' + str(error), failed_stage='implementation', repair_mode='full')
+                    if agents.requests >= request_limit or time.monotonic() >= deadline:
+                        raise
+                    continue
             if program.plan_conflict and not program.code.strip():
                 conflict = program.plan_conflict
                 if shared['preparation']['data']['target_columns'] and plan_contains(start.hypothesis.model_dump(), conflict.plan_quote):
@@ -246,7 +272,15 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 context['repair_progress'] = progress.observe(stage, program.code, error)
                 if not repairable or agents.requests >= request_limit or time.monotonic() >= deadline:
                     raise
-                context.update(previous_code=program.code, execution_error=str(error)[-5000:], failed_stage=stage)
+                context.update(previous_code=program.code, execution_error=str(error)[-5000:], failed_stage=stage,
+                               # Line edits are cheap and keep working code intact; alternate with a full rewrite.
+                               repair_mode='full' if context.get('repair_mode') == 'edits' else 'edits')
+                try:  # real signatures of the calls in this code, read in a worker process
+                    atomic_bytes(node / 'last_error.txt', str(error)[-5000:].encode())
+                    await process(['-m', 'alfa_agent.worker', '--api', str(node)], node, node / 'api.log', deadline, 90)
+                    context['api_reference'] = json.loads((node / 'api_reference.json').read_text())
+                except (ValueError, OSError, TimeoutError):
+                    context.pop('api_reference', None)
                 if 'toolkit.py' in str(error):  # the frame is in project code the node cannot edit
                     context['error_location'] = ('Raised inside the project toolkit called from your code: change the '
                                                  'arguments or data you pass, or stop using that toolkit call.')

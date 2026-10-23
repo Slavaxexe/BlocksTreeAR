@@ -116,6 +116,17 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(seen), 2)
             self.assertEqual(agents.calls[0].status, 'invalid_json')
 
+    async def test_json_object_is_recovered_from_surrounding_prose(self):
+        reply = 'Here is the fix:\n```json\n' + json.dumps({'code': PROGRAM}) + '\n```\nIt converts categories.'
+        def handler(request):
+            return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': reply}}]})
+        def client(**kwargs):
+            return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        agents = JSONAgents(Settings('fake', 'http://proxy/v1', 'model'), time.monotonic() + 10)
+        with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+            self.assertEqual((await agents.ask(Program, 'Write code', 'implementer', code=True)).code, PROGRAM)
+
     async def test_llm_concurrency_gate_serializes_requests_of_one_run(self):
         active, peak = 0, 0
         async def handler(request):
@@ -330,6 +341,30 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(report['adversarial_auc'], .8)
         self.assertEqual((report['override'], report['shifted_features'][0], len(valid)), ('adversarial_holdout', 'x', 80))
         self.assertNotIn('override', shift_split(train, shifted, data, {'strategy': 'group'}, mixed[:320], mixed[320:])[2])
+
+    def test_line_edits_apply_bottom_up_and_reject_misnumbered_or_overlapping_ranges(self):
+        from alfa_agent.contracts import LineEdit
+        from alfa_agent.runner import apply_edits
+        code = 'import pandas as pd\n\ndef fit_model(fit, preparation):\n    value = 1\n    return value'
+        edits = [LineEdit(from_line=4, to_line=4, first_line='value = 1', new='    value = 2\n    value += 1'),
+                 LineEdit(from_line=1, to_line=1, first_line='import  pandas as pd ', new='import numpy as np\nimport pandas as pd')]
+        self.assertEqual(apply_edits(code, edits).split('\n')[4:6], ['    value = 2', '    value += 1'])
+        with self.assertRaisesRegex(ValueError, "actually: '    return value'"):
+            apply_edits(code, [LineEdit(from_line=5, to_line=5, first_line='value = 1', new='')])
+        with self.assertRaisesRegex(ValueError, 'overlap'):
+            apply_edits(code, [LineEdit(from_line=2, to_line=4, first_line='', new=''), LineEdit(from_line=4, to_line=5, first_line='', new='')])
+        with self.assertRaisesRegex(ValueError, 'outside'):
+            apply_edits(code, [LineEdit(from_line=6, to_line=6, first_line='', new='')])
+
+    def test_api_reference_reads_installed_signatures_error_names_first(self):
+        from alfa_agent.library_docs import api_reference
+        code = ('import numpy as np\nfrom sklearn.ensemble import RandomForestRegressor\nimport sklearn.linear_model as lm\n'
+                'def fit_model(fit, preparation):\n    a = lm.Ridge(alpha=1.)\n    b = RandomForestRegressor(n_estimators=10)\n'
+                '    return np.mean')
+        reference = api_reference(code, "TypeError: RandomForestRegressor.__init__() got an unexpected keyword argument 'x'")
+        self.assertEqual(list(reference)[:2], ['sklearn.ensemble.RandomForestRegressor', 'sklearn.linear_model.Ridge'])
+        self.assertIn('n_estimators', reference['sklearn.ensemble.RandomForestRegressor'])
+        self.assertIn('.fit(', reference['sklearn.ensemble.RandomForestRegressor'])
 
     def test_target_stats_never_use_a_training_row_own_or_later_targets(self):
         from alfa_agent.toolkit import target_stats

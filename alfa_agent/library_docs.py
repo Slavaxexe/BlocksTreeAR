@@ -78,3 +78,77 @@ def library_notes(text: str, limit: int = 2) -> dict[str, str]:
                    for match in [re.search(re.escape(alias), text)] if match)
     names = list(dict.fromkeys(library for _, library in found))[:limit]
     return {name: DOCS[name] for name in names}
+
+
+def api_reference(code: str, error: str = '', limit: int = 4000) -> dict[str, str]:
+    """Real signatures of the library classes/functions the code calls, read from the installed packages.
+
+    Exact parameter names stop repairs from inventing arguments; names in the error come first.
+    Runs in a worker process, so heavy imports never load into the controller.
+    """
+    import ast
+    import importlib
+    import inspect
+    aliases = {}
+    tree = ast.parse(code)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                aliases[alias.asname or alias.name.split('.')[0]] = alias.name if alias.asname else alias.name.split('.')[0]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = node.module + '.' + alias.name
+
+    def dotted(expression):
+        if isinstance(expression, ast.Name):
+            return expression.id
+        if isinstance(expression, ast.Attribute):
+            base = dotted(expression.value)
+            return base + '.' + expression.attr if base else None
+        return None
+    paths = []
+    for node in ast.walk(tree):
+        name = dotted(node.func) if isinstance(node, ast.Call) else None
+        root = name.split('.')[0] if name else None
+        if root in aliases and 'toolkit' not in aliases[root]:
+            paths.append(aliases[root] + name[len(root):])
+    paths = list(dict.fromkeys(paths))
+    paths.sort(key=lambda path: path.rsplit('.', 1)[-1] not in error)  # stable: error-named objects first
+
+    def resolve(path):
+        parts = path.split('.')
+        for cut in range(len(parts), 0, -1):
+            try:
+                value = importlib.import_module('.'.join(parts[:cut]))
+            except Exception:
+                continue
+            for part in parts[cut:]:
+                value = getattr(value, part)
+            return value
+        raise ImportError(path)
+
+    def signature(value):
+        try:
+            return str(inspect.signature(value))
+        except (TypeError, ValueError):
+            return '(...)'
+    result, size = {}, 0
+    for path in paths:
+        try:
+            value = resolve(path)
+        except Exception:
+            continue
+        if inspect.isclass(value):
+            lines = [value.__name__ + signature(value)]
+            lines += [f'  .{method}{signature(getattr(value, method))}' for method in
+                      ('fit', 'predict', 'predict_proba', 'fit_predict', 'transform') if hasattr(value, method)]
+            text = '\n'.join(lines)
+        elif callable(value):
+            text = path.rsplit('.', 1)[-1] + signature(value)
+        else:
+            continue
+        text = text[:1200]
+        if size + len(text) > limit:
+            break
+        result[path], size = text, size + len(text)
+    return result

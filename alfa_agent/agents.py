@@ -44,13 +44,16 @@ def runtime_contract(preparation):
 
 def implementation_context(context):
     """Keep the current plan authoritative; ancestor refusals are not execution facts."""
-    keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error', 'error_location', 'failed_stage',
+    keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error',
+            'error_location', 'api_reference', 'repair_mode', 'failed_stage',
             'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
     result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
               'toolkit': TOOLKIT_GUIDE,
               # Notes only for libraries the error or plan mentions (error first), so the context stays small.
               'library_notes': library_notes(str(context.get('execution_error', '')) + json.dumps(context['start']['hypothesis'])),
               **{key: context[key] for key in keys if key in context}}
+    if context.get('repair_mode') == 'edits' and context.get('previous_code'):  # numbered lines for line edits
+        result['previous_code'] = '\n'.join(f'{i:4d} | {line}' for i, line in enumerate(context['previous_code'].split('\n'), 1))
     if context.get('parent'):
         parent = context['parent']
         result['parent_reference'] = {'node_id': parent['start']['node_id'],
@@ -190,6 +193,8 @@ class JSONAgents:
             fenced = re.fullmatch(r'```(?:json)?\s*\n(.*?)\n```', content, re.S)
             if fenced:
                 content = fenced[1].strip()
+            elif content[:1] != '{' and '{' in content:  # prose or a fence around the object: keep the outer object
+                content = content[content.index('{'):content.rindex('}') + 1] if '}' in content else content
             usage = response.usage
             stats = dict(role=role, node_id=self.node_id, attempt=attempt, prompt_tokens=usage.prompt_tokens if usage else 0,
                          completion_tokens=usage.completion_tokens if usage else 0)
@@ -302,6 +307,11 @@ class JSONAgents:
             "own targets). Write custom model code only when the hypothesis needs it; keep it short. "
             "CURRENT NODE: only context.start defines your assignment; parent_reference is optional reference code. "
             "On repair, correct previous_code using execution_error and failed_stage; do not repeat the same error. "
+            "api_reference gives the REAL signatures of the library calls in previous_code (installed versions): use only "
+            "parameters that exist there. When repair_mode is 'edits', previous_code is numbered: return code empty and only "
+            "edits=[{from_line, to_line, first_line (exact text of line from_line), new (replacement lines, may be empty)}] "
+            "changing what is needed; edits must not overlap, line numbers refer to previous_code. Otherwise return the "
+            "complete code. "
             "repair_progress counts unchanged executable code and failure; change the actual code, not comments or notes. "
             "Address review_findings when provided; they concern correctness, not permission to change the saved hypothesis. "
             "The start is immutable: preserve its model, preprocessing, data choices and specified parameters. "

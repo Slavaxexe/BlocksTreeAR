@@ -497,6 +497,7 @@ def main(fit_model=None):
         stage.add_argument('--refit-member', type=Path)
         stage.add_argument('--blend', type=Path)
         stage.add_argument('--blend-final', type=Path)
+        stage.add_argument('--api', type=Path)
         parser.add_argument('--preparation', type=Path)
         parser.add_argument('--members', type=int, default=3)
         args = parser.parse_args()
@@ -510,6 +511,12 @@ def main(fit_model=None):
             blend(args.blend.resolve(), args.members)
         elif args.blend_final:
             blend_final(args.blend_final.resolve())
+        elif args.api:
+            from .library_docs import api_reference
+            node = args.api.resolve()
+            code = (node / 'experiment.py').read_text() if (node / 'experiment.py').exists() else ''
+            error = (node / 'last_error.txt').read_text() if (node / 'last_error.txt').exists() else ''
+            atomic_bytes(node / 'api_reference.json', json.dumps(api_reference(code, error) if code else {}).encode())
         else:
             smoke(args.check.resolve(), args.preparation.resolve())
     else:

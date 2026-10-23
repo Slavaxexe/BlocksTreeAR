@@ -230,15 +230,23 @@ class PlanConflict(Contract):
         return value[:400] if isinstance(value, str) else value
 
 
+class LineEdit(Contract):
+    from_line: int = Field(ge=1)
+    to_line: int = Field(ge=1)
+    first_line: str = Field(description="Text of previous_code line from_line, for verification")
+    new: str = Field(description="Replacement for lines from_line..to_line; several lines or empty")
+
+
 class Program(Contract):
     code: str = Field(default="", description="Complete experiment.py implementing the saved start, or empty when blocked")
+    edits: list[LineEdit] = Field(default_factory=list, description="Only when repair_mode is edits: line replacements of previous_code")
     notes: list[str] = Field(default_factory=list, description="Implementation details and limitations; never measured scores")
     blocked_reason: str | None = None
     plan_conflict: PlanConflict | None = None
 
     @model_validator(mode="after")
     def code_or_reason(self):
-        if not self.code.strip() and not (self.blocked_reason or '').strip() and not self.plan_conflict:
+        if not self.code.strip() and not self.edits and not (self.blocked_reason or '').strip() and not self.plan_conflict:
             raise ValueError('Return implementation code or explain why the saved plan cannot be implemented')
         return self
 
