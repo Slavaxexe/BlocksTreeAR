@@ -185,21 +185,26 @@ transformer = result.transformer
 feature_names = result.feature_names
 
 # Финальное обучение на полном train (train+val) с тем же планом
-final_result = pipeline.run_final()
-X_train_full = final_result.train_features
-y_train_full = final_result.train_target
-X_test_final = final_result.test_features
+full_train = pd.concat([result.train_features, result.val_features])  # до transform
+# Нужен исходный DataFrame с таргетом — загрузите заново или сохраните до split
+from data_preparation.loader import load_data
+lr = load_data(config)
+test_final, final_transformer = pipeline.run_final(lr.train, lr.test, result.transformer.plan)
+# test_final — готовые фичи для предсказания на полном train
 ```
 
 ### С LLM-обогащением
 
 ```python
 from data_preparation.llm_client import LLMClient
+from data_preparation.config import LLMConfig
 
-llm = LLMClient()  # читает API_KEY/BASE_URL из env
-if llm.health_check():
+llm = LLMClient(LLMConfig())  # читает API_KEY/BASE_URL из env
+ok, msg = llm.health_check()
+if ok:
     pipeline = DataPreparationPipeline(config, llm_client=llm)
 else:
+    print(f"LLM unavailable: {msg}")
     pipeline = DataPreparationPipeline(config)  # fallback без LLM
 
 result = pipeline.run()

@@ -110,63 +110,67 @@ def _generate_default_features(
         and not p.is_all_missing
     ]
 
-    temp_cols = [p.name for p in numeric_profiles if "temp" in p.name.lower() and "avg" in p.name.lower()]
-    if len(temp_cols) >= 2:
+    skewed_cols = [
+        p for p in numeric_profiles
+        if p.numeric_stats
+        and p.numeric_stats.min is not None
+        and p.numeric_stats.max is not None
+        and p.numeric_stats.min >= 0
+        and p.numeric_stats.max > 0
+        and p.numeric_stats.mean is not None
+        and p.numeric_stats.median is not None
+        and p.numeric_stats.mean > 1.5 * p.numeric_stats.median
+    ]
+    for p in skewed_cols[:2]:
         features.append(NewFeatureDef(
-            name="temp_range_annual",
-            source_columns=temp_cols,
-            transform_type=TransformOp.INTERACTION,
-            definition="max(monthly_avg_temps) - min(monthly_avg_temps) across all months",
-            rationale="Temperature range captures climate variability which affects heating/cooling energy demand",
-            missing_handling="Result is NaN if any source is NaN; impute with median after creation",
-            requires_fit=False,
-        ))
-
-    if "floor_area" in train.columns and "year_built" in train.columns:
-        features.append(NewFeatureDef(
-            name="log_floor_area",
-            source_columns=["floor_area"],
+            name=f"log_{p.name}",
+            source_columns=[p.name],
             transform_type=TransformOp.LOG_TRANSFORM,
-            definition="log1p(floor_area)",
-            rationale="Floor area has right-skewed distribution; log transform may linearize relationship with EUI",
-            missing_handling="Result is NaN if floor_area is NaN or <= 0; impute with median",
+            definition=f"log1p({p.name})",
+            rationale=f"{p.name} is right-skewed (mean >> median); log may linearize relationship",
+            missing_handling="NaN if source is NaN or <= 0",
             requires_fit=False,
         ))
 
-    if "heating_degree_days_c" in train.columns and "cooling_degree_days_c" in train.columns:
+    high_missing_cols = [
+        p for p in numeric_profiles
+        if p.numeric_stats
+        and p.numeric_stats.n_missing > 0
+        and p.numeric_stats.n_missing / max(train.shape[0], 1) > 0.05
+    ]
+    for p in high_missing_cols[:2]:
         features.append(NewFeatureDef(
-            name="hdd_cdd_ratio",
-            source_columns=["heating_degree_days_c", "cooling_degree_days_c"],
-            transform_type=TransformOp.RATIO,
-            definition="heating_degree_days_c / (cooling_degree_days_c + 1)",
-            rationale="Ratio of heating to cooling demand characterizes heating-vs-cooling-dominated climates",
-            missing_handling="Result is NaN if either source is NaN; denominator offset prevents division by zero",
-            requires_fit=False,
-        ))
-
-    if "energy_star_rating" in train.columns:
-        features.append(NewFeatureDef(
-            name="energy_star_missing",
-            source_columns=["energy_star_rating"],
+            name=f"{p.name}_missing",
+            source_columns=[p.name],
             transform_type=TransformOp.MISSING_INDICATOR,
-            definition="1 if energy_star_rating is NaN, else 0",
-            rationale="Missingness of energy_star_rating may itself be informative (new/unrated buildings)",
+            definition=f"1 if {p.name} is NaN, else 0",
+            rationale=f"{p.name} has >5% missing; missingness pattern may be informative",
             missing_handling="Never missing by definition",
             requires_fit=False,
         ))
 
-    if len(features) < 2:
-        if len(numeric_profiles) >= 2:
+    if len(features) < 2 and len(numeric_profiles) >= 2:
+        target_corrs = []
+        if target_col in train.columns:
+            for p in numeric_profiles:
+                corr = train[p.name].corr(train[target_col])
+                if pd.notna(corr):
+                    target_corrs.append((p.name, abs(corr)))
+            target_corrs.sort(key=lambda x: x[1], reverse=True)
+
+        if len(target_corrs) >= 2:
+            c1, c2 = target_corrs[0][0], target_corrs[1][0]
+        else:
             c1, c2 = numeric_profiles[0].name, numeric_profiles[1].name
-            features.append(NewFeatureDef(
-                name=f"{c1}_x_{c2}",
-                source_columns=[c1, c2],
-                transform_type=TransformOp.INTERACTION,
-                definition=f"{c1} * {c2}",
-                rationale="Interaction between first two numeric features as a baseline candidate",
-                missing_handling="NaN if either is NaN",
-                requires_fit=False,
-            ))
+        features.append(NewFeatureDef(
+            name=f"{c1}_x_{c2}",
+            source_columns=[c1, c2],
+            transform_type=TransformOp.INTERACTION,
+            definition=f"{c1} * {c2}",
+            rationale="Interaction between top correlated numeric features",
+            missing_handling="NaN if either is NaN",
+            requires_fit=False,
+        ))
 
     return features[:10]
 

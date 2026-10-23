@@ -134,6 +134,8 @@ class TestFeatures:
         assert "id" in plan.columns_to_drop
         assert "const_col" in plan.columns_to_drop
         assert "all_missing" in plan.columns_to_drop
+        for feat in plan.new_features:
+            assert all(c in lr.train.columns for c in feat.source_columns)
 
     def test_correlations(self, synth_task_dir, default_config):
         lr = load_data(default_config)

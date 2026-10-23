@@ -262,21 +262,7 @@ class DataTransformer:
 
         try:
             if nf.transform_type == TransformOp.INTERACTION:
-                if "range" in nf.definition.lower() and "temp" in nf.name.lower():
-                    temp_vals = df[nf.source_columns].apply(pd.to_numeric, errors="coerce")
-                    df[nf.name] = temp_vals.max(axis=1) - temp_vals.min(axis=1)
-                elif "*" in nf.definition:
-                    vals = [pd.to_numeric(df[c], errors="coerce") for c in nf.source_columns]
-                    result = vals[0]
-                    for v in vals[1:]:
-                        result = result * v
-                    df[nf.name] = result
-                else:
-                    vals = [pd.to_numeric(df[c], errors="coerce") for c in nf.source_columns]
-                    result = vals[0]
-                    for v in vals[1:]:
-                        result = result * v
-                    df[nf.name] = result
+                df[nf.name] = self._eval_interaction(df, nf)
 
             elif nf.transform_type == TransformOp.LOG_TRANSFORM:
                 df[nf.name] = np.log1p(pd.to_numeric(df[nf.source_columns[0]], errors="coerce").clip(lower=0))
@@ -302,6 +288,47 @@ class DataTransformer:
             logger.warning("Failed to create feature '%s': %s", nf.name, str(e)[:200])
 
         return df
+
+    @staticmethod
+    def _eval_interaction(df: pd.DataFrame, nf: NewFeatureDef) -> pd.Series:
+        """Evaluate an interaction feature using the definition text.
+
+        Supports safe expressions over source_columns: arithmetic operators,
+        numpy functions (log1p, sqrt, abs, exp, max, min), and column references.
+        Falls back to column product if the definition can't be parsed safely.
+        """
+        defn = nf.definition.lower().strip()
+        cols = {c: pd.to_numeric(df[c], errors="coerce") for c in nf.source_columns}
+
+        safe_ns = {
+            "np": np, "log1p": np.log1p, "sqrt": np.sqrt,
+            "abs": np.abs, "exp": np.exp, "log": np.log,
+            "max": lambda *a: np.maximum.reduce(list(a)) if len(a) > 1 else a[0].max(),
+            "min": lambda *a: np.minimum.reduce(list(a)) if len(a) > 1 else a[0].min(),
+        }
+        safe_ns.update(cols)
+
+        allowed_chars = set("abcdefghijklmnopqrstuvwxyz0123456789_+-*/() .,")
+        if defn and all(c in allowed_chars for c in defn):
+            all_names_present = all(
+                c.lower() in defn for c in nf.source_columns
+            )
+            has_no_dunders = "__" not in defn
+            if all_names_present and has_no_dunders:
+                try:
+                    for col_name in sorted(cols.keys(), key=len, reverse=True):
+                        defn = defn.replace(col_name.lower(), col_name)
+                    result = eval(defn, {"__builtins__": {}}, safe_ns)  # noqa: S307
+                    if isinstance(result, (pd.Series, np.ndarray)):
+                        return pd.Series(result, index=df.index)
+                except Exception:
+                    logger.debug("Could not eval definition '%s', falling back to product", nf.definition)
+
+        vals = list(cols.values())
+        result = vals[0]
+        for v in vals[1:]:
+            result = result * v
+        return result
 
 
 def split_train_val(

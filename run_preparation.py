@@ -28,7 +28,7 @@ logging.basicConfig(
 def main():
     parser = argparse.ArgumentParser(description="Data preparation for tabular regression")
     parser.add_argument("task_dir", help="Directory with train.csv, test.csv, etc.")
-    parser.add_argument("--target", default="site_eui", help="Target column name")
+    parser.add_argument("--target", required=True, help="Target column name")
     parser.add_argument("--metric", default="rmse", help="Metric name")
     parser.add_argument("--output-dir", default=None, help="Output directory (default: task_dir/output)")
     parser.add_argument("--time-budget", type=int, default=1800, help="Time budget in seconds")
