@@ -27,30 +27,39 @@ def fit_model(fit, preparation):
 '''
 
 TOOLKIT_GUIDE = {
-    'import': f'from {TOOLKIT} import gbdt, target_stats, automl',
-    'gbdt': 'gbdt(fit, preparation, *, transform=None, params=None, candidates=None, tune_classes=True) -> predictor. '
-            'Shift-aware LightGBM for one target: categories with a fit vocabulary, dates as calendar parts, inner '
-            'split along the temporal column, early stopping, loss (L2/Huber/log) or class weights (plain/balanced/'
-            'sqrt) chosen by the task scorer, per-class probability multipliers, final retrain on all fit rows. '
-            'transform(frame, fit, training) -> frame adds features (keep row order; training=True only when frame '
-            'is fit itself). params override LightGBM parameters (num_leaves, learning_rate, min_child_samples, '
-            'colsample_bytree, reg_lambda, ...). candidates: [(name, extra_params, option)], option None|"log"|'
-            '"balanced"|"sqrt_balanced"; they are tried IN ADDITION to the defaults, and a Huber candidate without '
-            'alpha gets a data-derived alpha.',
-    'target_stats': 'target_stats(reference, frame, keys, target, *, training=False, time=None, folds=5, prefix=None) '
-                    '-> DataFrame aligned to frame.index: mean target (per class for labels), count and latest earlier '
-                    'value for rows sharing `keys` (a repeated entity). training=True: each row sees only earlier '
-                    'periods of `time` or other folds, so it is leakage-safe inside transform.',
+    'purpose': 'Routine helpers so generated code does not re-implement encoding, validation and metric tuning. '
+               'They contain no model choice: pick the learner the hypothesis needs (CatBoost, XGBoost, LightGBM, '
+               'sklearn, torch, AutoML, blends) and use only the helpers that help.',
+    'import': f'from {TOOLKIT} import Features, labels, split, inner_score, class_scale, output, target_stats, gbdt, automl',
+    'Features': 'features = Features(fit, preparation, transform=None, kind="category"|"string"|"codes"): features.train '
+                'is the encoded fit, features(frame) encodes a prediction batch identically; features.categorical lists '
+                'categorical columns. "string" suits CatBoost (cat_features=features.categorical), "category" LightGBM/'
+                'XGBoost(enable_categorical=True)/HistGradientBoosting, "codes" sklearn/torch. Dates -> calendar parts; '
+                'targets/ids/free text dropped. transform(frame, fit, training) -> frame adds features first.',
+    'labels': 'target, y, classes = labels(fit, preparation): classification labels as 0..K-1 codes, classes[code] maps back.',
+    'split': 'train_rows, valid_rows = split(fit, preparation): inner holdout positions following the measured shift '
+             '(latest periods of the temporal column, else stratified). Use for early stopping, weights, blending.',
+    'inner_score': 'inner_score(values, fit, valid_rows, preparation) -> task metric on inner rows, higher is better.',
+    'class_scale': 'scale = class_scale(probability, classes, fit, valid_rows, preparation): per-class multipliers; '
+                   'predict classes[argmax(probability * scale)] (helps macro/averaged label metrics).',
+    'output': 'return output(frame, preparation, values) -> DataFrame of ids + target, for predict(frame).',
+    'target_stats': 'target_stats(reference, frame, keys, target, *, training=False, time=None) -> leakage-safe mean/'
+                    'count/last target of rows sharing keys (repeated entities); training=True inside transform for fit.',
+    'gbdt': 'gbdt(fit, preparation, transform=None, params=None, candidates=None) -> predictor: a ready LightGBM-only '
+            'pipeline (loss/class weights chosen by the scorer). Classification predictors expose .proba(frame) and '
+            '.classes for blending. It cannot train other learners.',
     'automl': "automl(fit, preparation, engine, time_limit) -> predictor; engine 'autogluon'|'lightautoml'|'flaml'.",
-    'example': 'def transform(frame, fit, training):\n'
-               '    frame = frame.copy()\n'
-               '    frame["ratio"] = frame["a"] / (frame["b"] + 1)\n'
-               '    return frame.join(target_stats(fit, frame, ["key1", "key2"], TARGET, training=training, time=TIME))\n'
-               'def fit_model(fit, preparation):\n'
-               '    return gbdt(fit, preparation, transform=transform, params={"num_leaves": 63})',
-    'when_not': 'Write your own model code for multi-target, sequence/batch or other outputs gbdt rejects, '
-                'or when the hypothesis needs another learner; you may still blend it with gbdt predictions.',
+    'example': 'features = Features(fit, preparation, kind="string"); target, y, classes = labels(fit, preparation)\n'
+               'train, valid = split(fit, preparation)\n'
+               'model = CatBoostClassifier(iterations=3000, learning_rate=0.05, thread_count=4, verbose=0, '
+               'allow_writing_files=False, auto_class_weights="SqrtBalanced")\n'
+               'model.fit(features.train.iloc[train], y[train], cat_features=features.categorical, '
+               'eval_set=(features.train.iloc[valid], y[valid]), early_stopping_rounds=100)\n'
+               'scale = class_scale(model.predict_proba(features.train.iloc[valid]), classes, fit, valid, preparation)\n'
+               '# then refit on all rows with model.get_best_iteration() and\n'
+               'def predict(frame): return output(frame, preparation, classes[(final.predict_proba(features(frame)) * scale).argmax(1)])',
 }
+
 
 def template(preparation: dict, threads: int) -> tuple[str, dict] | None:
     """Source and plan of the controller GBDT node, or None to keep the LLM baseline."""

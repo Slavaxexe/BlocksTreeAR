@@ -138,6 +138,84 @@ def inner_split(fit, labels, temporal):
     return np.sort(shuffled[cut:]), np.sort(shuffled[:cut])
 
 
+class Features:
+    """Encode fit and later batches identically, in the format a library expects; no model inside.
+
+    kind='category': pandas categories with the fit vocabulary (LightGBM, XGBoost enable_categorical,
+    HistGradientBoosting); 'string': categories as str with NaN -> 'nan' (CatBoost; pass cat_features=
+    features.categorical); 'codes': integer codes, -1 for missing/unseen (sklearn, torch). Dates become calendar
+    parts; targets, ids and free text are dropped. transform(frame, fit, training) adds features first.
+    features.train is the encoded fit; features(frame) encodes a prediction batch.
+    """
+    def __init__(self, fit, preparation, *, transform=None, kind='category'):
+        if kind not in ('category', 'string', 'codes'):
+            raise ValueError("kind must be 'category', 'string' or 'codes'")
+        self.fit, self.transform, self.kind = fit, transform, kind
+        data = transform(fit.copy(), fit, True) if transform else fit
+        self.columns, self.vocab, self.stamps = schema(data, preparation)
+        self.categorical = list(self.vocab)
+        self.train = self._encode(data)
+
+    def __call__(self, frame):
+        return self._encode(self.transform(frame.copy(), self.fit, False) if self.transform else frame)
+
+    def _encode(self, data):
+        X = encode(data, self.columns, self.vocab, self.stamps)
+        for column in self.vocab:
+            X[column] = X[column].astype(str).where(X[column].notna(), 'nan') if self.kind == 'string' else \
+                X[column].cat.codes if self.kind == 'codes' else X[column]
+        return X
+
+
+def labels(fit, preparation):
+    """(target name, label array, classes or None); class labels become 0..K-1 codes, classes maps them back."""
+    target = preparation['data']['target_columns'][0]
+    if (task_kind(preparation) or {}).get('task') == 'classification':
+        classes, codes = np.unique(fit[target].to_numpy(), return_inverse=True)
+        return target, codes, classes
+    return target, fit[target].to_numpy(dtype=float), None
+
+
+def split(fit, preparation):
+    """Inner (train_rows, valid_rows) positions of fit: latest periods of the temporal column, else stratified."""
+    _, y, classes = labels(fit, preparation)
+    return inner_split(fit, y if classes is not None else None, temporal_column(preparation))
+
+
+def inner_score(values, fit, rows, preparation):
+    """Task metric of predictions for fit.iloc[rows], oriented so that higher is better (None without a scorer)."""
+    scorer = preparation.get('scorer')
+    if scorer is None:
+        return None
+    target = preparation['data']['target_columns'][0]
+    score = float(scorer(fit.iloc[rows].reset_index(drop=True), pd.DataFrame({target: np.asarray(values)}), preparation))
+    return -score if preparation['metric'].get('direction') == 'minimize' else score
+
+
+def class_scale(probability, classes, fit, rows, preparation):
+    """Per-class probability multipliers maximizing the task metric on fit.iloc[rows]; use argmax(probability * scale)."""
+    scale = np.ones(len(classes))
+    best = inner_score(classes[np.argmax(probability, axis=1)], fit, rows, preparation)
+    if best is None or len(classes) > 50:
+        return scale
+    for _ in range(2):
+        for k in range(len(classes)):
+            for factor in (.5, .7, .85, 1.2, 1.5, 2., 3.):
+                trial = scale.copy()
+                trial[k] *= factor
+                score = inner_score(classes[np.argmax(probability * trial, axis=1)], fit, rows, preparation)
+                if score > best + 1e-9:
+                    best, scale = score, trial
+    return scale
+
+
+def output(frame, preparation, values):
+    """Prediction DataFrame: identifier columns of frame plus the target column."""
+    ids = [c for c in preparation['data'].get('id_columns') or [] if c in frame]
+    target = preparation['data']['target_columns'][0]
+    return pd.DataFrame({**{c: frame[c].to_numpy() for c in ids}, target: np.asarray(values)})
+
+
 def target_stats(reference, frame, keys, target, *, training=False, time=None, folds=5, prefix=None):
     """Target statistics of rows sharing the same `keys` values (a repeated entity), without target leakage.
 
@@ -301,6 +379,10 @@ def gbdt(fit, preparation, *, transform=None, params=None, candidates=None, tune
         frame = transform(features.copy(), fit, False) if transform else features
         values = {c: features[c].to_numpy() for c in ids if c in features}
         return pd.DataFrame({**values, target: output(final, option, encode(frame, columns, vocab, stamps), scale)})
+    if task == 'classification':  # probabilities and class order let other code blend this model
+        predict.classes = classes
+        predict.proba = lambda features: probabilities(final, encode(
+            transform(features.copy(), fit, False) if transform else features, columns, vocab, stamps))
     return predict
 
 

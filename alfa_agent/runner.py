@@ -66,6 +66,17 @@ def apply_edits(code: str, edits) -> str:
     return '\n'.join(lines)
 
 
+class DuplicateCode(Exception):
+    """Not a ValueError: an exact repeat of measured code ends the node instead of entering repair."""
+
+
+def code_key(code: str) -> str:
+    try:
+        return hashlib.sha256(ast.dump(ast.parse(code), include_attributes=False).encode()).hexdigest()
+    except SyntaxError:
+        return hashlib.sha256(code.strip().encode()).hexdigest()
+
+
 class NeedsReplan(ValueError):
     pass
 
@@ -191,12 +202,12 @@ async def review_source(agents, path: Path, source: Path, context: dict, *, requ
 
 async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents, deadline: float, checkpoint,
                      *, code: str | None = None, blocking_review: bool = True, repairable: bool = True,
-                     check_seconds: float = 45) -> Finish:
+                     check_seconds: float = 45, measured: dict | None = None) -> Finish:
     """code: controller-written first source; the implementer repairs it only when repairable."""
     start_hash, started = file_hash(node / 'start.json'), time.monotonic()
     checkpoint()
     code_hash, notes, stage = None, [], 'implementation'
-    progress, replan = RepairProgress(), {}
+    progress, replan, refusals = RepairProgress(), {}, 0
     request_limit = min(agents.max_calls, agents.requests + IMPLEMENTATION_CALLS)
     try:
         preparation_path = node.parent.parent / 'preparation.json'
@@ -229,10 +240,11 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 context['last_refusal'] = {'source': 'model_claim', 'verified': False,
                                           'message': 'plan_conflict requires an exact saved-plan quote and actual withheld target columns'}
                 continue
-            if program.blocked_reason and not program.code.strip():
+            if program.blocked_reason and not program.code.strip() and not program.edits:
                 message = 'Implementation blocked: ' + program.blocked_reason
                 context['last_refusal'] = {'source': 'model_claim', 'verified': False, 'message': program.blocked_reason}
-                if agents.requests >= request_limit or time.monotonic() >= deadline:
+                refusals += 1
+                if refusals >= 2 or agents.requests >= request_limit or time.monotonic() >= deadline:  # a repeated refusal returns the plan to Baker
                     raise ValueError(message)
                 checkpoint(f'{start.node_id}: reconsidering an unverified implementation refusal; saved start is unchanged')
                 continue
@@ -241,6 +253,9 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 atomic_bytes(node / start.implementation, (program.code + ENTRY).encode())
                 code_hash = file_hash(node / start.implementation)
                 check_code(program.code, ('fit_model',))
+                twin = (measured or {}).get(code_key(program.code))
+                if twin and twin != start.node_id:
+                    raise DuplicateCode(f'Identical code was already measured as {twin}; a new node must change the experiment.')
                 await process(['-m', 'alfa_agent.worker', '--check', str(node), '--preparation', str(preparation_path)],
                               node, node / 'execution.log', deadline, min(check_seconds, start.timeout_seconds))
                 if file_hash(node / 'start.json') != start_hash or file_hash(preparation_path) != start.preparation_sha256:
@@ -321,6 +336,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
 
     active, waiting, starts, planner, planning = {}, deque(), {}, None, None
     sources, baseline_id, references = {}, None, set()  # controller code by node; search gate; AutoML nodes
+    measured = {}  # AST hash of every completed node's code -> node id
 
     def update(**changes):
         nonlocal report
@@ -437,6 +453,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
             if differences:
                 finish = finish.model_copy(update={'diagnostics': {**finish.diagnostics, 'parent_delta': differences}})
                 save(directory / 'nodes' / start.node_id / 'finish.json', finish)
+            source = directory / 'nodes' / start.node_id / 'experiment.py'
+            if finish.status == 'completed' and source.exists():
+                measured.setdefault(code_key(source.read_text().removesuffix(ENTRY)), start.node_id)
             row, delta = summarize(delta, start, finish)
             save(directory / 'nodes' / start.node_id / 'delta.json', row)
             save(directory / 'delta.json', delta)
@@ -487,7 +506,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 local = JSONAgents(settings, deadline, IMPLEMENTATION_CALLS, shared=agents, node_id=start.node_id)
                 task = asyncio.create_task(experiment(directory / 'nodes' / start.node_id, start, context, local, deadline, checkpoint,
                                                       code=sources.pop(start.node_id, None), blocking_review=not options.autopilot,
-                                                      check_seconds=150 if start.node_id in references else 45))
+                                                      check_seconds=150 if start.node_id in references else 45,
+                                                      measured=measured))
                 active[task] = start
             if (not expired and not planning_failed and planner is None and (options.autopilot or len(active) < options.executors)
                     and all(s.node_id in references for s in waiting)  # autopilot: one batch may queue behind running nodes

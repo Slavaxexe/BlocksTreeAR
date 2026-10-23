@@ -366,6 +366,30 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('n_estimators', reference['sklearn.ensemble.RandomForestRegressor'])
         self.assertIn('.fit(', reference['sklearn.ensemble.RandomForestRegressor'])
 
+    def test_toolkit_utilities_encode_per_library_split_by_shift_and_expose_probabilities(self):
+        from alfa_agent.toolkit import Features, class_scale, gbdt, inner_score, labels, output, split
+        rng = np.random.RandomState(0)
+        fit = pd.DataFrame({'id': range(300), 'city': rng.choice(['a', 'b', None], 300), 'x': rng.randn(300),
+                            'period': np.repeat([1, 2, 3], 100)})
+        fit['y'] = np.where(fit.x > 0, 'hi', 'lo')
+        prep = {'data': {'target_columns': ['y'], 'id_columns': ['id']}, 'metric': {'name': 'accuracy', 'direction': 'maximize'},
+                'task_type': 'classification', 'profile': {'target': {'y': {'distinct': 2, 'counts': {'hi': 1, 'lo': 1}}}},
+                'validation': {'shift': {'temporal_column': 'period'}},
+                'scorer': lambda ref, pred, cfg: float((ref['y'].to_numpy() == pred['y'].to_numpy()).mean())}
+        batch = pd.DataFrame({'id': [7, 8], 'city': ['zzz', None], 'x': [1., -1.], 'period': [4, 4]})
+        strings, codes = Features(fit, prep, kind='string'), Features(fit, prep, kind='codes')
+        self.assertEqual((strings.categorical, list(strings(batch).city)), (['city'], ['nan', 'nan']))
+        self.assertEqual(list(codes(batch).city), [-1, -1])
+        self.assertNotIn('y', strings.train)
+        target, y, classes = labels(fit, prep)
+        train, valid = split(fit, prep)
+        self.assertTrue((fit.period.iloc[valid] == 3).all() and (fit.period.iloc[train] < 3).all())
+        self.assertEqual(inner_score(classes[y[valid]], fit, valid, prep), 1.)
+        self.assertEqual(len(class_scale(np.eye(2)[y[valid]], classes, fit, valid, prep)), 2)
+        self.assertEqual(list(output(batch, prep, ['hi', 'lo']).columns), ['id', 'y'])
+        predictor = gbdt(fit, prep)
+        self.assertEqual((predictor.proba(batch).shape, list(predictor.classes)), ((2, 2), ['hi', 'lo']))
+
     def test_target_stats_never_use_a_training_row_own_or_later_targets(self):
         from alfa_agent.toolkit import target_stats
         fit = pd.DataFrame({'key': ['a', 'a', 'a', 'b', 'b'], 'year': [1, 2, 3, 1, 2], 'y': [10., 20., 30., 5., 7.]})
@@ -389,6 +413,25 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(combine(labels, [3, 1, 1], True)['y'].tolist(), ['a', 'b'])
         codes = [pd.DataFrame({'y': [0, 2]}), pd.DataFrame({'y': [1, 2]})]
         self.assertEqual(combine(codes, [1, 2], True)['y'].tolist(), [1, 2])  # class codes are voted, not averaged
+
+    async def test_code_identical_to_a_measured_node_is_not_executed_again(self):
+        from alfa_agent.runner import code_key
+        with tempfile.TemporaryDirectory() as temporary:
+            (root, report), seen = await self.exercise(Path(temporary), max_nodes=1)
+            measured = {code_key(PROGRAM): 'node_000'}
+            node = root / 'nodes/node_009'
+            node.mkdir()
+            start = load(root / 'nodes/node_000/start.json', Start).model_copy(update={'node_id': 'node_009'})
+            from alfa_agent.storage import save
+            save(node / 'start.json', start)
+            agent = JSONAgents(Settings('fake', 'http://proxy/v1', 'model'), time.monotonic() + 20)
+            agent.implement = AsyncMock(return_value=Program(code=PROGRAM + '\n# same code, new comment'))
+            context = {'preparation': json.loads((root / 'preparation.json').read_text()), 'task_text': ''}
+            with patch('alfa_agent.runner.process', new=AsyncMock()) as child:
+                finish = await experiment(node, start, context, agent, time.monotonic() + 20, lambda *a: None, measured=measured)
+            self.assertEqual(finish.status, 'failed')
+            self.assertIn('already measured as node_000', finish.error)
+            child.assert_not_called()
 
     async def test_full_refit_uses_all_train_without_overwriting_validation_score(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -626,7 +669,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('unavailable', finish.error)
             self.assertIsNone(finish.code_sha256)
             self.assertEqual(finish.notes, ['No model substitution was made.'])
-            self.assertEqual(seen.count('Program'), 20)
+            self.assertEqual(seen.count('Program'), 2)  # a repeated refusal returns the plan to Baker
             self.assertFalse((node / 'experiment.py').exists())
 
     async def test_unverified_refusal_is_reconsidered_without_changing_start(self):
@@ -641,7 +684,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             (root, report), seen = await self.exercise(Path(temporary), blocked=True, max_nodes=4)
             self.assertEqual((report.status, report.stop_reason), ('failed', 'baseline_failed'))
-            self.assertEqual(seen.count('Program'), 20)
+            self.assertEqual(seen.count('Program'), 2)  # a repeated refusal returns the plan to Baker
             self.assertNotIn('Hypotheses', seen)
             self.assertEqual([p.name for p in (root / 'nodes').iterdir()], ['node_000'])
             self.assertEqual(report.failed_nodes, 1)

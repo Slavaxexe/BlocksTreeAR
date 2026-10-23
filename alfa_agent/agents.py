@@ -72,6 +72,26 @@ def explore_parent(context, leader):
     return {'node_id': node['node_id'], 'score': node['result']['value'], 'pipeline': node['hypothesis']['pipeline'], 'code': code}
 
 
+def tried_directions(context):
+    """Measured outcome per model family, so Baker sees when one learner has been exhausted."""
+    direction = context['delta'].get('metric', {}).get('direction')
+    sign = -1 if direction == 'minimize' else 1
+    families = {}
+    for node in context['delta']['nodes']:
+        model = node['hypothesis']['pipeline'].get('model') or {}
+        family = str(model.get('family') or model.get('type') or 'unspecified')[:60]
+        row = families.setdefault(family, {'nodes': 0, 'completed': 0, 'failed': 0, 'best': None})
+        row['nodes'] += 1
+        value = node.get('result', {}).get('value')
+        if node.get('result', {}).get('status') == 'completed':
+            row['completed'] += 1
+            if value is not None and (row['best'] is None or sign * value > sign * row['best']):
+                row['best'] = value
+        else:
+            row['failed'] += 1
+    return families
+
+
 def baker_context(context):
     """Lossless pipeline overrides avoid repeating shared blocks and full experiment records."""
     parent = context['parent']
@@ -102,7 +122,7 @@ def baker_context(context):
     leader = next((n for n in measured if n['node_id'] == parent['start']['node_id']), None)
     recent = ([leader] if leader else []) + [n for n in measured if n is not leader][-2:]
     return {**{k: context[k] for k in keys if k in context}, 'runtime_contract': runtime_contract(context['preparation']),
-        'toolkit': TOOLKIT_GUIDE, 'library_notes_available': sorted(DOCS),
+        'toolkit': TOOLKIT_GUIDE, 'library_notes_available': sorted(DOCS), 'tried': tried_directions(context),
         'explore_parent': explore_parent(context, parent['start']['node_id']),
         'parent': {'node_id': parent['start']['node_id'], 'pipeline': base, 'code': parent['code'],
                    'score': parent['finish']['value']},
@@ -300,11 +320,10 @@ class JSONAgents:
 
     async def implement(self, context: dict, *, request_limit: int):
         return await self.ask(Program, "Implement the saved start.hypothesis as one compact experiment.py. "
-            "Prefer the project toolkit (context.toolkit): for one-target row tasks express the hypothesis as gbdt(...) with "
-            "a transform for features, params and candidates, or automl(...); it already handles categories, dates, "
-            "shift-aware inner validation, loss/class-weight selection by the task scorer and the final retrain. "
-            "Use target_stats inside transform for target-derived entity features (never compute them from the rows' "
-            "own targets). Write custom model code only when the hypothesis needs it; keep it short. "
+            "Implement the learner the hypothesis names; do not swap it for another one. context.toolkit offers routine "
+            "helpers (Features encoding per library, labels, shift-aware split, inner_score, class_scale, output, "
+            "target_stats) so encoding/validation code stays short and correct; gbdt() is only a LightGBM shortcut and "
+            "cannot host other models. Use target_stats for target-derived entity features (never the rows' own targets). "
             "CURRENT NODE: only context.start defines your assignment; parent_reference is optional reference code. "
             "On repair, correct previous_code using execution_error and failed_stage; do not repeat the same error. "
             "api_reference gives the REAL signatures of the library calls in previous_code (installed versions): use only "
@@ -423,13 +442,17 @@ class JSONAgents:
             "gain from class weights and probability multipliers tuned on an inner split with preparation['scorer']; "
             "a blend of 2-3 diverse strong models inside one fit_model; tuning learning rate, leaves, minimum leaf size and "
             "column sampling. Avoid methods superlinear in rows (SVC, KNN, Gaussian processes) above 20k rows. "
-            "toolkit describes short building blocks (gbdt with transform/params/candidates, target_stats, automl); plans "
-            "expressed through them are implemented quickly and reliably. "
+            "toolkit offers helpers (encoding, shift-aware split, metric tuning, entity target_stats, a LightGBM-only gbdt "
+            "shortcut, automl); they do not limit the learner — any installed model or blend can be planned. "
             "Name the library in the plan: the implementer then receives its version-specific notes (library_notes_available). "
             "AutoGluon, LightAutoML and FLAML are permitted tools: controller reference nodes may already "
             "run them; you may improve from such a parent, run AutoML on engineered features, or blend AutoML with other "
             "models in one node when the measured history suggests complementary errors. "
             "Libraries may use 4 threads.\n"
+            "Diversity: `tried` lists every model family with its node count and best score. The two proposals must "
+            "change different things — one of: features/data, learner, loss or class treatment, ensemble. A family with "
+            "3 or more completed nodes that never beat the leader is exhausted: propose it again only with a genuinely new "
+            "feature idea, and let explore use another learner or a blend instead. Name the learner in pipeline.model.family.\n"
             "Return hypotheses entries containing purpose, parent_id and hypothesis (rationale, expected_effect, four pipeline blocks).\n")
         purposes, previous = ['improve', 'explore'][:count], {}
         rejections = rejections if rejections is not None else {}
