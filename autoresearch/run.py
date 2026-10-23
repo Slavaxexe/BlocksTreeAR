@@ -134,7 +134,7 @@ def run(task_path: str, out_dir: str | None = None, no_llm: bool = False, total_
         """Страховочный ответ сразу после базовой линии: даже если дальше всё упадёт, submission уже есть."""
         if rec.get("status") != "ok":
             return
-        pred, info = refit_members({rec["id"]: 1.0}, mem, ctx, run_dir / "safety", budget.deadline, log)
+        pred, info = refit_members({rec["id"]: 1.0}, mem, ctx, run_dir / "safety", budget.deadline, log, max_seeds=1)
         if pred is not None:
             chk = write_submission(pred, test_ids, task.id_cols, task.target, task.files.get("sample_submission"),
                                    y_all[: len(train)], sub_paths)

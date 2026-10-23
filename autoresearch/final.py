@@ -17,29 +17,40 @@ import pandas as pd
 from .experiment import ExperimentSpec, run_in_subprocess
 
 
-def refit_members(weights: dict, mem, ctx: dict, run_dir: Path, deadline: float, log=print) -> tuple[np.ndarray | None, dict]:
+def refit_members(weights: dict, mem, ctx: dict, run_dir: Path, deadline: float, log=print,
+                  max_seeds: int = 3) -> tuple[np.ndarray | None, dict]:
     exps = {e["id"]: e for e in mem.state["experiments"]}
     preds, used, info = [], [], {}
-    for exp_id, w in sorted(weights.items(), key=lambda t: -t[1]):
+    members = sorted(weights.items(), key=lambda t: -t[1])
+    ests = {i: 1.6 * exps[i]["seconds"] / max(1, len(ctx["fold_weights"])) + 30 for i, _ in members}
+    # усреднение по сидам (снижает дисперсию), если времени хватает на 3 сида для всех членов с запасом
+    n_seeds = max_seeds if deadline - time.monotonic() > max_seeds * sum(ests.values()) * 1.5 + 60 else 1
+    for exp_id, w in members:
         e = exps[exp_id]
         spec = ExperimentSpec.model_validate(e["spec"])
         iters = [i for i in (e.get("best_iters") or []) if i]
         n_rounds = int(np.mean(iters) * 1.15) if iters and spec.model.model_id in ("lightgbm", "catboost", "xgboost") else None
-        left = deadline - time.monotonic()
-        est = 1.6 * e["seconds"] / max(1, len(ctx["fold_weights"])) + 30
-        if left < est:
-            info[exp_id] = {"status": "skipped", "reason": f"нет времени: нужно ~{int(est)} с, есть {int(left)} с"}
-            continue
-        res = run_in_subprocess(spec, {**ctx, "mode": "final", "n_rounds": n_rounds}, run_dir / "final" / exp_id,
-                                timeout=min(left - 20, max(120, est * 3)))
-        info[exp_id] = {k: res.get(k) for k in ("status", "error", "seconds", "n_rounds")}
-        p = run_dir / "final" / exp_id / "test_pred.npy"
-        if res.get("status") == "ok" and p.exists():
-            pr = np.load(p)
-            if np.isfinite(pr).all():
-                preds.append(pr)
-                used.append(w)
-        log(f"   финал {exp_id} ({spec.summary()[:60]}): {info[exp_id]}")
+        seed_preds, runs = [], []
+        for k in range(n_seeds if spec.model.model_id not in ("ridge", "elasticnet") else 1):
+            left = deadline - time.monotonic()
+            if left < ests[exp_id]:
+                runs.append({"status": "skipped", "reason": f"нет времени: нужно ~{int(ests[exp_id])} с, есть {int(left)} с"})
+                break
+            d = run_dir / "final" / f"{exp_id}_seed{k}"
+            res = run_in_subprocess(spec, {**ctx, "mode": "final", "n_rounds": n_rounds, "seed": ctx["seed"] + k}, d,
+                                    timeout=min(left - 20, max(120, ests[exp_id] * 3)))
+            runs.append({kk: res.get(kk) for kk in ("status", "error", "seconds", "n_rounds")})
+            p = d / "test_pred.npy"
+            if res.get("status") == "ok" and p.exists():
+                pr = np.load(p)
+                if np.isfinite(pr).all():
+                    seed_preds.append(pr)
+        info[exp_id] = {"seeds_ok": len(seed_preds), "runs": runs}
+        if seed_preds:
+            preds.append(np.mean(seed_preds, axis=0))
+            used.append(w)
+        log(f"   финал {exp_id} ({spec.summary()[:60]}): сидов {len(seed_preds)}/{len(runs)}, "
+            f"{[r.get('seconds') for r in runs]} с {[r.get('error') for r in runs if r.get('error')][:1]}")
     if not preds:
         return None, info
     wv = np.array(used) / sum(used)

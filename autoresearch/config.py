@@ -53,7 +53,7 @@ class Settings:
     llm_max_calls: int = 45
     llm_timeout_s: float = 180
     llm_max_tokens: int = 6000
-    memory_chars: int = 12000           # сколько памяти отдаём Qwen за один вызов
+    memory_chars: int = 15000           # сколько памяти отдаём Qwen за один вызов
 
     @property
     def api_key(self) -> str:

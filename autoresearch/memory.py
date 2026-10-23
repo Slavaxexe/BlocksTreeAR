@@ -127,11 +127,12 @@ class Memory:
         ranked = sorted(self.ok_experiments(), key=lambda e: sign * e["cv"])
 
         def line(e, hyp_len):
-            return {"id": e["id"], "parent": e.get("parent"), "src": e.get("source"),
-                    "hypothesis": _short(e.get("hypothesis"), hyp_len), "status": e.get("status"),
-                    "cv": None if e.get("cv") is None else round(e["cv"], 4),
-                    "d_best_%": e.get("delta_best_pct"), "verdict": e.get("verdict"),
-                    "qwen_verdict": e.get("analysis_verdict")}
+            d = {"id": e["id"], "parent": e.get("parent"), "src": e.get("source"),
+                 "what": _short(e.get("summary"), 90), "hypothesis": _short(e.get("hypothesis"), hyp_len),
+                 "cv": None if e.get("cv") is None else round(e["cv"], 4),
+                 "d_best_%": e.get("delta_best_pct"), "verdict": e.get("verdict"),
+                 "qwen_verdict": e.get("analysis_verdict")}
+            return {k: v for k, v in d.items() if v is not None}
 
         def detail(e):
             return {k: e.get(k) for k in ("id", "parent", "hypothesis", "spec", "status", "cv", "cv_std",
@@ -141,24 +142,29 @@ class Memory:
 
         facts = {k: v["value"] for k, v in self.state["facts"].items()}
 
-        def build(hyp_len, n_detail, n_top, keep_lines):
-            lines = [line(e, hyp_len) for e in exps]
-            if keep_lines is not None and len(lines) > keep_lines:
-                lines = lines[:3] + [{"…": f"{len(lines) - keep_lines} строк скрыто"}] + lines[-(keep_lines - 3):]
+        def compact(e, n):  # старые шаги — одной строкой, но НИ ОДИН не пропадает
+            cv = "—" if e.get("cv") is None else f"{e['cv']:.4f}"
+            hyp = f" | {_short(e.get('hypothesis'), n)}" if n else ""
+            return f"{e['id']}<-{e.get('parent') or '-'} {_short(e.get('summary'), 60 if n else 45)}{hyp} | cv={cv} {e.get('verdict')}"
+
+        def build(hyp_len, n_detail, n_top, n_full, c_len=50):
+            old = exps[: len(exps) - n_full] if n_full is not None and len(exps) > n_full else []
+            recent = exps[len(old):]
             return json.dumps({
                 "BUDGET": budget,
                 "FACTS": facts,
                 "BEST": detail(best) if best else None,
                 "TOP": [line(e, hyp_len) for e in ranked[:n_top]],
-                "ALL_EXPERIMENTS_IN_ORDER": lines,
+                "ALL_EXPERIMENTS_IN_ORDER": [compact(e, c_len) for e in old] + [line(e, hyp_len) for e in recent],
                 "LAST_EXPERIMENTS_DETAILED": [detail(e) for e in exps[-n_detail:]],
                 "INSIGHTS": [i["text"] for i in self.state["insights"]],
                 "BACKLOG_OPEN": [b["idea"] for b in self.state["backlog"] if b["status"] == "open"][-10:],
                 "RECENTLY_REJECTED_PROPOSALS": self.state["rejected_proposals"][-4:],
             }, ensure_ascii=False, default=str)
 
-        for args in ((140, 3, 8, None), (90, 2, 6, None), (70, 2, 5, 25), (50, 1, 5, 15), (40, 1, 3, 10)):
+        for args in ((140, 3, 8, None), (90, 2, 6, 20), (70, 2, 5, 12), (60, 1, 4, 6), (40, 1, 3, 0),
+                     (40, 1, 3, 0, 0)):
             text = build(*args)
             if len(text) <= max_chars:
                 return text
-        return text[:max_chars]
+        return text  # валидный JSON важнее лимита: лучше чуть длиннее, чем обрезанный
