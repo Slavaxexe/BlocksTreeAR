@@ -52,10 +52,15 @@ class TrainingCoordinator:
     def planning_budget(self):
         # Leave room for at least a small actual trial after the two API calls.
         floor = min(self.trial_timeout, max(2., self.trial_timeout*.1))
-        measured = statistics.median(self.role_durations[-6:]) if self.role_durations else 3.
+        measured = max(self.role_durations[-6:], default=30.)
+        requested = min(300., max(180., 4*measured))
         if self.remaining_search() < 2*measured+floor:
             return 0.
-        return min(60., self.remaining_search()-floor)
+        # A real EDA handoff can require much longer than a tiny synthetic task.
+        # Account for two calls and variance, while preserving the final reserve.
+        # Error-repair calls are often much shorter than a full next-plan response.
+        # A median of their mixed durations left the actual planner only 41s.
+        return min(requested, self.remaining_search()-floor)
 
     def admit(self, candidate, family):
         frozen = candidate.model_dump(mode='json')

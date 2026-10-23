@@ -1,11 +1,59 @@
 {
   "$defs": {
+    "PreparationRecipe": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "const": "margo",
+          "default": "margo",
+          "title": "Provider",
+          "type": "string"
+        },
+        "source_root": {
+          "title": "Source Root",
+          "type": "string"
+        },
+        "recipe": {
+          "title": "Recipe",
+          "type": "string"
+        },
+        "split": {
+          "title": "Split",
+          "type": "string"
+        },
+        "source_hashes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Source Hashes",
+          "type": "object"
+        },
+        "feature_names": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Feature Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_root",
+        "recipe",
+        "split",
+        "source_hashes"
+      ],
+      "title": "PreparationRecipe",
+      "type": "object"
+    },
     "SelectedModel": {
       "additionalProperties": false,
       "properties": {
         "family": {
           "enum": [
             "ridge",
+            "huber_linear",
+            "logistic_regression",
+            "knn",
             "elasticnet",
             "sgd",
             "random_forest",
@@ -28,6 +76,19 @@
         },
         "parameters": {
           "title": "Parameters",
+          "type": "object"
+        },
+        "target_transform": {
+          "default": "none",
+          "enum": [
+            "none",
+            "log1p"
+          ],
+          "title": "Target Transform",
+          "type": "string"
+        },
+        "selection_metadata": {
+          "title": "Selection Metadata",
           "type": "object"
         }
       },
@@ -56,6 +117,27 @@
           ],
           "default": null,
           "title": "Prediction Column"
+        },
+        "prediction_type": {
+          "default": "labels",
+          "enum": [
+            "labels",
+            "probability"
+          ],
+          "title": "Prediction Type",
+          "type": "string"
+        },
+        "positive_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Positive Label"
         }
       },
       "title": "SubmissionSpec",
@@ -138,8 +220,11 @@
       "type": "integer"
     },
     "task_type": {
-      "const": "regression",
       "default": "regression",
+      "enum": [
+        "regression",
+        "classification"
+      ],
       "title": "Task Type",
       "type": "string"
     },
@@ -163,7 +248,14 @@
         "mae",
         "mse",
         "r2",
-        "mape"
+        "mape",
+        "f1_macro",
+        "f1_weighted",
+        "accuracy",
+        "balanced_accuracy",
+        "f1",
+        "roc_auc",
+        "log_loss"
       ],
       "title": "Primary Metric",
       "type": "string"
@@ -186,6 +278,29 @@
     },
     "submission": {
       "$ref": "#/$defs/SubmissionSpec"
+    },
+    "preparation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PreparationRecipe"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "outer_split": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Outer Split"
     }
   },
   "required": [

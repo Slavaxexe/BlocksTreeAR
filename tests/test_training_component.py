@@ -18,6 +18,7 @@ from agent.training_component import main, run_training
 from agent.training_contracts import (ValidationDecision, TrainingPlan, TrainingCandidate,
                                       TrainingAnalysis, TrainingNextPlan)
 from agent.training_coordinator import TrainingCoordinator
+from agent.training_roles import compact_role_context
 from agent.training_templates import template_context
 from agent.training_backend import _model
 
@@ -154,6 +155,20 @@ class TrainingComponentTests(unittest.TestCase):
         stream.flush()
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(buffer.getvalue().decode('utf-8')), report)
+
+    def test_role_budget_adapts_to_large_upstream_eda(self):
+        policy = TrainingCoordinator(started=time.monotonic(), time_budget=600, trial_timeout=120, max_trials=10)
+        policy.role_durations = [17., 54., 41.]
+        self.assertGreater(policy.planning_budget(), 100.)
+        self.assertLessEqual(policy.planning_budget(), 180.)
+        upstream = {'eda': {'upstream_data_profile': {'test_columns': [{'name': 'duplicate'}],
+                    'train_columns': [{'name': 'x', 'numeric_stats': {'mean': 5., 'n_missing': 3, 'n_zeros': 1}}]},
+                    'upstream_preparation_report': {'high_correlations': list(range(100))}}}
+        compact = compact_role_context({'upstream_report': upstream})['upstream_report']['eda']
+        self.assertNotIn('test_columns', compact['upstream_data_profile'])
+        self.assertEqual(compact['upstream_data_profile']['train_columns'][0]['numeric_stats']['n_missing'], 3)
+        self.assertEqual(len(compact['upstream_preparation_report']['high_correlations']), 20)
+        self.assertEqual(len(upstream['eda']['upstream_preparation_report']['high_correlations']), 100)
 
     def test_templates_require_both_requirements_and_installed_library(self):
         models = [{'family': 'ridge'}, {'family': 'lightgbm'}, {'family': 'catboost'}]

@@ -12,6 +12,18 @@ def ridge(seed):
     return Ridge, {'alpha': 1., 'solver': 'lsqr'}
 
 
+def huber_linear(seed):
+    """Robust linear regression; tune epsilon, alpha and max_iter after scaling."""
+    from sklearn.linear_model import HuberRegressor
+    return HuberRegressor, {'epsilon': 1.35, 'alpha': .0001, 'max_iter': 300}
+
+
+def knn(seed):
+    """Distance-based regression; tune neighbors, weights and p on scaled features."""
+    from sklearn.neighbors import KNeighborsRegressor
+    return KNeighborsRegressor, {'n_neighbors': 5, 'weights': 'distance', 'n_jobs': 2}
+
+
 def elasticnet(seed):
     """Tune alpha and l1_ratio; increase max_iter if convergence is insufficient."""
     from sklearn.linear_model import ElasticNet

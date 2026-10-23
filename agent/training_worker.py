@@ -17,7 +17,12 @@ def main():
     output = Path(job['output_dir'])
     output.mkdir(parents=True, exist_ok=True)
     try:
-        result = run_job(job, args.time_budget)
+        config = json.loads(Path(job['input_path']).read_text(encoding='utf-8-sig'))
+        if config.get('task_type') == 'classification':
+            from .classification_backend import run_job as classification_job
+            result = classification_job(job, args.time_budget)
+        else:
+            result = run_job(job, args.time_budget)
     except Exception as exc:
         result = {'status': 'failed', 'phase': job.get('phase'), 'candidate': job.get('candidate', {}).get('name'),
                   'error_type': type(exc).__name__, 'error': str(exc), 'traceback': traceback.format_exc()}

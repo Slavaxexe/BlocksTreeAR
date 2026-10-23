@@ -13,7 +13,7 @@ import time
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
+from sklearn.compose import ColumnTransformer, TransformedTargetRegressor, make_column_selector
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 from sklearn.model_selection import KFold, GroupKFold, GroupShuffleSplit, TimeSeriesSplit, train_test_split
@@ -23,10 +23,11 @@ from threadpoolctl import threadpool_limits
 
 from .training_templates import plain_definition
 from .training_template_automl import flaml as flaml_settings, autogluon as autogluon_settings
+from .margo_recipe import MargoRecipeTransformer, PreparedAutoMLRecipe, register_margo, training_source_paths
 
 
 SUPPORTED_FAMILIES = (
-    'ridge', 'elasticnet', 'sgd', 'random_forest', 'extra_trees',
+    'ridge', 'huber_linear', 'knn', 'elasticnet', 'sgd', 'random_forest', 'extra_trees',
     'hist_gradient_boosting', 'lightgbm', 'catboost', 'xgboost', 'mlp',
     'flaml', 'autogluon',
 )
@@ -109,8 +110,9 @@ class FrozenAutogluonRecipe:
 
 
 def _check_source_files(config, root, expected):
+    paths = training_source_paths(config, root)
     for role, digest in expected.items():
-        path = root / config['files'][role]
+        path = paths[role]
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError(f'Input file changed since coordinator froze it: {role}')
 
@@ -187,10 +189,15 @@ def _model(family, parameters, seed):
     # Template defaults are already trusted executable settings. LightGBM exposes
     # native kwargs such as verbosity only after they are supplied to its wrapper.
     supported = set(cls().get_params()) | set(defaults)
+    if family == 'lightgbm':
+        # Native objective options are accepted through LGBMRegressor **kwargs
+        # and are emitted by the upstream model-selection loss registry.
+        supported |= {'alpha', 'tweedie_variance_power'}
     # XGBoost accepts **kwargs, but its wrapper does not validate arbitrary keys.
     # Restrict it to the advertised sklearn API and documented booster options.
     if family == 'xgboost':
-        supported |= {'max_bin', 'grow_policy', 'max_leaves', 'sampling_method', 'max_cat_to_onehot', 'max_cat_threshold'}
+        supported |= {'max_bin', 'grow_policy', 'max_leaves', 'sampling_method', 'max_cat_to_onehot', 'max_cat_threshold',
+                      'huber_slope', 'quantile_alpha', 'tweedie_variance_power'}
     if family == 'catboost':
         import inspect
         supported |= set(inspect.signature(cls.__init__).parameters) - {'self'}
@@ -199,7 +206,7 @@ def _model(family, parameters, seed):
         raise ValueError(f'Unsupported parameters for {family}: {unknown}. Use the installed model API names.')
     # Resource settings cannot be overridden by Qwen or a handoff report.
     params.update({key: value for key, value in defaults.items() if key not in params})
-    if family in {'random_forest', 'extra_trees', 'lightgbm', 'xgboost'}:
+    if family in {'random_forest', 'extra_trees', 'lightgbm', 'xgboost', 'knn'}:
         params['n_jobs'] = 2
     if family == 'lightgbm':
         for alias in ('num_threads', 'num_thread', 'nthread'):
@@ -220,12 +227,16 @@ def _freeze_full_fit(pipeline):
     from sklearn.base import clone
     result = clone(pipeline)
     fitted_model = pipeline.named_steps['model']
+    parameter_prefix = 'model__'
+    if isinstance(fitted_model, TransformedTargetRegressor):
+        fitted_model = fitted_model.regressor_
+        parameter_prefix += 'regressor__'
     params = fitted_model.get_params()
     overrides = {}
     if 'early_stopping' in params and params['early_stopping']:
-        overrides['model__early_stopping'] = False
+        overrides[parameter_prefix + 'early_stopping'] = False
         if 'max_iter' in params and hasattr(fitted_model, 'n_iter_'):
-            overrides['model__max_iter'] = max(1, int(fitted_model.n_iter_))
+            overrides[parameter_prefix + 'max_iter'] = max(1, int(fitted_model.n_iter_))
     result.set_params(**overrides)
     return result, overrides
 
@@ -280,14 +291,24 @@ def _inner_splits(frame, config, validation):
         raise ValueError(f'Unsupported validation strategy: {strategy}')
 
 
-def _fit_plain(family, parameters, x, y, numeric, categorical, seed, deadline):
+def _fit_plain(family, parameters, x, y, numeric, categorical, seed, deadline, config=None, target_transform='none'):
     _left(deadline)
     if family == 'hist_gradient_boosting':
         size = len(x) * (len(numeric) + sum(x[c].nunique(dropna=False) for c in categorical))
         if size > 100_000_000:
             raise ValueError('Dense one-hot matrix would exceed 100 million values; choose a sparse-compatible model')
     model, actual = _model(family, parameters, seed)
-    pipeline = Pipeline([('features', _preprocessor(numeric, categorical, dense=family == 'hist_gradient_boosting')),
+    if target_transform == 'log1p':
+        if np.any(np.asarray(y, dtype=float) <= -1):
+            raise ValueError('Upstream log1p target transform requires every target value > -1')
+        model = TransformedTargetRegressor(regressor=model, func=np.log1p, inverse_func=np.expm1)
+    elif target_transform != 'none':
+        raise ValueError(f'Unsupported upstream target transform: {target_transform}')
+    steps = []
+    if config and config.get('preparation'):
+        steps.append(('upstream', MargoRecipeTransformer(config['preparation'], config['target'], config.get('id_columns', []))))
+        numeric, categorical = make_column_selector(dtype_include=np.number), make_column_selector(dtype_exclude=np.number)
+    pipeline = Pipeline([*steps, ('features', _preprocessor(numeric, categorical, dense=family == 'hist_gradient_boosting')),
                          ('model', model)])
     fit_options = {}
     if family == 'lightgbm':
@@ -313,6 +334,11 @@ def _fit_automl(family, parameters, x, y, raw_rows, config, validation, phase, d
             work[column] = work[column].astype('category')
     budget = _left(deadline)
     train_idx, valid_idx = next(_inner_splits(raw_rows, config, {**validation, 'inner_validation': 'holdout'}))
+    if config.get('preparation'):
+        if validation.get('inner_validation') == 'cv':
+            raise ValueError('AutoML with an external feature recipe requires inner_validation=holdout; ordinary models support fold-local CV')
+        search_features = MargoRecipeTransformer(config['preparation'], config['target'], config.get('id_columns', [])).fit(x.iloc[train_idx])
+        work = search_features.transform(x)
     if family == 'flaml':
         from flaml import AutoML
         settings = flaml_settings(parameters, metric=config['primary_metric'],
@@ -338,7 +364,11 @@ def _fit_automl(family, parameters, x, y, raw_rows, config, validation, phase, d
         best = model.model
         best_config = model.best_config
         best_estimator = model.best_estimator
-        frozen = FrozenFlamlRecipe(best).fit(x, y)
+        frozen = FrozenFlamlRecipe(best)
+        if config.get('preparation'):
+            frozen = PreparedAutoMLRecipe(config['preparation'], config['target'], config.get('id_columns', []), family, frozen).fit(x, y, deadline, output)
+        else:
+            frozen.fit(x, y)
         return frozen, {'family': family, 'settings': parameters, 'selected_estimator': best_estimator,
                         'selected_parameters': best_config}, work
     from autogluon.tabular import TabularPredictor
@@ -362,7 +392,10 @@ def _fit_automl(family, parameters, x, y, raw_rows, config, validation, phase, d
     selected = predictor._trainer.load_model(best)
     template = selected.convert_to_refit_full_template()
     frozen = FrozenAutogluonRecipe(predictor._learner.feature_generator, template)
-    frozen.fit(x, y, deadline, output)
+    if config.get('preparation'):
+        frozen = PreparedAutoMLRecipe(config['preparation'], config['target'], config.get('id_columns', []), family, frozen).fit(x, y, deadline, output)
+    else:
+        frozen.fit(x, y, deadline, output)
     return frozen, {'family': family, 'settings': parameters, 'selected_model': best,
                     'selected_parameters': selected.get_trained_params(),
                     'ensemble_enabled': False, 'feature_preprocessing_frozen': True}, work
@@ -426,6 +459,8 @@ def run_job(job, time_budget):
     root = input_path.parent
     expected_hashes = job.get('expected_source_hashes', {})
     _check_source_files(config, root, expected_hashes)
+    if config.get('preparation'):
+        register_margo(config['preparation'])
     ids = config.get('id_columns', [])
     train = read_table(root / config['files']['train'], ids)
     test = read_table(root / config['files']['test'], ids)
@@ -444,7 +479,28 @@ def run_job(job, time_budget):
     if family not in SUPPORTED_FAMILIES:
         raise ValueError(f'Unsupported model family {family}; supported: {SUPPORTED_FAMILIES}')
     parameters = dict(selection.get('parameters', {}))
-    parameters.update(candidate.get('parameters', {}))
+    overrides = candidate.get('parameters', {})
+    metadata = selection.get('selection_metadata', {})
+    native_loss = metadata.get('loss_native', {})
+    locked = set(metadata.get('locked_parameters', [])) | set(native_loss)
+    locked |= {'objective', 'loss', 'loss_function', 'criterion'} & set(parameters)
+    missing_locked = sorted(locked - set(parameters))
+    if missing_locked:
+        raise ValueError(f'Upstream locked loss parameters are absent from the selected model parameters: {missing_locked}')
+    inconsistent = sorted(key for key, value in native_loss.items() if parameters.get(key) != value)
+    if inconsistent:
+        raise ValueError(f'Upstream native loss metadata disagrees with model parameters: {inconsistent}')
+    changed = sorted(key for key in locked if key in overrides and overrides[key] != parameters.get(key))
+    if changed:
+        raise ValueError(f'Upstream loss parameters are locked and cannot be overridden: {changed}. Omit these overrides or preserve their exact values.')
+    parameters.update(overrides)
+    target_transform = selection.get('target_transform', 'none')
+    if target_transform not in {'none', 'log1p'}:
+        raise ValueError(f'Unsupported upstream target transform: {target_transform}')
+    if target_transform == 'log1p' and np.any(y.to_numpy(dtype=float) <= -1):
+        raise ValueError('Upstream log1p target transform requires every labelled target value > -1')
+    if target_transform != 'none' and family in {'flaml', 'autogluon'}:
+        raise ValueError('AutoML adapters do not support an upstream target transform; select a native model for this recipe')
     phase = job['phase']
     validation = job.get('validation', {})
     seed = int(validation.get('seed', 42))
@@ -486,12 +542,20 @@ def run_job(job, time_budget):
     with threadpool_limits(limits=2):
         if validation.get('inner_validation') == 'cv' and phase == 'evaluate' and family not in {'flaml', 'autogluon'}:
             for inner_fit, inner_valid in _inner_splits(raw_fit, config, validation):
-                model, _ = _fit_plain(family, parameters, xfit.iloc[inner_fit], yfit.iloc[inner_fit], numeric, categorical, seed, deadline)
+                model, _ = _fit_plain(family, parameters, xfit.iloc[inner_fit], yfit.iloc[inner_fit], numeric, categorical, seed, deadline, config, target_transform)
                 inner_scores.append(metric_score(yfit.iloc[inner_valid], _predict(model, xfit.iloc[inner_valid]), metric))
         if phase == 'final':
             from sklearn.base import clone
             frozen = joblib.load(source / 'model.joblib')
-            if family == 'autogluon':
+            if isinstance(frozen, PreparedAutoMLRecipe):
+                selected = frozen.estimator
+                if family == 'autogluon':
+                    selected = FrozenAutogluonRecipe(selected.feature_generator, selected.template)
+                else:
+                    selected = FrozenFlamlRecipe(selected.estimator)
+                model = PreparedAutoMLRecipe(config['preparation'], target, ids, family, selected).fit(xfit, yfit, deadline, output)
+                actual = source_result['actual_parameters']
+            elif family == 'autogluon':
                 model = FrozenAutogluonRecipe(frozen.feature_generator, frozen.template).fit(xfit, yfit, deadline, output)
                 actual = source_result['actual_parameters']
             elif family == 'flaml':
@@ -506,7 +570,7 @@ def run_job(job, time_budget):
         elif family in {'flaml', 'autogluon'}:
             model, actual, _ = _fit_automl(family, parameters, xfit, yfit, raw_fit, config, validation, phase, deadline, output)
         else:
-            model, actual = _fit_plain(family, parameters, xfit, yfit, numeric, categorical, seed, deadline)
+            model, actual = _fit_plain(family, parameters, xfit, yfit, numeric, categorical, seed, deadline, config, target_transform)
         score = None
         train_score = None
         _check_source_files(config, root, expected_hashes)
@@ -533,7 +597,9 @@ def run_job(job, time_budget):
     _check_source_files(config, root, expected_hashes)
     joblib.dump(model, model_path)
     model_file = str(model_path)
+    upstream_features = model.features_ if isinstance(model, PreparedAutoMLRecipe) else model.named_steps.get('upstream') if isinstance(model, Pipeline) else None
     result = {'status': 'completed', 'phase': phase, 'candidate': candidate['name'], 'family': family,
+              'target_transform': target_transform, 'selection_metadata': metadata,
               'primary_metric': metric, 'metric': metric, 'direction': 'maximize' if metric == 'r2' else 'minimize',
               'candidate_hash': candidate_hash, 'input_sha256': input_sha256, 'split_sha256': split_sha256,
               'score': score, 'score_scope': 'outer_validation' if phase == 'evaluate' else 'none_full_data_refit',
@@ -546,7 +612,8 @@ def run_job(job, time_budget):
               'full_training_rows': len(train) if phase == 'final' else None,
               'validation_rows': len(valid_idx) if valid_idx is not None else 0,
               'prediction_rows': len(prediction), 'parameters': parameters, 'actual_parameters': actual,
-              'excluded_columns': excluded, 'feature_columns': list(x.columns), 'model_path': model_file,
+              'excluded_columns': excluded, 'feature_columns': upstream_features.feature_names_ if upstream_features else list(x.columns),
+              'preparation_fit_rows': upstream_features.fit_rows_ if upstream_features else None, 'model_path': model_file,
               'model_sha256': hashlib.sha256(model_path.read_bytes()).hexdigest(),
               'submission_path': str(output / filename), 'submission_scope': 'full_data_refit' if phase == 'final' else 'outer_fit_fallback'}
     (output / 'result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str, allow_nan=False), encoding='utf-8')

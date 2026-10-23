@@ -21,6 +21,10 @@ def flaml(parameters, *, metric, time_budget, log_file):
     settings.update(task='regression', metric=metric, time_budget=max(1., time_budget * .75),
                     n_jobs=2, verbose=0, log_file_name=str(log_file))
     settings.setdefault('estimator_list', ['lgbm', 'catboost', 'xgboost', 'extra_tree'])
+    permitted = {'lgbm', 'catboost', 'xgboost', 'extra_tree', 'rf'}
+    if not isinstance(settings['estimator_list'], list) or not settings['estimator_list'] or any(
+            name not in permitted for name in settings['estimator_list']):
+        raise ValueError('FLAML estimator_list must use installed requirements backends: '+', '.join(sorted(permitted)))
     return settings
 
 
@@ -41,6 +45,8 @@ def autogluon(parameters, *, metric):
                                                    {'GBM': {}, 'CAT': {}, 'XGB': {}, 'RF': {}, 'XT': {}}))
     if not isinstance(hyperparameters, dict):
         raise ValueError('AutoGluon hyperparameters must be a dictionary of model families')
+    if not hyperparameters or set(hyperparameters)-{'GBM', 'CAT', 'XGB', 'RF', 'XT'}:
+        raise ValueError('AutoGluon backends permitted by this bundle: GBM, CAT, XGB, RF, XT')
     for name, configurations in hyperparameters.items():
         for configuration in configurations if isinstance(configurations, list) else [configurations]:
             if not isinstance(configuration, dict):

@@ -21,9 +21,10 @@ from .training_contracts import TrainingInput
 from .training_templates import template_context
 from .training_roles import TrainingAnalyst, TrainingPlanner
 from .training_coordinator import TrainingCoordinator, candidate_fingerprint
+from .margo_recipe import training_source_paths, register_margo
 
 
-RULES = ('You implement ONLY regression training and validation. An upstream Qwen has already chosen '
+RULES = ('You implement ONLY training and validation for upstream_report.task_type. An upstream Qwen has already chosen '
          'model families and supplied EDA. Do not repeat task analysis, model-family selection, feature '
          'engineering or a business-model stage. Use only the selected_models and installed packages '
          'allowed by requirements.txt. upstream_report.primary_metric is the task scoring metric supplied '
@@ -48,7 +49,22 @@ RULES = ('You implement ONLY regression training and validation. An upstream Qwe
          'Read their API notes and adapt parameters to EDA, measured results and time budget. '
          'Template examples are starting points; you may use other supported hyperparameters. '
          'Do not edit Python template source or invent template APIs. '
+         'When upstream_report.preparation is present, its outer split and feature recipe are locked. '
+         'Do not change the outer validation fraction; choose only the internal validation strategy. '
+         'Ordinary models refit the recipe within each CV fold. AutoML with this external recipe '
+         'supports inner holdout only, so use inner_validation=holdout when scheduling FLAML/AutoGluon. '
          'Return structured decisions, not Python code. Do not invent measurements or claim unexecuted work. ')
+
+CLASSIFICATION_RULES = (
+    'This is the CLASSIFICATION branch. Use classifier templates, never regressors or regression losses. '
+    'The target can contain string class labels; backend handles encoding and preserves the original labels '
+    'in submissions. f1_macro gives equal weight to classes, so inspect imbalance and per-class diagnostics. '
+    'Optimize the supplied metric only. All classification metrics maximize except log_loss, which minimizes. '
+    'Never pass label names as numeric class_weight indices: backend label encoding is internal. '
+    'For automatic CatBoost class balancing use auto_class_weights=Balanced, not class_weights=Balanced. '
+    'Use stratified inner folds and ensure rare classes are present. Use inner holdout for FLAML/AutoGluon. '
+    'Preserve the fixed outer_split and do not tune thresholds/calibration on its labels. '
+    'The backend aligns probabilities to classes; submit labels or probabilities according to submission.prediction_type. ')
 
 
 def _table(path, ids):
@@ -58,7 +74,25 @@ def _table(path, ids):
 def make_split(train, contract, decision):
     indexes = np.arange(len(train))
     constraints = contract.validation_constraints
-    if constraints.strategy == 'group':
+    if contract.preparation or contract.outer_split:
+        frozen_path = contract.preparation.split if contract.preparation else contract.outer_split
+        frozen = json.loads(Path(frozen_path).read_text(encoding='utf-8'))
+        for key in ('fit', 'valid'):
+            if any(isinstance(value, bool) or not isinstance(value, int) for value in frozen[key]):
+                raise ValueError('Prepared split must contain integer row positions')
+        fit, valid = np.asarray(frozen['fit'], dtype=int), np.asarray(frozen['valid'], dtype=int)
+        joined = np.concatenate([fit, valid])
+        if len(joined) != len(train) or not np.array_equal(np.sort(joined), indexes):
+            raise ValueError('Prepared split must partition every training row exactly once')
+        if constraints.strategy == 'group':
+            groups = pd.util.hash_pandas_object(train[constraints.group_columns], index=False).to_numpy()
+            if set(groups[fit]) & set(groups[valid]):
+                raise ValueError('Prepared split violates the group constraint')
+        elif constraints.strategy == 'time':
+            times = pd.to_datetime(train[constraints.time_column], errors='raise', utc=True)
+            if times.isna().any() or times.iloc[fit].max() >= times.iloc[valid].min():
+                raise ValueError('Prepared split violates the chronological constraint')
+    elif constraints.strategy == 'group':
         groups = pd.util.hash_pandas_object(train[constraints.group_columns], index=False).to_numpy()
         fit, valid = next(GroupShuffleSplit(n_splits=1, test_size=decision.validation_fraction,
                                             random_state=decision.seed).split(indexes, groups=groups))
@@ -71,13 +105,14 @@ def make_split(train, contract, decision):
         boundary = times.iloc[ordered[cut]]
         fit, valid = indexes[(times < boundary).to_numpy()], indexes[(times >= boundary).to_numpy()]
     else:
-        fit, valid = train_test_split(indexes, test_size=decision.validation_fraction, random_state=decision.seed)
+        fit, valid = train_test_split(indexes, test_size=decision.validation_fraction, random_state=decision.seed,
+                                      stratify=train[contract.target] if contract.task_type == 'classification' else None)
     if not len(fit) or not len(valid) or np.intersect1d(fit, valid).size:
         raise ValueError('Validation split is empty or overlapping')
     return np.asarray(fit), np.asarray(valid)
 
 
-async def run_job(job_path, output, deadline, budget):
+async def run_job(job_path, output, deadline, budget, *, module='agent.training_worker'):
     remaining = min(budget, deadline-time.monotonic())
     if remaining <= 0:
         raise TimeoutError('Stage deadline exhausted')
@@ -87,8 +122,18 @@ async def run_job(job_path, output, deadline, budget):
     for key in ('SystemRoot', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'HOME'):
         if key in os.environ:
             env[key] = os.environ[key]
+    # These two workers call Qwen themselves. Platform credentials arrive in env,
+    # whereas ordinary model-training workers do not need access to them.
+    if module in {'agent.margo_preparation_worker', 'agent.model_selection_worker'}:
+        settings = Settings.from_env()
+        env.update(OPENAI_API_KEY=settings.api_key, OPENAI_BASE_URL=settings.base_url,
+                   OPENAI_MODEL=settings.model)
+        if settings.timeout_seconds is not None:
+            env['QWEN_TIMEOUT_SECONDS'] = str(settings.timeout_seconds)
+        if settings.max_tokens is not None:
+            env['QWEN_MAX_TOKENS'] = str(settings.max_tokens)
     with (output/'execution.log').open('wb') as stream:
-        child = await asyncio.create_subprocess_exec(sys.executable, '-m', 'agent.training_worker',
+        child = await asyncio.create_subprocess_exec(sys.executable, '-m', module,
             '--job', str(job_path), '--time-budget', str(remaining*.92), cwd=output, env=env,
             stdout=stream, stderr=asyncio.subprocess.STDOUT)
         try:
@@ -142,25 +187,37 @@ async def run_training(input_path, output, *, time_budget=4800., trial_timeout=3
     for role, value in raw['files'].items():
         if value:
             raw['files'][role] = str((input_path.parent/value).resolve())
+    if raw.get('outer_split'):
+        raw['outer_split'] = str((input_path.parent/raw['outer_split']).resolve())
+    if raw.get('preparation'):
+        for key in ('source_root', 'recipe', 'split'):
+            raw['preparation'][key] = str((input_path.parent/raw['preparation'][key]).resolve())
+        register_margo(raw['preparation'])
+    contract = TrainingInput.model_validate(raw)
     normalized = output/'input.json'
     save(normalized, raw)
-    hashes = {key: file_hash(Path(path)) for key, path in raw['files'].items() if path}
+    paths = training_source_paths(raw, input_path.parent)
+    hashes = {key: file_hash(path) for key, path in paths.items()}
     train, test = (_table(Path(raw['files'][role]), contract.id_columns) for role in ('train', 'test'))
     if contract.target not in train or contract.target in test:
         raise ValueError('Train must contain target; hidden test must not contain target')
     if len(train) < 30 or not len(test) or not train.columns.is_unique or not test.columns.is_unique:
         raise ValueError('Need at least 30 train rows, nonempty test and unique column names')
-    if not np.isfinite(pd.to_numeric(train[contract.target], errors='raise')).all():
-        raise ValueError('Regression labels must be finite')
+    if contract.task_type == 'regression':
+        if not np.isfinite(pd.to_numeric(train[contract.target], errors='raise')).all():
+            raise ValueError('Regression labels must be finite')
+    elif train[contract.target].isna().any() or train[contract.target].nunique() < 2:
+        raise ValueError('Classification needs nonmissing labels and at least two classes')
     for column in contract.id_columns:
         if column not in test or column not in train:
             raise ValueError('Missing declared identifier: '+column)
     metric = contract.primary_metric
-    direction = coordinator.direction = 'maximize' if metric == 'r2' else 'minimize'
+    direction = coordinator.direction = ('minimize' if metric == 'log_loss' else 'maximize') if contract.task_type == 'classification' else ('maximize' if metric == 'r2' else 'minimize')
     agents = agents or JSONAgents(Settings.from_env(), search_deadline, max_calls=0)
     agents.deadline = search_deadline
     agents.root.log_directory = output
-    analyst, planner = TrainingAnalyst(agents, RULES), TrainingPlanner(agents, RULES)
+    role_rules = RULES + (CLASSIFICATION_RULES if contract.task_type == 'classification' else '')
+    analyst, planner = TrainingAnalyst(agents, role_rules), TrainingPlanner(agents, role_rules)
     root = Path(__file__).resolve().parents[1]
     excluded = {contract.target, *contract.id_columns, *contract.validation_constraints.group_columns}
     if contract.validation_constraints.time_column:
@@ -170,10 +227,27 @@ async def run_training(input_path, output, *, time_budget=4800., trial_timeout=3
                'test_rows': len(test), 'feature_columns': [name for name in train if name not in excluded],
                'excluded_columns': sorted(excluded & set(train.columns))},
                'primary_metric': metric, 'direction': direction, 'trial_timeout_seconds': trial_timeout}
-    context['model_templates'] = template_context(raw['selected_models'], context['allowed_requirements'],
+    if contract.task_type == 'classification':
+        from .classification_templates import template_context as classification_template_context
+        selected_template_context = classification_template_context
+        context['input_facts']['class_counts'] = {str(key): int(value) for key, value in train[contract.target].value_counts().items()}
+    else:
+        selected_template_context = template_context
+    context['model_templates'] = selected_template_context(raw['selected_models'], context['allowed_requirements'],
                                                 context['installed_libraries'])
+    if contract.preparation or contract.outer_split:
+        split_path = contract.preparation.split if contract.preparation else contract.outer_split
+        split = json.loads(Path(split_path).read_text(encoding='utf-8'))
+        fraction = len(split['valid'])/len(train)
+        if not .05 <= fraction <= .4:
+            raise ValueError('Prepared validation fraction must be between 0.05 and 0.4')
+        context['locked_outer_split'] = {'source': 'margo' if contract.preparation else 'classification_preparation', 'validation_fraction': fraction,
+                                         'fit_rows': len(split['fit']), 'validation_rows': len(split['valid'])}
+        if contract.preparation:
+            context['input_facts']['raw_feature_columns'] = context['input_facts']['feature_columns']
+            context['input_facts']['feature_columns'] = contract.preparation.feature_names
     save(output/'model_templates.json', context['model_templates'])
-    report = {'status': 'running', 'stage': 'validation_decision', 'primary_metric': metric,
+    report = {'status': 'running', 'task_type': contract.task_type, 'stage': 'validation_decision', 'primary_metric': metric,
               'direction': direction, 'trials': [], 'repairs': [], 'rounds': [], 'role_history': [],
               'winner': None, 'final_refit': {}, 'time_budget_seconds': time_budget,
               'final_reserved_seconds': coordinator.reserve}
@@ -201,7 +275,11 @@ async def run_training(input_path, output, *, time_budget=4800., trial_timeout=3
             entry['status'] = 'completed'
             return result
         except Exception as error:
-            entry.update(status='failed', error=str(error)[-1000:])
+            if isinstance(error, TimeoutError):
+                message = f'Qwen {role} exceeded its remaining role budget ({remaining:.1f}s)'
+                entry.update(status='failed', error=message, error_type='TimeoutError')
+                raise TimeoutError(message) from error
+            entry.update(status='failed', error=str(error)[-1000:], error_type=type(error).__name__)
             raise
         finally:
             elapsed = time.monotonic()-role_started
@@ -228,6 +306,8 @@ async def run_training(input_path, output, *, time_budget=4800., trial_timeout=3
         checkpoint()
         validation = await role_call('validation_decision', 'planner', planner.validation(live_context()))
         fit, valid = make_split(train, contract, validation)
+        if contract.preparation or contract.outer_split:
+            validation = validation.model_copy(update={'validation_fraction': len(valid)/len(train)})
         np.savez(output/'split.npz', fit=fit, valid=valid)
         split_hash = file_hash(output/'split.npz')
         save(output/'validation_decision.json', {**validation.model_dump(), 'strategy': contract.validation_constraints.strategy,
@@ -306,7 +386,7 @@ async def run_training(input_path, output, *, time_budget=4800., trial_timeout=3
             checkpoint(stage='training', active_role='coordinator', active_trial={'trial_id': trial_id, 'candidate': frozen})
             trial_started = time.monotonic()
             try:
-                if {key: file_hash(Path(path)) for key, path in raw['files'].items() if path} != hashes:
+                if {key: file_hash(path) for key, path in paths.items()} != hashes:
                     raise ValueError('Input data changed during training')
                 result = await run_job(trial_dir/'job.json', trial_dir, search_deadline, trial_timeout)
                 if (result.get('primary_metric') != metric or result.get('direction') != direction
@@ -364,7 +444,7 @@ async def run_training(input_path, output, *, time_budget=4800., trial_timeout=3
             try:
                 final_analysis = await role_call('final_analysis', 'analyst',
                     analyst.analyze(live_context(), report['trials'], report['winner'], final=True),
-                    until=time.monotonic()+min(30., coordinator.remaining_search()))
+                    until=time.monotonic()+min(120., max(30., max(coordinator.role_durations or [0.])*1.5), coordinator.remaining_search()))
                 save(output/'final_analysis.json', final_analysis)
                 checkpoint(final_analysis=final_analysis.model_dump(mode='json'))
             except Exception as error:
@@ -376,7 +456,7 @@ async def run_training(input_path, output, *, time_budget=4800., trial_timeout=3
                'validation': validation.model_dump(), 'phase': 'final', 'output_dir': str(final),
                'source_result_dir': str(output/'trials'/best['trial_id']), 'expected_source_hashes': hashes}
         save(final/'job.json', job)
-        if {key: file_hash(Path(path)) for key, path in raw['files'].items() if path} != hashes:
+        if {key: file_hash(path) for key, path in paths.items()} != hashes:
             raise ValueError('Input data changed before final refit')
         final_result = await run_job(final/'job.json', final, deadline, deadline-time.monotonic())
         if int(final_result.get('full_training_rows', final_result.get('training_rows', -1))) != len(train):

@@ -1,0 +1,45 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "provider": {
+      "const": "margo",
+      "default": "margo",
+      "title": "Provider",
+      "type": "string"
+    },
+    "source_root": {
+      "title": "Source Root",
+      "type": "string"
+    },
+    "recipe": {
+      "title": "Recipe",
+      "type": "string"
+    },
+    "split": {
+      "title": "Split",
+      "type": "string"
+    },
+    "source_hashes": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Source Hashes",
+      "type": "object"
+    },
+    "feature_names": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Feature Names",
+      "type": "array"
+    }
+  },
+  "required": [
+    "source_root",
+    "recipe",
+    "split",
+    "source_hashes"
+  ],
+  "title": "PreparationRecipe",
+  "type": "object"
+}

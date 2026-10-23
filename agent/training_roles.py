@@ -4,17 +4,58 @@ import json
 from .training_contracts import TrainingAnalysis, TrainingNextPlan, TrainingPlan, ValidationDecision
 
 
+UPSTREAM_SELECTION_RULES = (
+    'The upstream selected_models entries contain the actual model-selection report, native loss '
+    'parameters, target_transform and selection_metadata. Keep the selected loss and target transform '
+    'fixed. Never override parameters listed in selection_metadata.locked_parameters or loss_native, '
+    'nor replace an upstream objective, loss, loss_function or criterion. Other supported estimator '
+    'hyperparameters may be tuned from the measured results. For log1p, the backend transforms targets '
+    'inside each fit and reverses predictions with expm1; all primary validation scores and submission '
+    'predictions remain on the ORIGINAL target scale. Do not manually transform labels or predictions. '
+)
+
+
+def compact_role_context(context):
+    """Keep the full upstream evidence on disk; bound repetitive EDA sent to Qwen."""
+    context = dict(context)
+    upstream = dict(context.get('upstream_report', {}))
+    eda = dict(upstream.get('eda', {}))
+    profile = eda.get('upstream_data_profile')
+    if isinstance(profile, dict):
+        compact = {key: value for key, value in profile.items() if key not in {'train_columns', 'test_columns'}}
+        compact['train_columns'] = []
+        for column in profile.get('train_columns', []):
+            item = {key: value for key, value in column.items() if key not in {'numeric_stats', 'categorical_stats'} and value is not None}
+            if column.get('numeric_stats'):
+                item['numeric_stats'] = {key: value for key, value in column['numeric_stats'].items()
+                                         if key in {'n_missing', 'missing_ratio', 'n_unique', 'min', 'max', 'mean', 'median', 'std', 'n_inf'}}
+            if column.get('categorical_stats'):
+                item['categorical_stats'] = {**column['categorical_stats'], 'top_values': column['categorical_stats'].get('top_values', [])[:3]}
+            compact['train_columns'].append(item)
+        eda['upstream_data_profile'] = compact
+    preparation = eda.get('upstream_preparation_report')
+    if isinstance(preparation, dict):
+        eda['upstream_preparation_report'] = {**preparation,
+            'high_correlations': preparation.get('high_correlations', [])[:20],
+            'target_correlations': preparation.get('target_correlations', [])[:20]}
+    upstream['eda'] = eda
+    context['upstream_report'] = upstream
+    return context
+
+
 def trial_summaries(trials):
     keys = ('trial_id', 'status', 'candidate', 'family', 'score', 'primary_metric',
             'training_score', 'inner_cv_score', 'inner_fold_scores', 'actual_parameters',
             'actual_training_rows', 'outer_validation_rows', 'feature_columns', 'excluded_columns',
-            'wall_duration_seconds', 'parameter_warnings', 'error', 'diagnostic')
+            'wall_duration_seconds', 'parameter_warnings', 'error', 'diagnostic',
+            'target_transform', 'selection_metadata', 'classification_report', 'confusion_matrix',
+            'class_labels', 'probability_metrics', 'classification_diagnostics')
     return [{key: result[key] for key in keys if key in result} for result in trials]
 
 
 class TrainingAnalyst:
     def __init__(self, agents, rules):
-        self.agents, self.rules = agents, rules
+        self.agents, self.rules = agents, rules + UPSTREAM_SELECTION_RULES
 
     async def analyze(self, context, trials, winner, *, failed_trial=None, final=False):
         instruction = (
@@ -28,7 +69,7 @@ class TrainingAnalyst:
             instruction += 'Diagnose the supplied failure/traceback. Explain what is confirmed and whether parameter repair is possible. '
         if final:
             instruction += 'Final review only: summarize the measured winner and uncertainty; recommend stop. No further experiments. '
-        payload = {**context, 'results': trial_summaries(trials), 'winner': winner,
+        payload = {**compact_role_context(context), 'results': trial_summaries(trials), 'winner': winner,
                    'failed_trial': trial_summaries([failed_trial])[0] if failed_trial else None}
         return await self.agents.ask(TrainingAnalysis, self.rules+instruction+'\n'+
             json.dumps(payload, ensure_ascii=False),
@@ -37,13 +78,13 @@ class TrainingAnalyst:
 
 class TrainingPlanner:
     def __init__(self, agents, rules):
-        self.agents, self.rules = agents, rules
+        self.agents, self.rules = agents, rules + UPSTREAM_SELECTION_RULES
 
     async def validation(self, context):
         return await self.agents.ask(ValidationDecision, self.rules+
             'You are the PLANNER. Justify the training/validation ratio and need for internal CV '
             'versus holdout. Upstream group/time constraints are mandatory. Account for CPU/time '
-            'and adapter limitations in model_templates.\n'+json.dumps(context, ensure_ascii=False),
+            'and adapter limitations in model_templates.\n'+json.dumps(compact_role_context(context), ensure_ascii=False),
             'training_planner_validation')
 
     async def initial(self, context):
@@ -54,7 +95,7 @@ class TrainingPlanner:
             'model or explain its numeric index in skipped_models. Justify regularization/optimizer '
             'and supply estimated_seconds for the complete trial including CV and process startup. '
             'Use actual template/estimator parameters. Estimates must fit the coordinator budget.\n'+
-            json.dumps(context, ensure_ascii=False), 'training_planner_initial')
+            json.dumps(compact_role_context(context), ensure_ascii=False), 'training_planner_initial')
 
     async def next(self, context, analysis, trials, winner, *, failed_trial=None):
         instruction = (
@@ -68,7 +109,7 @@ class TrainingPlanner:
             instruction += (
                 'Repair mode: return at most ONE corrected candidate for the SAME model_index as '
                 'failed_trial, or stop=true if supported parameters cannot fix it. Do not edit backend code. ')
-        payload = {**context, 'analyst_report': analysis.model_dump(mode='json'),
+        payload = {**compact_role_context(context), 'analyst_report': analysis.model_dump(mode='json'),
                    'results': trial_summaries(trials), 'winner': winner,
                    'failed_trial': trial_summaries([failed_trial])[0] if failed_trial else None}
         return await self.agents.ask(TrainingNextPlan, self.rules+instruction+'\n'+

@@ -23,6 +23,13 @@ def sanitize(value):
 
 def snapshot(root):
     documents, pending = {}, []
+    if root.name == 'training':
+        pipeline_report = root.parent/'pipeline_report.json'
+        if pipeline_report.is_file():
+            try:
+                documents['pipeline_report.json'] = sanitize(json.loads(pipeline_report.read_text(encoding='utf-8-sig')))
+            except (OSError, ValueError):
+                pending.append('pipeline_report.json: ожидаем завершения записи')
     if root.is_dir():
         for path in sorted(root.iterdir()):
             if not _ALLOWED.fullmatch(path.name) or not path.is_file() or path.is_symlink():
@@ -51,7 +58,7 @@ HTML = r'''<!doctype html>
 <div class="columns"><section class="panel"><h2>Результаты экспериментов</h2><table><thead><tr><th>Попытка / модель</th><th>Статус</th><th>Метрика</th><th>Train</th></tr></thead><tbody id="trials"></tbody></table><p id="empty" class="muted">Данные появятся после начала запуска.</p><div id="submission" class="note"></div></section><section class="panel"><h2>Решения Qwen и детали</h2><div id="tabs" class="tabs"></div><pre id="details">Ожидание отчёта…</pre></section></div>
 <p id="connection" class="footer">Обновление каждую секунду. Страница только читает файлы запуска.</p></main><script>
 const $=id=>document.getElementById(id);let selected='report.json',latest={},lastSuccess=0;
-const labels={validation_decision:'Планировщик: валидация',training_plan:'Планировщик: первый план',training:'Обучение',repair_review:'Qwen исправляет ошибку',repair_analysis:'Аналитик: ошибка',repair_planning:'Планировщик: исправление',result_analysis:'Аналитик: результаты',next_plan:'Планировщик: следующие опыты',coordinator_select:'Координатор: выбор победителя',final_analysis:'Аналитик: итог',final_refit:'Полная выборка',complete:'Завершено',input_validation:'Проверка входа'};
+const labels={preparation:'Margo: подготовка данных',handoff:'Проверка выхода margo',validation_decision:'Планировщик: валидация',training_plan:'Планировщик: первый план',training:'Обучение',repair_review:'Qwen исправляет ошибку',repair_analysis:'Аналитик: ошибка',repair_planning:'Планировщик: исправление',result_analysis:'Аналитик: результаты',next_plan:'Планировщик: следующие опыты',coordinator_select:'Координатор: выбор победителя',final_analysis:'Аналитик: итог',final_refit:'Полная выборка',complete:'Завершено',input_validation:'Проверка входа'};
 const stopLabels={max_trials:'Лимит экспериментов',search_time_limit:'Закончился бюджет поиска',no_improvement:'Нет существенного улучшения',planner_stop:'Планировщик предложил остановиться',no_new_candidates:'Нет новых конфигураций',planning_unavailable:'Анализ или планирование недоступны',no_affordable_candidates:'Нет экспериментов, помещающихся в бюджет',insufficient_time_for_planning_and_trial:'Оставлено время на полный refit',planning_round_limit:'Лимит раундов планирования'};
 const statuses={running:'Выполняется',completed:'Готово',failed:'Ошибка',partial:'Частичный результат',pending:'Ожидает',reviewing:'Проверяет',repaired:'Исправлено',skipped:'Пропущено'};
 const number=x=>typeof x==='number'&&Number.isFinite(x)?x.toLocaleString('ru-RU',{maximumFractionDigits:6}):'—';
@@ -59,7 +66,7 @@ const seconds=x=>typeof x==='number'?`${Math.floor(x/60)}м ${Math.floor(x%60)}�
 function text(tag,value,cls){let e=document.createElement(tag);e.textContent=value;if(cls)e.className=cls;return e}
 function detail(name){selected=name;renderDetails()}
 function renderDetails(){const tabs=$('tabs');tabs.replaceChildren();Object.keys(latest).forEach(name=>{let b=text('button',name.replace('.json',''));if(name===selected)b.className='selected';b.onclick=()=>detail(name);tabs.append(b)});$('details').textContent=latest[selected]===undefined?'Выберите решение или эксперимент.':JSON.stringify(latest[selected],null,2)}
-function render(data){const d=data.documents||{},r=d['report.json']||{},trials=Array.isArray(r.trials)?r.trials:[],repairs=Array.isArray(r.repairs)?r.repairs:[],winner=r.winner||{},final=r.final_refit||{},running=r.status==='running',stage=r.stage||'';
+function render(data){const d=data.documents||{},r=d['report.json']||d['pipeline_report.json']||{},trials=Array.isArray(r.trials)?r.trials:[],repairs=Array.isArray(r.repairs)?r.repairs:[],winner=r.winner||{},final=r.final_refit||{},running=r.status==='running',stage=r.stage||'';
 latest={...d};trials.forEach((t,i)=>latest[t.trial_id||`попытка_${i}`]=t);if(selected!=='report.json'&&!(selected in latest))selected='report.json';
 $('directory').textContent=data.directory;$('status').textContent=statuses[r.status]||'Ожидание запуска';$('status').className=r.status==='failed'?'error-text':r.status==='completed'?'good':running?'active-text':'';
 const controlled=String(data.directory||'').includes('training-qwen-live');$('scenario').hidden=!controlled;$('scenario').textContent='Тест восстановления: сценарий намеренно задаёт Ridge alpha=-1, план и разбиение. Диагностику падения, исправленный план и итоговый анализ выполняет настоящий Qwen. Python-код обучения фиксирован; Qwen исправляет параметры.';

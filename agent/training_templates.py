@@ -3,7 +3,7 @@ import hashlib
 import inspect
 import re
 
-from .training_template_sklearn import (ridge, elasticnet, sgd, random_forest, extra_trees,
+from .training_template_sklearn import (ridge, huber_linear, knn, elasticnet, sgd, random_forest, extra_trees,
                                        hist_gradient_boosting, mlp)
 from .training_template_boosting import lightgbm, catboost, xgboost
 from .training_template_automl import flaml, autogluon
@@ -11,6 +11,8 @@ from .training_template_automl import flaml, autogluon
 
 TEMPLATES = {
     'ridge': (ridge, 'scikit-learn', {'alpha': 1., 'solver': 'lsqr'}),
+    'huber_linear': (huber_linear, 'scikit-learn', {'epsilon': 1.35, 'alpha': .0001, 'max_iter': 300}),
+    'knn': (knn, 'scikit-learn', {'n_neighbors': 5, 'weights': 'distance'}),
     'elasticnet': (elasticnet, 'scikit-learn', {'alpha': .01, 'l1_ratio': .5, 'max_iter': 2000}),
     'sgd': (sgd, 'scikit-learn', {'loss': 'squared_error', 'penalty': 'elasticnet',
                                 'alpha': .0001, 'learning_rate': 'invscaling', 'eta0': .01}),
@@ -66,6 +68,7 @@ def template_context(selected_models, requirements_text, installed):
     return {'adaptation': 'Return JSON parameter overrides for selected_models; never rewrite these Python files. '
                           'Examples are starting points, not mandatory values or a closed search space. '
                           'All supported estimator parameters remain available after validation. '
+                          'Upstream native loss parameters and target_transform are locked; tune only other settings. '
                           'Shared backend owns preprocessing inside folds, fit, predict, primary scoring, '
                           'deadlines and all-row final refit. AutoML templates define adapter settings.',
             'models': result}
