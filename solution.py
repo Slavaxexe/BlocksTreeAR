@@ -6,9 +6,15 @@ import sys
 from alfa_agent.__main__ import main as cli
 
 
+# Explicit opt-in: default submissions must come from the main agent only.
+ENABLE_FALLBACK = False
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     task = args.pop(0) if args and not args[0].startswith('-') else 'task.md'
+    if not ENABLE_FALLBACK:
+        return run(task, args)
     try:  # an answer without the LLM first (about a minute); the agent overwrites it with any better model
         from alfa_agent.fallback import emergency
         emergency(Path(task))

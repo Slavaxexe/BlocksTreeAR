@@ -1363,7 +1363,47 @@ class SubmissionTests(unittest.TestCase):
             self.assertEqual(cli.call_args.args[0], ['baseline', '--task', 'task.md', '--platform-output', '--time-budget=300',
                 '--experiment-timeout', '60', '--max-nodes', '1', '--executors', '6', '--threads', '2'])
 
-    def test_solution_writes_a_fallback_submission_when_the_agent_produces_none(self):
+    def test_default_entry_never_uses_fallback_or_masks_agent_exit(self):
+        import solution
+        self.assertIs(solution.ENABLE_FALLBACK, False)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task = root / 'task.md'
+            task.write_text('Unseen task')
+            for existing in (False, True):
+                if existing:
+                    (root / 'submission.csv').write_text('id,target\n1,0\n')
+                with self.subTest(existing=existing), patch('solution.cli', return_value=2), \
+                        patch('alfa_agent.fallback.emergency') as emergency:
+                    self.assertEqual(solution.main([str(task)]), 2)
+                    emergency.assert_not_called()
+                    self.assertEqual((root / 'submission.csv').exists(), existing)
+
+    def test_default_entry_propagates_failure_without_creating_submission(self):
+        from solution import main
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch('solution.cli', side_effect=RuntimeError('agent failed')), \
+                    patch('alfa_agent.fallback.emergency') as emergency:
+                with self.assertRaisesRegex(RuntimeError, 'agent failed'):
+                    main([str(root / 'task.md')])
+                emergency.assert_not_called()
+            self.assertFalse((root / 'submission.csv').exists())
+
+    def test_default_entry_preserves_only_agent_output(self):
+        from solution import main
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            content = 'id,target\n001,42\n'
+            def agent(arguments):
+                (root / 'submission.csv').write_text(content)
+                return 0
+            with patch('solution.cli', side_effect=agent), patch('alfa_agent.fallback.emergency') as emergency:
+                self.assertEqual(main([str(root / 'task.md')]), 0)
+                emergency.assert_not_called()
+            self.assertEqual((root / 'submission.csv').read_text(), content)
+
+    def test_solution_writes_a_fallback_submission_only_when_explicitly_enabled(self):
         from solution import main
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1377,7 +1417,8 @@ class SubmissionTests(unittest.TestCase):
             test.to_csv(data / 'test.csv', index=False)
             pd.DataFrame({'id': test.id, 'price': 0.}).to_csv(data / 'sample_submission.csv', index=False)
             (root / 'task.md').write_text('Predict price; RMSE. Files in nested/participants.')
-            with patch('solution.cli', side_effect=RuntimeError('LLM contract failed')):
+            with patch('solution.ENABLE_FALLBACK', True), \
+                    patch('solution.cli', side_effect=RuntimeError('LLM contract failed')):
                 with self.assertRaises(RuntimeError):
                     main([str(root / 'task.md')])
             result = pd.read_csv(root / 'submission.csv')
