@@ -260,6 +260,31 @@ def fit_model(fit, preparation):
     return predict
 '''
 
+# Verified recipes for the generated code; the libraries stay ordinary tools Qwen may combine or extend.
+AUTOML_GUIDE = {
+    'when': 'AutoML is a tool, not a ban: run it on raw or engineered features, blend it with other models inside one '
+            'fit_model, or start a node from an AutoML parent. Give each library at most ~45% of experiment_timeout '
+            'and a tempfile.TemporaryDirectory kept alive by the returned predictor (e.g. predict.workspace = workspace). '
+            'Libraries validate with random internal CV, so the outer shift-aware validation still decides.',
+    'autogluon': "from autogluon.tabular import TabularPredictor; TabularPredictor(label=target, problem_type="
+                 "'regression'|'binary'|'multiclass', eval_metric='root_mean_squared_error'|'f1_macro'|..., path=workspace.name, "
+                 "verbosity=0).fit(train_df_with_target, time_limit=T, presets='best_quality', num_cpus=threads, num_gpus=0, "
+                 "dynamic_stacking=False); predict(df)/predict_proba(df)[label]. Drop id columns before fit/predict. "
+                 "Tiny smoke data (<2000 rows): presets='medium_quality', time_limit ~8. FastAI is not installed (skipped).",
+    'lightautoml': "from lightautoml.automl.presets.tabular_presets import TabularAutoML; from lightautoml.tasks import Task; "
+                   "TabularAutoML(task=Task('reg'|'binary'|'multiclass'), timeout=T, cpu_limit=threads, "
+                   "general_params={'use_algos': [['lgb', 'lgb_tuned', 'cb_tuned']]}, reader_params={'n_jobs': threads, "
+                   "'cv': 5, 'random_state': 0}).fit_predict(train_df, roles={'target': target, 'drop': id_columns}, "
+                   "verbose=0); predict(df).data is a numpy array (multiclass columns follow reader.class_mapping: "
+                   "original label -> index; None means labels are already 0..K-1). Its linear model fails on unseen "
+                   "categories; stratified CV needs >= 5 rows per class (oversample rarer classes).",
+    'flaml': "from flaml import AutoML; m = AutoML(); m.fit(X_train=X, y_train=y, task='classification'|'regression', "
+             "metric='rmse'|'macro_f1'|'mae'|'roc_auc'|'log_loss'|'accuracy'|'r2'|'auto', time_budget=T, n_jobs=threads, "
+             "verbose=0, seed=0, log_file_name=''); m.predict(X)/m.predict_proba(X). Convert string columns to pandas "
+             "Categorical with a vocabulary fixed on fit so prediction batches encode identically.",
+    'outputs': 'Return identifier columns as well as targets; class labels with the original dtype.',
+}
+
 METRICS = (  # task metric → AutoGluon / FLAML names; unknown metrics keep library defaults
     (r'macro', {'autogluon': 'f1_macro', 'flaml': 'macro_f1'}),
     (r'weighted', {'autogluon': 'f1_weighted', 'flaml': None}),

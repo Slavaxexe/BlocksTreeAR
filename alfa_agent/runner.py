@@ -444,7 +444,6 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 local = JSONAgents(settings, deadline, IMPLEMENTATION_CALLS, shared=agents, node_id=start.node_id)
                 task = asyncio.create_task(experiment(directory / 'nodes' / start.node_id, start, context, local, deadline, checkpoint,
                                                       code=sources.pop(start.node_id, None), blocking_review=not options.autopilot,
-                                                      repairable=start.node_id not in references,
                                                       check_seconds=150 if start.node_id in references else 45))
                 active[task] = start
             if (not expired and not planning_failed and planner is None and (options.autopilot or len(active) < options.executors)

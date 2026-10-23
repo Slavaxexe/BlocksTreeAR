@@ -12,6 +12,7 @@ import time
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from pydantic import ValidationError
 
+from .autopilot import AUTOML_GUIDE
 from .config import Settings
 from .contracts import (CodeReview, DataFacts, Extraction, Hypotheses, Hypothesis, LLMCall, MetricFacts, OutputFacts,
                         PreparationDraft, ProblemFacts, Program, RunReport)
@@ -44,7 +45,7 @@ def implementation_context(context):
     """Keep the current plan authoritative; ancestor refusals are not execution facts."""
     keys = ('task_text', 'preparation', 'preparation_code', 'installed_libraries', 'allowed_libraries',
             'previous_code', 'execution_error', 'failed_stage', 'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
-    result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
+    result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']), 'automl_guide': AUTOML_GUIDE,
               **{key: context[key] for key in keys if key in context}}
     if context.get('parent'):
         parent = context['parent']
@@ -83,6 +84,7 @@ def baker_context(context):
     leader = next((n for n in measured if n['node_id'] == parent['start']['node_id']), None)
     recent = ([leader] if leader else []) + [n for n in measured if n is not leader][-2:]
     return {**{k: context[k] for k in keys if k in context}, 'runtime_contract': runtime_contract(context['preparation']),
+        'automl_guide': AUTOML_GUIDE,
         'parent': {'node_id': parent['start']['node_id'], 'pipeline': base, 'code': parent['code'],
                    'score': parent['finish']['value']},
         'diagnostics': [brief(n) for n in recent],
@@ -385,6 +387,9 @@ class JSONAgents:
             "gain from class weights and probability multipliers tuned on an inner split with preparation['scorer']; "
             "a blend of 2-3 diverse strong models inside one fit_model; tuning learning rate, leaves, minimum leaf size and "
             "column sampling. Avoid methods superlinear in rows (SVC, KNN, Gaussian processes) above 20k rows. "
+            "AutoGluon, LightAutoML and FLAML are permitted tools (see automl_guide): controller reference nodes may already "
+            "run them; you may improve from such a parent, run AutoML on engineered features, or blend AutoML with other "
+            "models in one node when the measured history suggests complementary errors. "
             "Libraries may use 4 threads.\n"
             "Return hypotheses entries containing purpose, parent_id and hypothesis (rationale, expected_effect, four pipeline blocks).\n")
         purposes, previous = ['improve', 'explore'][:count], {}
