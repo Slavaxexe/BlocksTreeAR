@@ -152,6 +152,10 @@ class Features:
             raise ValueError("kind must be 'category', 'string' or 'codes'")
         self.fit, self.transform, self.kind = fit, transform, kind
         data = transform(fit.copy(), fit, True) if transform else fit
+        kept = len(set(fit.columns) & set(data.columns)) / max(1, len(fit.columns))
+        if kept < .5 or len(data) != len(fit):  # e.g. `frame = target_stats(...)` instead of frame.join(...)
+            raise ValueError(f'transform must return the input frame (same rows) with added columns; it kept {kept:.0%} '
+                             f'of the original columns and {len(data)} of {len(fit)} rows. Join new features: frame.join(stats).')
         self.columns, self.vocab, self.stamps = schema(data, preparation)
         self.categorical = list(self.vocab)
         self.train = self._encode(data)

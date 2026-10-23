@@ -392,6 +392,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(output(batch, prep, ['hi', 'lo']).columns), ['id', 'y'])
         predictor = gbdt(fit, prep)
         self.assertEqual((predictor.proba(batch).shape, list(predictor.classes)), ((2, 2), ['hi', 'lo']))
+        from alfa_agent.toolkit import target_stats
+        with self.assertRaisesRegex(ValueError, 'Join new features'):
+            Features(fit, prep, transform=lambda frame, ref, training: target_stats(ref, frame, ['city'], 'y', training=training))
 
     def test_target_stats_never_use_a_training_row_own_or_later_targets(self):
         from alfa_agent.toolkit import target_stats

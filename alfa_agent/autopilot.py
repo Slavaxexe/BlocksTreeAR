@@ -43,8 +43,9 @@ TOOLKIT_GUIDE = {
     'class_scale': 'scale = class_scale(probability, classes, fit, valid_rows, preparation): per-class multipliers; '
                    'predict classes[argmax(probability * scale)] (helps macro/averaged label metrics).',
     'output': 'return output(frame, preparation, values) -> DataFrame of ids + target, for predict(frame).',
-    'target_stats': 'target_stats(reference, frame, keys, target, *, training=False, time=None) -> leakage-safe mean/'
-                    'count/last target of rows sharing keys (repeated entities); training=True inside transform for fit.',
+    'target_stats': 'target_stats(reference, frame, keys, target, *, training=False, time=None) -> ONLY the new columns '
+                    '(leakage-safe mean/count/last target of rows sharing keys); join them: frame = frame.join(target_stats('
+                    'fit, frame, keys, target, training=training)). transform must return the whole frame with added columns.',
     'gbdt': 'gbdt(fit, preparation, transform=None, params=None, candidates=None) -> predictor: a ready LightGBM-only '
             'pipeline (loss/class weights chosen by the scorer). Classification predictors expose .proba(frame) and '
             '.classes for blending. It cannot train other learners.',
