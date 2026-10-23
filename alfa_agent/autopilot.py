@@ -161,8 +161,11 @@ def fit_model(fit, preparation):
     print(json.dumps({{'selected': name, 'trees': trees, 'inner_scores': {{r[1]: r[0] for r in results}},
                       'class_scale': None if scale is None else [round(float(s), 3) for s in scale]}}))
 
-    def predict(features):
-        return pd.DataFrame({{target: output(final, option, encode(features, columns, vocab), scale)}})
+    ids = [c for c in preparation['data'].get('id_columns') or [] if c in fit]
+
+    def predict(features):  # identifiers too: some generated writers read them from the predictions
+        values = {{c: features[c].to_numpy() for c in ids if c in features}}
+        return pd.DataFrame({{**values, target: output(final, option, encode(features, columns, vocab), scale)}})
     return predict
 '''
 
@@ -246,11 +249,13 @@ def fit_model(fit, preparation):
                 return values[:, 0] if PROBA else order[(values[:, 0] > .5).astype(int)]
             return order[np.argmax(values, axis=1)]
 
+    ids = [c for c in preparation['data'].get('id_columns') or [] if c in fit]
+
     def predict(frame):
         values = raw(features(frame, preparation) if ENGINE != 'flaml' and ENGINE != 'lightautoml' else frame)
         if TASK == 'classification' and not PROBA:
             values = pd.Series(values).astype(y.dtype, errors='ignore').to_numpy()
-        return pd.DataFrame({{target: values}})
+        return pd.DataFrame({{**{{c: frame[c].to_numpy() for c in ids if c in frame}}, target: values}})
     predict.workspace = workspace
     return predict
 '''
