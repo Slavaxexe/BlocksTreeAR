@@ -145,6 +145,46 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*(node.ask(Program, 'Write code', 'implementer', code=True) for node in nodes))
         self.assertEqual(peak, 1)
 
+    async def test_reply_without_message_is_logged_and_retried_and_content_parts_are_joined(self):
+        cases = (([{'index': 0, 'finish_reason': 'stop'}], 2),  # HTTP 200 without message
+                 ([{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': None}}], 2),
+                 ([{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': [
+                     {'type': 'text', 'text': json.dumps({'code': PROGRAM})[:20]},
+                     {'type': 'text', 'text': json.dumps({'code': PROGRAM})[20:]}]}}], 1))
+        for first, expected in cases:
+            seen = []
+            def handler(request):
+                seen.append(request)
+                choices = first if len(seen) == 1 else [{'index': 0, 'finish_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': json.dumps({'code': PROGRAM})}}]
+                return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0,
+                    'model': 'model', 'choices': choices, 'usage': {'prompt_tokens': None, 'completion_tokens': None,
+                    'total_tokens': None}})
+            def client(**kwargs):
+                return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+            agents = JSONAgents(Settings('fake', 'http://proxy/v1', 'model'), time.monotonic() + 10)
+            with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+                result = await agents.ask(Program, 'Write code', 'implementer', code=True)
+            self.assertEqual((result.code, len(seen)), (PROGRAM, expected))
+            self.assertEqual([c.status for c in agents.calls], ['invalid_json', 'completed'][2 - expected:])
+
+    async def test_json_mode_rejected_with_http_400_is_retried_without_it(self):
+        bodies = []
+        def handler(request):
+            body = json.loads(request.content)
+            bodies.append(body)
+            if 'response_format' in body:
+                return httpx.Response(400, json={'error': {'message': 'response_format unsupported'}})
+            return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant',
+                'content': json.dumps({'status': 'pass', 'findings': []})}}]})
+        def client(**kwargs):
+            return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        agents = JSONAgents(Settings('fake', 'http://proxy/v1', 'model'), time.monotonic() + 10)
+        with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+            result = await agents.ask(CodeReview, 'Review', 'reviewer', validation={'review_code': PROGRAM})
+        self.assertEqual((result.status, ['response_format' in b for b in bodies]), ('pass', [True, False]))
+
     async def exercise(self, directory, *, repair=False, missing_metric=False, blocked=False, broken_metric=False,
                        invalid_program=False, broken_code=False, execution_timeout=False, full_repair=False,
                        json_failure=False, network_failure=False, ast_failure=False, refused_once=False,
@@ -177,7 +217,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
             self.assertEqual(body['reasoning_effort'], 'none')
             self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
-            self.assertNotIn('response_format', body)
+            self.assertEqual('response_format' in body, title not in {'PreparationDraft', 'Program'})  # JSON-mode except code roles
             if title == 'Program' and seen.count(title) < int(network_failure):
                 seen.append(title)
                 raise httpx.ConnectError('temporary disconnection', request=request)
@@ -716,7 +756,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(report.status, 'failed')
             finish = load(root / 'nodes/node_000/finish.json', Finish)
             self.assertEqual(finish.stage, 'implementation')
-            self.assertEqual(seen.count('Program'), 2)
+            self.assertEqual(seen.count('Program'), 8)  # every unusable answer is retried within one request's attempts
             self.assertIsNone(finish.code_sha256)
 
     async def test_request_cap_includes_json_repairs_and_records_last_attempted_code(self):
@@ -739,14 +779,15 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(seen.count('Program'), 2)
             self.assertEqual(load(root / 'nodes/node_000/finish.json', Finish).stage, 'execution')
 
-    async def test_connection_errors_retry_within_three_request_cap(self):
-        for failures in (1, 2, 3):
-            with self.subTest(failures=failures), tempfile.TemporaryDirectory() as temporary:
+    async def test_connection_errors_retry_within_eight_request_cap(self):
+        for failures in (1, 7, 8):
+            with self.subTest(failures=failures), tempfile.TemporaryDirectory() as temporary, \
+                    patch('alfa_agent.agents.asyncio.sleep', new=AsyncMock()):
                 (_, report), seen = await self.exercise(Path(temporary), network_failure=failures)
-                self.assertEqual(report.status, 'failed' if failures == 3 else 'ready', report.errors)
-                self.assertEqual(seen.count('Program'), min(failures + 1, 3))
+                self.assertEqual(report.status, 'failed' if failures == 8 else 'ready', report.errors)
+                self.assertEqual(seen.count('Program'), min(failures + 1, 8))
                 calls = [call for call in report.llm_calls if call.role == 'implementer']
-                self.assertEqual([call.status for call in calls], ['api_error'] * failures + (['completed'] if failures < 3 else []))
+                self.assertEqual([call.status for call in calls], ['api_error'] * failures + (['completed'] if failures < 8 else []))
 
     async def test_rejected_source_and_actionable_check_error_are_preserved(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -868,6 +909,23 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TreeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_json_mode_rejected_with_http_400_is_retried_without_it(self):
+        bodies = []
+        def handler(request):
+            body = json.loads(request.content)
+            bodies.append(body)
+            if 'response_format' in body:
+                return httpx.Response(400, json={'error': {'message': 'response_format unsupported'}})
+            return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant',
+                'content': json.dumps({'status': 'pass', 'findings': []})}}]})
+        def client(**kwargs):
+            return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        agents = JSONAgents(Settings('fake', 'http://proxy/v1', 'model'), time.monotonic() + 10)
+        with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+            result = await agents.ask(CodeReview, 'Review', 'reviewer', validation={'review_code': PROGRAM})
+        self.assertEqual((result.status, ['response_format' in b for b in bodies]), ('pass', [True, False]))
+
     async def exercise(self, directory, *, blocked=False, stop_api=False, stop_time=False, max_nodes=4,
                        wrong_batch=False, duplicate_batch=False, repair_both=False, planning_race=False, retry_race=False,
                        stuck_explore=False):
@@ -1354,7 +1412,7 @@ def handler(request):
     title=json.loads(body['messages'][0]['content'].split('Schema: ',1)[1])['title']
     assert body['reasoning_effort']=='none'
     assert body['chat_template_kwargs']=={'enable_thinking':False}
-    assert body['temperature']==0 and body['max_tokens']==(8192 if title=='CodeReview' else 32768) and 'response_format' not in body
+    assert body['temperature']==0 and body['max_tokens']==(8192 if title=='CodeReview' else 32768) and ('response_format' in body)==(title not in ('PreparationDraft','Program'))
     context=json.loads(body['messages'][1]['content'].rsplit('\\n',1)[1])
     if title=='PreparationDraft':
         preparations+=1

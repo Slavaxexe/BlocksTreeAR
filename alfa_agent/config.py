@@ -19,7 +19,7 @@ class Settings:
     api_key: str = field(repr=False)
     base_url: str
     model: str
-    timeout_seconds: float = 600
+    timeout_seconds: float | None = 1200  # None waits for the answer; the run budget bounds a request either way
     max_tokens: int = 32768
 
     @classmethod
@@ -33,7 +33,7 @@ class Settings:
         values = dict(dotenv_values(path, encoding="utf-8", interpolate=False))
         values.update(os.environ if environ is None else environ)
         try:
-            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "600")
+            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "1200")
             max_tokens = int(values.get("QWEN_MAX_TOKENS") or "32768")
         except (ValueError, TypeError):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS и QWEN_MAX_TOKENS должны быть числами.") from None
@@ -67,7 +67,7 @@ class Settings:
             valid_url = False
         if not valid_url:
             raise ConfigurationError("OPENAI_BASE_URL: нужен HTTP(S) base URL без логина, пароля и query-параметров.")
-        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+        if self.timeout_seconds is not None and (not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть конечным положительным числом.")
         if self.max_tokens <= 0:
             raise ConfigurationError("QWEN_MAX_TOKENS должен быть положительным целым числом.")
