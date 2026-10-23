@@ -21,10 +21,13 @@ from .schemas import LLMDecision
 
 SKILL_PATH = Path(__file__).with_name("SKILL.md")
 
-# Переменные окружения — сверить с baseline.py организаторов
-ENV_BASE_URL = os.getenv("LLM_BASE_URL", os.getenv("OPENAI_BASE_URL", ""))
-ENV_API_KEY = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-ENV_MODEL = os.getenv("LLM_MODEL", "Qwen3.8-27B")
+# Те же переменные, что в baseline.py организаторов и в этапах Марго и Макса.
+# Читаются в момент вызова, чтобы .env, загруженный раннером, точно подхватился.
+def llm_settings() -> dict:
+    return {"base_url": os.getenv("OPENAI_BASE_URL", "https://inference.airi.net/v1"),
+            "api_key": os.getenv("OPENAI_API_KEY", ""),
+            "model": os.getenv("OPENAI_MODEL", "Qwen/Qwen3.8-27B"),
+            "max_tokens": int(os.getenv("MODEL_SELECTION_MAX_TOKENS", "4000"))}
 
 
 # ----------------------------------------------------------------------------- facts
@@ -85,9 +88,12 @@ def build_messages(task: dict, policy: dict, facts: dict, probe: dict, rule_defa
 # ----------------------------------------------------------------------------- call
 def default_llm_fn(messages: list[dict]) -> str:
     from openai import OpenAI
-    client = OpenAI(base_url=ENV_BASE_URL or None, api_key=ENV_API_KEY or "none", timeout=120, max_retries=2)
-    resp = client.chat.completions.create(model=ENV_MODEL, messages=messages, temperature=0.2,
-                                          max_tokens=3000)
+    s = llm_settings()
+    if not s["api_key"]:
+        raise RuntimeError("OPENAI_API_KEY не задан")
+    client = OpenAI(base_url=s["base_url"], api_key=s["api_key"], timeout=180, max_retries=2)
+    resp = client.chat.completions.create(model=s["model"], messages=messages, temperature=0.2,
+                                          max_tokens=s["max_tokens"])
     return resp.choices[0].message.content or ""
 
 

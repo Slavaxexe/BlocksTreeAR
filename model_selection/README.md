@@ -51,9 +51,8 @@ python -m model_selection.stage model_selection/contracts/example_input.json out
 from model_selection.stage import run_stage
 out = run_stage(input_dict, out_path="stage_output.json")
 ```
-Переменные окружения LLM: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` (фолбэк на `OPENAI_*`) —
-**сверить имена с baseline.py организаторов**. Клиент — пакет `openai` (в requirements.txt нет
-`langchain-openai`).
+Переменные окружения LLM — те же, что у baseline.py и этапов Марго и Макса: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` (из `.env` в корне репозитория).
+Клиент — пакет `openai` (в requirements.txt нет `langchain-openai`).
 
 ## Контракты
 - `contracts/stage_input.schema.json` — что ждём от Марго. Обязательно: `task.target`,
