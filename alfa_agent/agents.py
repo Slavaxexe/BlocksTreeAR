@@ -21,6 +21,8 @@ from .qwen import QwenError
 from .storage import save
 
 BAKER_ATTEMPTS = 10
+# Short JSON answers never need the code-generation wait; a silent proxy then fails fast and is retried.
+SHORT_ROLES = {'problem': 180, 'data': 180, 'metric': 180, 'output': 180, 'reviewer': 300, 'preparation_reviewer': 300}
 
 
 def runtime_contract(preparation):
@@ -144,6 +146,14 @@ class JSONAgents:
         self.node_id = node_id
         self.requests = 0
 
+    def record(self, call):
+        """Keep the call in the report and print one line: platform logs then show what the LLM did."""
+        self.calls.append(call)
+        print(json.dumps({'llm': call.role, 'node': call.node_id, 'attempt': call.attempt, 'status': call.status,
+                          'seconds': round(time.monotonic() - getattr(self, 'began', time.monotonic()), 1),
+                          'tokens': [call.prompt_tokens, call.completion_tokens], 'error': (call.error or '')[:200]},
+                         ensure_ascii=False), flush=True)
+
     async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
                   request_limit: int | None = None, validation: dict | None = None,
                   attempts: int = 3, repairs: int = 1, refresh=None, temperature: float = 0):
@@ -177,17 +187,19 @@ class JSONAgents:
             try:
                 async with self.gate or contextlib.nullcontext():
                     remaining = self.deadline - time.monotonic()  # waiting for the gate is not request time
+                    self.began = time.monotonic()
                     if remaining <= 0:
                         raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
                     async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
-                                           max_retries=0, timeout=min(self.settings.timeout_seconds, remaining)) as client:
+                                           max_retries=0, timeout=min(self.settings.timeout_seconds,
+                                           SHORT_ROLES.get(role, float('inf')), remaining)) as client:
                         response = await client.chat.completions.create(
                             model=self.settings.model, messages=messages, temperature=temperature,
                             max_tokens=min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens,
                             extra_body={"reasoning_effort": "none",
                                 "chat_template_kwargs": {"enable_thinking": False}})
             except asyncio.CancelledError:
-                self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
+                self.record(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
                 raise
             except (APIStatusError, APITimeoutError, APIConnectionError) as error:
                 status = error.status_code if isinstance(error, APIStatusError) else None
@@ -195,7 +207,7 @@ class JSONAgents:
                     "таймаут" if isinstance(error, APITimeoutError) else "ошибка соединения")
                 if status is None and error.__cause__ is not None:
                     suffix += ' / ' + type(error.__cause__).__name__
-                self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
+                self.record(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
                 if status == 429 and self.deadline - time.monotonic() > 30:
                     # A shared server may refuse while its owner has priority: wait while the run budget allows,
                     # without spending the request budget.
@@ -229,7 +241,7 @@ class JSONAgents:
                 if (validation or {}).get('rejected'):
                     details = {p: r['error'] for p, r in validation['rejected'].items()}
                 feedback = json.dumps(details, ensure_ascii=False)
-                self.calls.append(LLMCall(status="invalid_json", error=feedback, **stats))
+                self.record(LLMCall(status="invalid_json", error=feedback, **stats))
                 invalid += 1
                 if invalid > repairs or attempt == attempts:
                     raise QwenError(f"Qwen: роль {role} не вернула валидный JSON-контракт. {feedback}") from None
@@ -238,7 +250,7 @@ class JSONAgents:
                                 {"role": "user", "content": "Correct this JSON using the latest context above. Validation errors: " + feedback}]
             else:
                 rejected = {p: r['error'] for p, r in (validation or {}).get('rejected', {}).items()}
-                self.calls.append(LLMCall(status='invalid_json' if rejected else 'completed',
+                self.record(LLMCall(status='invalid_json' if rejected else 'completed',
                                          error=json.dumps(rejected, ensure_ascii=False) if rejected else None, **stats))
                 return result
         raise QwenError("Qwen не вернул валидный контракт.")
@@ -265,10 +277,18 @@ class JSONAgents:
                       "Copy quotes case-sensitively, including Markdown punctuation; never lowercase or paraphrase them. "
                       "Do not choose a model, preprocessing or validation split.\n"
                       + json.dumps({"task_text": text}, ensure_ascii=False))
-            result = await self.ask(schema, prompt, role, source=text)
+            try:
+                result = await self.ask(schema, prompt, role, source=text)
+            except QwenError as error:
+                if 'do not occur in the original Markdown' not in str(error):
+                    raise
+                # Facts are usable even when a quote is paraphrased; keep the strict schema, waive only exact quoting.
+                result = await self.ask(schema, prompt, role, source=None)
+                warnings.append(f'{role}: evidence quotes not verbatim; fields accepted without the exact-quote check')
             save(output / f"{role}.json", result)
             return result
         output.mkdir(parents=True, exist_ok=True)
+        warnings = self.extraction_warnings = []
         results = await asyncio.gather(*(one(*role) for role in roles), return_exceptions=True)
         errors = [str(result) for result in results if isinstance(result, Exception)]
         if errors:
@@ -508,7 +528,9 @@ async def extract_task(task_path: Path, output: Path, settings: Settings, *, age
     try:
         extraction = await agents.extract(text, output / "extraction")
         save(output / "extraction.json", extraction)
-        report = report.model_copy(update={"status": "ready", "checks": ["four_typed_blocks", "source_quotes"]})
+        waived = getattr(agents, 'extraction_warnings', [])
+        report = report.model_copy(update={"status": "ready", "warnings": list(waived),
+                                           "checks": ["four_typed_blocks"] + ([] if waived else ["source_quotes"])})
     except (ValueError, OSError, QwenError) as error:
         report = report.model_copy(update={"status": "failed", "errors": [str(error).replace(settings.api_key, "[REDACTED]")]})
     report = report.model_copy(update={"llm_calls": list(agents.calls)})

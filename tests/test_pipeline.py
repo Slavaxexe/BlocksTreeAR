@@ -1305,12 +1305,34 @@ class SubmissionTests(unittest.TestCase):
             self.assertEqual(cli.call_args.args[0], ['baseline', '--task', 'task.md', '--platform-output', '--time-budget=300',
                 '--experiment-timeout', '60', '--max-nodes', '1', '--executors', '6', '--threads', '2'])
 
+    def test_solution_writes_a_fallback_submission_when_the_agent_produces_none(self):
+        from solution import main
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / 'nested' / 'participants'
+            data.mkdir(parents=True)
+            rng = np.random.RandomState(0)
+            train = pd.DataFrame({'id': range(300), 'city': rng.choice(['a', 'b'], 300), 'x': rng.randn(300)})
+            train['price'] = train.x * 10 + (train.city == 'a') * 3 + rng.randn(300)
+            test = pd.DataFrame({'id': range(300, 340), 'city': rng.choice(['a', 'b'], 40), 'x': rng.randn(40)})
+            train.to_csv(data / 'train.csv', index=False)
+            test.to_csv(data / 'test.csv', index=False)
+            pd.DataFrame({'id': test.id, 'price': 0.}).to_csv(data / 'sample_submission.csv', index=False)
+            (root / 'task.md').write_text('Predict price; RMSE. Files in nested/participants.')
+            with patch('solution.cli', side_effect=RuntimeError('LLM contract failed')):
+                with self.assertRaises(RuntimeError):
+                    main([str(root / 'task.md')])
+            result = pd.read_csv(root / 'submission.csv')
+            self.assertEqual((list(result.columns), len(result)), (['id', 'price'], 40))
+            self.assertEqual(result.id.tolist(), test.id.tolist())
+            self.assertLess(np.sqrt(np.mean((result.price - (test.x * 10 + (test.city == 'a') * 3)) ** 2)), 5)
+
     def test_zip_contains_only_root_modules_and_original_requirements(self):
         with tempfile.TemporaryDirectory() as temporary:
             archive = build(Path(temporary) / 'submission.zip')
             with ZipFile(archive) as bundle:
                 self.assertEqual(set(bundle.namelist()), {'solution.py', 'requirements.txt', 'alfa_cli.py',
-                    'alfa_agents.py', 'alfa_autopilot.py', 'alfa_library_docs.py', 'alfa_toolkit.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py',
+                    'alfa_agents.py', 'alfa_autopilot.py', 'alfa_fallback.py', 'alfa_library_docs.py', 'alfa_toolkit.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py',
                     'alfa_qwen.py', 'alfa_runner.py', 'alfa_storage.py', 'alfa_worker.py'})
                 self.assertEqual(bundle.read('requirements.txt'), Path('vendor/requirements_data_folder.txt').read_bytes())
                 for name in bundle.namelist():
