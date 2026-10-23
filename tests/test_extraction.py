@@ -73,7 +73,7 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
             value = {**facts['problem'], **({'unexpected': 'keep me invalid'} if extra else {})}
             def handler(request):
                 body = json.loads(request.content)
-                self.assertNotIn('response_format', body)
+                self.assertEqual(body['response_format'], {'type': 'json_object'})
                 self.assertEqual(body['reasoning_effort'], 'none')
                 return httpx.Response(200, json={'id': 'proxy', 'object': 'chat.completion', 'created': 0,
                     'model': 'model', 'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {
@@ -104,7 +104,7 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
                     seen.append(role)
                     self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
                     self.assertEqual(body['reasoning_effort'], 'none')
-                    self.assertNotIn('response_format', body)
+                    self.assertEqual(body['response_format'], {'type': 'json_object'})
                     self.assertEqual(json.loads(body['messages'][-1]['content'].rsplit('\n', 1)[1]), {'task_text': text})
                     return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
                         'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': json.dumps(facts[role])}}]})

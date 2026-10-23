@@ -42,7 +42,7 @@ class ConfigurationTests(unittest.TestCase):
                 'OPENAI_API_KEY': 'fake-secret', 'OPENAI_BASE_URL': 'https://proxy.example/v1'})
             settings.validate()
             self.assertEqual(settings.model, 'qwen/qwen3.8-27b')
-            self.assertEqual(settings.timeout_seconds, 600)
+            self.assertEqual(settings.timeout_seconds, 1200)
 
     def test_platform_http_and_https_proxies_are_accepted(self):
         for url in ["http://llm-proxy:8080/v1", "http://10.0.0.2:8000/v1/",
@@ -139,6 +139,20 @@ class QwenTests(unittest.TestCase):
 
         with self.assertRaises(QwenError):
             ask_qwen(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    def test_missing_message_is_a_controlled_error_and_content_parts_are_joined(self):
+        for choices, expected in (([{"index": 0, "finish_reason": "stop"}], None),
+                                  ([{"index": 0, "finish_reason": "stop", "message": {"role": "assistant",
+                                    "content": [{"type": "text", "text": "го"}, {"type": "text", "text": "тов"}]}}], "готов")):
+            def handler(request):
+                return httpx.Response(200, json={"id": "chat-test", "object": "chat.completion",
+                    "created": 0, "model": "qwen-model", "choices": choices})
+            client = httpx.Client(transport=httpx.MockTransport(handler))
+            if expected is None:
+                with self.assertRaises(QwenError):
+                    ask_qwen(self.settings, "hello", http_client=client)
+            else:
+                self.assertEqual(ask_qwen(self.settings, "hello", http_client=client).text, expected)
 
     def test_check_config_is_offline_and_hides_the_key(self):
         out = io.StringIO()

@@ -12,6 +12,16 @@ class QwenError(RuntimeError):
     """A printable error without raw provider responses or credentials."""
 
 
+def reply_text(response) -> str:
+    """Text of the first choice, tolerating a missing message and content sent as a list of parts."""
+    choice = (getattr(response, 'choices', None) or [None])[0]
+    content = getattr(getattr(choice, 'message', None), 'content', None)
+    if isinstance(content, list):  # [{'type': 'text', 'text': ...}] or objects with .text
+        content = ''.join(part.get('text') or '' if isinstance(part, dict) else getattr(part, 'text', None) or ''
+                          for part in content)
+    return content if isinstance(content, str) else '' if content is None else str(content)
+
+
 @dataclass(frozen=True)
 class Answer:
     text: str
@@ -33,7 +43,7 @@ def ask_qwen(
         with OpenAI(
             api_key=settings.api_key,
             base_url=settings.base_url,
-            timeout=settings.timeout_seconds,
+            timeout=settings.timeout_seconds,  # None waits for the answer
             max_retries=0,
             http_client=http_client,
         ) as client:
@@ -59,10 +69,11 @@ def ask_qwen(
         }
         hint = hints.get(error.status_code, "Проверьте совместимость API и состояние сервиса.")
         raise QwenError(f"Qwen API вернул HTTP {error.status_code}. {hint}") from None
-    if not response.choices or not response.choices[0].message.content:
+    text = reply_text(response)
+    if not text:
         raise QwenError("API не вернул текст ответа. Проверьте формат ответа и лимит генерации.")
     return Answer(
-        text=response.choices[0].message.content,
+        text=text,
         model=response.model,
         usage=response.usage.model_dump() if response.usage else None,
     )

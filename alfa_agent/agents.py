@@ -17,12 +17,10 @@ from .config import Settings
 from .library_docs import DOCS, library_notes
 from .contracts import (CodeReview, DataFacts, Extraction, Hypotheses, Hypothesis, LLMCall, MetricFacts, OutputFacts,
                         PreparationDraft, ProblemFacts, Program, RunReport)
-from .qwen import QwenError
+from .qwen import QwenError, reply_text
 from .storage import save
 
 BAKER_ATTEMPTS = 10
-# Short JSON answers never need the code-generation wait; a silent proxy then fails fast and is retried.
-SHORT_ROLES = {'problem': 180, 'data': 180, 'metric': 180, 'output': 180, 'reviewer': 300, 'preparation_reviewer': 300}
 
 
 def runtime_contract(preparation):
@@ -156,7 +154,7 @@ class JSONAgents:
 
     async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
                   request_limit: int | None = None, validation: dict | None = None,
-                  attempts: int = 3, repairs: int = 1, refresh=None, temperature: float = 0):
+                  attempts: int = 8, repairs: int = 7, refresh=None, temperature: float = 0):  # any failed answer is retried
         reviewing = role in {'reviewer', 'preparation_reviewer'}
         messages = [
             {"role": "system", "content": (
@@ -170,6 +168,8 @@ class JSONAgents:
             {"role": "user", "content": prompt},
         ]
         invalid, feedback = 0, None
+        # Provider JSON-mode for every role that returns plain JSON; code roles keep free text inside their schema.
+        json_mode = not code
         limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
         attempt = 0
         while attempt < attempts:  # 429 waits may extend attempts
@@ -190,12 +190,12 @@ class JSONAgents:
                     self.began = time.monotonic()
                     if remaining <= 0:
                         raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
-                    async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
-                                           max_retries=0, timeout=min(self.settings.timeout_seconds,
-                                           SHORT_ROLES.get(role, float('inf')), remaining)) as client:
+                    async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url, max_retries=0,
+                                           timeout=min(self.settings.timeout_seconds or remaining, remaining)) as client:
                         response = await client.chat.completions.create(
                             model=self.settings.model, messages=messages, temperature=temperature,
                             max_tokens=min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens,
+                            **({'response_format': {'type': 'json_object'}} if json_mode else {}),
                             extra_body={"reasoning_effort": "none",
                                 "chat_template_kwargs": {"enable_thinking": False}})
             except asyncio.CancelledError:
@@ -208,6 +208,9 @@ class JSONAgents:
                 if status is None and error.__cause__ is not None:
                     suffix += ' / ' + type(error.__cause__).__name__
                 self.record(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
+                if status == 400 and json_mode and attempt < attempts:  # a proxy may reject JSON-mode: ask again without it
+                    json_mode = False
+                    continue
                 if status == 429 and self.deadline - time.monotonic() > 30:
                     # A shared server may refuse while its owner has priority: wait while the run budget allows,
                     # without spending the request budget.
@@ -217,21 +220,23 @@ class JSONAgents:
                     attempts += 1
                     continue
                 if attempt < attempts and (status is None or status >= 500):
-                    await asyncio.sleep(min(2 ** attempt, 4, max(0., self.deadline - time.monotonic())))
+                    await asyncio.sleep(min(2 ** attempt, 30, max(0., self.deadline - time.monotonic())))  # 2, 4, 8, 16, 30 s
                     continue
                 raise QwenError(f"Qwen: {suffix}; тело ответа сервера скрыто.") from None
-            content = ((response.choices[0].message.content if response.choices else None) or '').strip()
+            # Missing message/content or a list of parts become text here; an empty reply is an invalid answer
+            # that is recorded and retried like any other, never an exception outside this loop.
+            content = reply_text(response).strip()
             # Remove only a complete outer Markdown fence; keep all JSON fields for strict validation.
             fenced = re.fullmatch(r'```(?:json)?\s*\n(.*?)\n```', content, re.S)
             if fenced:
                 content = fenced[1].strip()
             elif content[:1] != '{' and '{' in content:  # prose or a fence around the object: keep the outer object
                 content = content[content.index('{'):content.rindex('}') + 1] if '}' in content else content
-            usage = response.usage
-            stats = dict(role=role, node_id=self.node_id, attempt=attempt, prompt_tokens=usage.prompt_tokens if usage else 0,
-                         completion_tokens=usage.completion_tokens if usage else 0)
+            usage = getattr(response, 'usage', None)
+            stats = dict(role=role, node_id=self.node_id, attempt=attempt, prompt_tokens=getattr(usage, 'prompt_tokens', 0) or 0,
+                         completion_tokens=getattr(usage, 'completion_tokens', 0) or 0)
             try:
-                if response.choices and response.choices[0].finish_reason == 'length':
+                if getattr((getattr(response, 'choices', None) or [None])[0], 'finish_reason', None) == 'length':
                     raise ValueError('Response truncated by token limit')
                 json.dumps(json.loads(content or ''), allow_nan=False)
                 result = schema.model_validate_json(content or "", context={"source": source, **(validation or {})})
@@ -409,7 +414,7 @@ class JSONAgents:
             "Use pass unless there is an error; use revise if there is one. Re-evaluate previous findings against "
             "the CURRENT code; do not repeat resolved issues.\n" + json.dumps(context, ensure_ascii=False),
             'preparation_reviewer' if context['kind'] == 'preparation' else 'reviewer',
-            validation={'review_code': context['code']}, attempts=2, repairs=1, request_limit=request_limit)
+            validation={'review_code': context['code']}, attempts=4, repairs=3, request_limit=request_limit)
 
     async def plan_next(self, context, count: int = 2, *, rejections=None):
         prompt = ("Return exactly the requested_purposes, one proposal per purpose, in that order. "
@@ -521,7 +526,7 @@ class JSONAgents:
 async def extract_task(task_path: Path, output: Path, settings: Settings, *, agents: JSONAgents | None = None):
     """Extraction does not read datasets or reject unsupported execution capabilities."""
     text = task_path.read_text(encoding="utf-8")
-    agents = agents or JSONAgents(settings, time.monotonic() + 2 * settings.timeout_seconds)
+    agents = agents or JSONAgents(settings, time.monotonic() + 2 * (settings.timeout_seconds or 900))
     output.mkdir(parents=True, exist_ok=False)
     report = RunReport(status="running", task_sha256=hashlib.sha256(text.encode()).hexdigest())
     save(output / "report.json", report)
