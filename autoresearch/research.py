@@ -356,9 +356,10 @@ def research_loop(lab: Lab, llm: LLM, method_text: str, log=print, on_baseline=N
     qwen = QwenResearcher(lab, llm, method_text)
     heur = HeuristicResearcher(lab)
     mem = lab.mem
-    # базовая линия — всегда код (точка отсчёта)
-    first = heur.next()
-    rec = lab.run(first["spec"], first["hypothesis"], first["why"], None, "baseline")
+    # базовая линия — всегда код и всегда запускается (точка отсчёта + страховочный ответ), без проверки бюджета
+    heur.done.add("baseline")
+    rec = lab.run(ExperimentSpec(), "Базовая линия: lightgbm на исходных признаках", "точка отсчёта для всех гипотез",
+                  None, "baseline")
     log(f"   {rec['id']} baseline: {rec.get('cv')} ({rec.get('status')}, {rec.get('seconds')} с) {rec.get('error') or ''}")
     if on_baseline:
         on_baseline(rec)

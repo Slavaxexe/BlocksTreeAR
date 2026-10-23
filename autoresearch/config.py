@@ -8,7 +8,8 @@ from pathlib import Path
 
 
 def load_env(root: Path):
-    """.env в корне репозитория. Переменные окружения имеют приоритет."""
+    """.env рядом с solution.py. Непустые значения из .env важнее окружения: локально это защищает от чужого
+    OPENAI_API_KEY в shell (например, ключа OpenAI). На платформе .env нет — работают переменные окружения."""
     path = root / ".env"
     if not path.exists():
         return
@@ -17,7 +18,9 @@ def load_env(root: Path):
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        v = v.strip().strip('"').strip("'")
+        if v:
+            os.environ[k.strip()] = v
 
 
 @dataclass
@@ -52,7 +55,7 @@ class Settings:
     llm_enabled: bool = True
     llm_max_calls: int = 45
     llm_timeout_s: float = 180
-    llm_max_tokens: int = 6000
+    llm_max_tokens: int = 12000
     memory_chars: int = 15000           # сколько памяти отдаём Qwen за один вызов
 
     @property

@@ -59,7 +59,12 @@ def run(task_path: str, out_dir: str | None = None, no_llm: bool = False, total_
         s.llm_max_calls = llm_calls
     budget = Budget(total_s=total_budget)
     run_dir = Path(out_dir).resolve() if out_dir else ROOT / "artifacts" / f"autoresearch_{time.strftime('%Y%m%d_%H%M%S')}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / ".write_test").write_text("ok")
+    except OSError:  # папка решения только для чтения — пишем во временный каталог
+        import tempfile
+        run_dir = Path(tempfile.mkdtemp(prefix="autoresearch_"))
     mem = Memory(run_dir)
     llm = LLM(s, mem, fn=llm_fn)
     mem.fact("run", {"budget_s": total_budget, "n_jobs": s.n_jobs, "llm": llm.enabled, "model": s.model if llm.enabled else None})

@@ -74,11 +74,12 @@ def score_entity_key(all_df: pd.DataFrame, n_train: int, key: list[str], time_co
 
 
 def search_entity_key(all_df: pd.DataFrame, n_train: int, cols: list[str], time_col: str, target: str,
-                      cat_cols: list[str]) -> tuple[dict | None, list[dict]]:
+                      cat_cols: list[str], max_seconds: float = 90) -> tuple[dict | None, list[dict]]:
     """Жадный поиск: кандидаты — колонки, значения которых повторяются в разных периодах
     (свойства объекта, а не периода); добавляем, пока растёт score."""
+    import time as _t
+    t0 = _t.monotonic()
     tried = []
-    p = all_df[time_col]
     cand = []
     for c in cols:
         if c == time_col or c == target:
@@ -101,6 +102,8 @@ def search_entity_key(all_df: pd.DataFrame, n_train: int, cols: list[str], time_
         for c in pool[:25]:
             if c in current:
                 continue
+            if _t.monotonic() - t0 > max_seconds:
+                break
             s = score_entity_key(all_df, n_train, current + [c], time_col, target)
             tried.append(s)
             if step_best is None or s["score"] > step_best["score"]:

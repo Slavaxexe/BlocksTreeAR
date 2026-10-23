@@ -52,12 +52,32 @@ class LLM:
         try:
             r = client.chat.completions.create(**kwargs)
         except APIStatusError as e:
-            if e.status_code == 400 and self.json_mode and "response_format" in str(e).lower():
+            # 400 от сервера: сначала отказываемся от JSON-режима, затем уменьшаем max_tokens — и пробуем снова
+            if e.status_code == 400 and self.json_mode:
                 self.json_mode = False
+                self.mem.log("llm_adapt", change="json_mode off", error=str(e)[:200])
+                return self._call_api(messages, timeout)
+            if e.status_code == 400 and self.s.llm_max_tokens > 2048:
+                self.s.llm_max_tokens = 2048
+                self.mem.log("llm_adapt", change="max_tokens=2048", error=str(e)[:200])
                 return self._call_api(messages, timeout)
             raise
         usage = r.usage.model_dump() if r.usage else {}
-        return r.choices[0].message.content or "", usage
+        choice = r.choices[0]
+        text = choice.message.content or ""
+        if not text.strip() and getattr(choice.message, "reasoning_content", None):
+            text = choice.message.reasoning_content  # некоторые серверы кладут ответ рядом с рассуждением
+        usage["finish_reason"] = choice.finish_reason
+        return text, usage
+
+    def ping(self) -> tuple[bool, str]:
+        """Короткая проверка ключа и адреса: один крошечный запрос."""
+        try:
+            raw, usage = self._call_api([{"role": "user", "content": 'Ответь JSON: {"ok": true}'}], timeout=60)
+            ok = '"ok"' in raw.replace(" ", "") or "ok" in raw.lower()
+            return ok, f"модель {self.s.model} @ {self.s.base_url}: ответ «{raw.strip()[:80]}», токены {usage}"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {str(e)[:300]}"
 
     def _disable(self, reason: str):
         self.enabled = False
@@ -121,6 +141,8 @@ class LLM:
                 errors = validator(obj) if validator else []
             except (ValueError, ValidationError) as e:
                 errors = [f"формат: {str(e)[:600]}"]
+                if usage.get("finish_reason") == "length":
+                    errors.append("ответ обрезан по длине: верни только JSON, коротко, без рассуждений вне него")
             self.mem.log("llm_call", role=role, attempt=attempt + 1, prompt_chars=len(system) + len(user),
                          seconds=round(time.monotonic() - t, 1), usage=usage, raw=raw[:20000], errors=errors)
             if not errors:
