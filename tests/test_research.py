@@ -20,6 +20,9 @@ from agent.contracts import Preparation, ResearchPlan, ResearchReview
 from agent.data import file_hash
 from agent.research import Research
 from agent.research_worker import execute, inspect
+from agent.research_policy import choose_direction, measurement_key, select_insights, select_questions
+from agent.context import research_history
+from agent.plans import AnalysisRequest
 from agent.runner import Options, run
 from agent.storage import atomic_bytes, fingerprint, save
 from agent.worker import prepare
@@ -84,6 +87,43 @@ def review(statement='Measured row count', **updates):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_direction_coverage_and_explicit_alternatives(self):
+        nodes = []
+        for expected in ('quality', 'distribution', 'relationships', 'entities'):
+            direction, mode = choose_direction(nodes, 'structure', [])
+            self.assertEqual((direction, mode), (expected, 'explore'))
+            nodes.append({'phase': 'structure', 'stage': 'planning', 'direction': direction})
+        nodes = [{'phase': 'fit', 'stage': 'completed', 'direction': 'encoding'}] * 2
+        self.assertEqual(choose_direction(nodes, 'fit', [{'direction': 'encoding', 'importance': 'high'}]),
+                         ('encoding', 'refine'))
+        plan = dict(question='Count rows', hypothesis='Rows exist', method='Quality', decision='Budget', analyses=CHECKS)
+        with self.assertRaises(ValidationError):
+            ResearchPlan.model_validate(plan, context={'assigned_direction': 'entities'})
+        ResearchPlan.model_validate({**plan, 'alternative_reason': 'No candidate key is available'},
+                                    context={'assigned_direction': 'entities'})
+
+    def test_measurement_identity_ignores_names_but_preserves_population_and_parameters(self):
+        request = AnalysisRequest(name='first', kind='feature', features=[
+            {'name': 'new_feature', 'operation': 'sum', 'columns': ['a', 'b']}])
+        renamed = request.model_copy(update={'name': 'second', 'top_k': 3,
+            'features': [request.features[0].model_copy(update={'name': 'another_name'})]})
+        self.assertEqual(measurement_key(request), measurement_key(renamed))
+        for change in ({'seed': 43}, {'sample_rows': 100}, {'estimator': 'linear'},
+                       {'filters': [{'column': 'a', 'operation': 'gt', 'value': 2}]}):
+            changed = AnalysisRequest.model_validate({**request.model_dump(), **change})
+            self.assertNotEqual(measurement_key(request), measurement_key(changed))
+
+    def test_context_keeps_important_evidence_and_bounds_recent_history(self):
+        insights = [{'id': str(i), 'node_id': f'research_{i:03d}', 'statement': f'Observation {i}',
+                     'importance': 'low' if i else 'critical', 'direction': 'entities'} for i in range(30)]
+        self.assertEqual([item['id'] for item in select_insights(insights)], ['0'])
+        nodes = [{'node_id': f'research_{i:03d}', 'phase': 'fit', 'stage': 'completed'} for i in range(30)]
+        nodes.append({'node_id': 'research_030', 'phase': 'fit', 'stage': 'planning'})
+        self.assertEqual([row['node_id'] for row in research_history(nodes)],
+                         [f'research_{i:03d}' for i in range(22, 31)])
+        metadata = {str(i): {'direction': str(i % 4), 'importance': 'high'} for i in range(20)}
+        self.assertEqual(len(select_questions(list(metadata), metadata)), 6)
+
     def test_structure_then_fit_hide_holdout_targets_and_record_actual_measurements(self):
         with tempfile.TemporaryDirectory() as temporary:
             _, root, _ = fixture(Path(temporary))
@@ -129,7 +169,8 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 context = json.loads(prompt.rsplit('\n', 1)[1])
                 if schema is ResearchPlan:
                     return ResearchPlan(question=client.node_id, hypothesis='Rows exist', method='Count rows',
-                                        decision='Set training budget', analyses=CHECKS, parent_id='research_999')
+                                        decision='Set training budget', analyses=[{**CHECKS[0],
+                                            'columns': ['feature'] if client.node_id.endswith('000') else ['flag']}], parent_id='research_999')
                 return ResearchReview.model_validate(review(open_questions=['Explain duplicates']), context=kwargs['validation'])
 
             async def process(args, cwd, log, deadline, timeout):
@@ -155,6 +196,31 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(shared['data_research']['insights']), 1)  # Same observation is stored once.
             self.assertEqual(research.questions, ['Explain duplicates'])
             self.assertTrue((root / 'research/nodes/research_000/start.json').exists())
+
+            # A renamed repeat needs no worker/reviewer; a mixed plan executes only the new check.
+            duplicate = {'node_id': 'research_004', 'phase': 'structure', 'stage': 'planning',
+                         'direction': 'quality', 'mode': 'explore', 'focus': 'Quality'}
+            client = research.clients['research_001']
+            with patch.object(JSONAgents, 'ask', new=ask):
+                result = await research.investigate(duplicate, client)
+            self.assertEqual(result['status'], 'duplicate')
+            self.assertEqual(sum(calls.values()), 2)
+
+            async def mixed(client, schema, prompt, role, **kwargs):
+                if schema is ResearchPlan:
+                    return ResearchPlan(question='New check plus repeat', hypothesis='Rows exist', method='Count',
+                        decision='Budget', analyses=[{**CHECKS[0], 'name': 'cached_rows', 'columns': ['flag']},
+                            {'name': 'rows', 'kind': 'quality', 'columns': ['id']},
+                            {'name': 'unfinished', 'kind': 'quality', 'columns': ['id', 'feature']}])
+                return await ask(client, schema, prompt, role, **kwargs)
+
+            with patch.object(JSONAgents, 'ask', new=mixed):
+                result = await research.investigate(duplicate, client)
+            self.assertEqual(result['status'], 'completed')
+            start = json.loads((root / 'research/nodes/research_004/start.json').read_text())
+            self.assertEqual([item['columns'] for item in start['analyses']], [['id'], ['id', 'feature']])
+            self.assertNotIn(('structure', measurement_key(start['analyses'][1])), research.measurement_sources)
+            self.assertEqual(sum(calls.values()), 3)
 
             first = research.insights[0]['id']
             result = review('Refined observation', supersedes=[first], resolves=['Explain duplicates'])
@@ -213,7 +279,9 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 if title == 'ResearchPlan':
                     self.assertTrue((task.parent / 'submission.csv').is_file(), 'Cheap baseline must be published before EDA')
                     reply = {'question': context['node_id'], 'hypothesis': 'The input has rows', 'method': 'Count rows',
-                             'decision': 'Budget fitting', 'analyses': CHECKS}
+                             'decision': 'Budget fitting', 'analyses': [{**CHECKS[0],
+                                 'columns': ['feature'] if int(context['node_id'].split('_')[-1]) % 2 == 0 else ['flag']}],
+                             'alternative_reason': 'This execution fixture tests the shared pipeline with small quality probes'}
                 elif title == 'ResearchReview':
                     reply = review('Rows measured by ' + context['plan']['node_id'])
                 elif title == 'Ideas':

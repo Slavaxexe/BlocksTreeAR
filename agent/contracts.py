@@ -455,12 +455,18 @@ class ResearchPlan(Contract):
     method: str = Field(min_length=1)
     decision: str = Field(min_length=1)
     analyses: list[AnalysisRequest] = Field(min_length=1, description='Executable feature-analysis requests; no generated Python')
+    alternative_reason: str | None = Field(default=None, description='Required if the assigned research direction cannot be tested: explain the data limitation and why the alternative is new')
 
     @model_validator(mode='after')
-    def unique_requests(self):
+    def unique_requests(self, info: ValidationInfo):
         names = [item.name for item in self.analyses]
         if len(names) != len(set(names)):
             raise ValueError('Analysis result names must be unique')
+        assigned = (info.context or {}).get('assigned_direction')
+        if assigned:
+            from .research_policy import directions
+            if assigned not in directions(self.analyses) and not self.alternative_reason:
+                raise ValueError('Test the assigned direction or give alternative_reason explaining why the data cannot support it')
         return self
 
 
@@ -469,6 +475,9 @@ class DataInsight(Contract):
     kind: Literal['observation', 'interpretation']
     evidence_keys: list[str] = Field(min_length=1)
     implication: str = Field(min_length=1)
+    importance: Literal['low', 'medium', 'high', 'critical'] = Field(default='medium', description='Decision impact: critical invalidates task/validation; high changes a major modeling decision; medium is a useful refinement; low is incidental')
+    confidence: Literal['low', 'medium', 'high'] = Field(default='medium', description='Strength of measured support, not subjective certainty; a proxy gain alone does not prove outer/test improvement')
+    topic: str = Field(default='', description='Short stable topic including the relevant feature/population; reuse for the same claim across studies')
 
 
 class ResearchReview(Contract):

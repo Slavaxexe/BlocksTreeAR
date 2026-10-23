@@ -332,6 +332,19 @@
       "minItems": 1,
       "title": "Analyses",
       "type": "array"
+    },
+    "alternative_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Required if the assigned research direction cannot be tested: explain the data limitation and why the alternative is new",
+      "title": "Alternative Reason"
     }
   },
   "required": [

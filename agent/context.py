@@ -96,23 +96,12 @@ def experiment_index(cards):
                   for card in cards])
 
 
-def select_research(memory, query, limit=12):
+def select_research(memory, query, limit=8):
+    from .research_policy import select_insights
     insights = memory.get('insights', [])
-    if len(insights) <= limit:
-        return memory
-    words = lambda text: set(re.findall(r'\w{3,}', str(text).lower()))
-    focus = words(query)
-    selected = [item for item in insights if item.get('kind') == 'observation'][:2] + insights[-4:]
-    ranked = sorted(insights, key=lambda item: (len(words(item['statement']) & focus),
-                                               item.get('kind') == 'observation'), reverse=True)
-    ids = list(dict.fromkeys(item['id'] for item in selected))
-    for item in ranked:
-        if len(ids) >= limit:
-            break
-        if item['id'] not in ids:
-            ids.append(item['id'])
-    return {**memory, 'insights': [item for item in insights if item['id'] in ids],
-            'omitted_insight_count': len(insights) - len(ids)}
+    selected = select_insights(insights, query, limit)
+    return {**memory, 'insights': selected,
+            'omitted_insight_count': memory.get('omitted_insight_count', 0) + len(insights) - len(selected)}
 
 
 def planner_catalog(catalog, idea, limit=24):
@@ -190,10 +179,17 @@ def analyzer_context(context):
 
 
 def research_history(nodes):
-    from .plans import AnalysisRequest
-    return [{'node_id': row['node_id'], 'phase': row['phase'], 'stage': row['stage'],
-             'analyses': [AnalysisRequest.model_validate(value).model_dump(exclude_defaults=True, exclude_none=True)
-                          for value in row.get('analyses', [])]} for row in nodes]
+    from .research_policy import FINISHED
+    active = [row for row in nodes if row['stage'] not in FINISHED]
+    recent = [row for row in nodes if row['stage'] in FINISHED][-8:]
+    return [compact({'node_id': row['node_id'], 'phase': row['phase'], 'stage': row['stage'],
+        'direction': row.get('direction'), 'mode': row.get('mode'), 'question': row.get('question'),
+        'summary': row.get('review', {}).get('summary'), 'error': row.get('error'),
+        'probes': [{'kind': value['kind'], 'columns': value.get('columns'),
+                    'features': [{key: recipe[key] for key in ('operation', 'columns', 'parameters')}
+                                 for recipe in value.get('features', [])],
+                    'sample_rows': value.get('sample_rows'), 'filters': value.get('filters')}
+                   for value in row.get('analyses', [])]}) for row in [*recent, *active]]
 
 
 def model_feedback(row):

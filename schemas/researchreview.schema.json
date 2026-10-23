@@ -28,6 +28,35 @@
           "minLength": 1,
           "title": "Implication",
           "type": "string"
+        },
+        "importance": {
+          "default": "medium",
+          "description": "Decision impact: critical invalidates task/validation; high changes a major modeling decision; medium is a useful refinement; low is incidental",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "title": "Importance",
+          "type": "string"
+        },
+        "confidence": {
+          "default": "medium",
+          "description": "Strength of measured support, not subjective certainty; a proxy gain alone does not prove outer/test improvement",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "topic": {
+          "default": "",
+          "description": "Short stable topic including the relevant feature/population; reuse for the same claim across studies",
+          "title": "Topic",
+          "type": "string"
         }
       },
       "required": [

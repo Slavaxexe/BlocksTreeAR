@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import time
 import traceback
 
@@ -12,6 +13,8 @@ from .context import (compact, research_history, research_profile_view, select_r
 from .data import file_hash
 from .storage import fingerprint, save
 from .eda import CATALOG
+from .research_policy import (DIRECTIONS, choose_direction, coverage, directions, evidence_summary, importance_score,
+                              measurement_key, select_candidates, select_questions)
 
 
 RESEARCH_RULES = (
@@ -31,6 +34,8 @@ class Research:
         self.shared, self.process, self.notify, self.refresh = shared, process, notify, refresh
         self.active, self.clients, self.nodes, self.insights = {}, {}, [], []
         self.questions = []
+        self.question_metadata = {}
+        self.measurement_sources = {}
         self.model_feedback = []
         self.feature_candidates = []
         self.revision, self.failures = 0, 0
@@ -45,12 +50,15 @@ class Research:
         return list(self.active)
 
     def view(self):
-        return {'revision': self.revision,
-                'insights': [{k: row[k] for k in ('id', 'phase', 'statement', 'kind')}
+        memory = {'revision': self.revision,
+                'insights': [{k: row[k] for k in ('id', 'node_id', 'phase', 'statement', 'kind',
+                    'implication', 'importance', 'confidence', 'topic', 'direction', 'evidence') if k in row}
                              for row in self.insights if row['active']],
-                'open_questions': self.questions,
-                'feature_candidates': self.feature_candidates,
+                'open_questions': select_questions(self.questions, self.question_metadata),
+                'feature_candidates': select_candidates(self.feature_candidates),
+                'coverage': coverage(self.nodes),
                 'validation_policy': 'Research proposes changes; the fixed split is never modified during model search'}
+        return select_research(memory, '')
 
     def report(self):
         return {'max_parallel_research': self.options.research_parallel,
@@ -61,7 +69,8 @@ class Research:
 
     def persist(self):
         save(self.directory / 'research' / 'context.json', {
-            **self.view(), 'insight_history': self.insights, 'stop_reason': self.stop_reason})
+            **self.view(), 'insight_history': self.insights, 'question_history': self.question_metadata,
+            'feature_candidate_history': self.feature_candidates, 'stop_reason': self.stop_reason})
         save(self.directory / 'research' / 'tree.json', {'nodes': self.nodes})
         self.shared['data_research'] = self.view()
 
@@ -82,10 +91,10 @@ class Research:
                     self.stop_reason = 'llm_limit'
                 break
             node_id = f'research_{len(self.nodes):03d}'
+            direction, mode = choose_direction(self.nodes, phase, self.insights)
             row = {'node_id': node_id, 'phase': phase, 'stage': 'planning', 'parent_id': None,
                    'context_revision': self.revision,
-                   'focus': 'quality, semantics and grouping' if len(self.nodes) % 2 == 0
-                            else 'distributions and useful feature relationships'}
+                   'direction': direction, 'mode': mode, 'focus': DIRECTIONS[direction]}
             client = JSONAgents(self.agents.settings, min(self.agents.deadline, self.phase_deadline or self.agents.deadline), allowance,
                                 shared=self.agents, node_id=node_id)
             self.clients[node_id] = client
@@ -137,6 +146,8 @@ class Research:
                        if row['phase'] == 'fit' or key in {'quality', 'correlation', 'shift', 'groups', 'redundancy', 'entities'}},
                    'history': research_history([item for item in self.nodes if item is not row]),
                    'target_access': {'fit': row['phase'] == 'fit', 'validation': False, 'test': False},
+                   'search': {'direction': row['direction'], 'mode': row['mode'],
+                              'coverage': coverage(self.nodes), 'available_directions': DIRECTIONS},
                    'focus': row['focus'], 'timeout_seconds': max(0., client.deadline - time.monotonic())
                    if self.options.research_unlimited else self.options.research_timeout}
         context.pop('installed_libraries', None)  # AnalysisRequest already enumerates its ready estimators.
@@ -150,23 +161,45 @@ class Research:
                 'a name containing test does not select test. Label-dependent checks always use fit. '
                 'Use a few related checks instead of an exhaustive Cartesian search. Prefer existing measurements '
                 'over repeating them; a changed question does not make identical measurements new. '
+                'search allocates exploration versus refinement. Explore should test the assigned under-explored '
+                'direction, not another small parameter variant of the current favorite. Refine should verify '
+                'a decision-changing finding on comparable data or explain its boundary. Do not call a tool just '
+                'to fill coverage. If the data cannot support the assigned direction, give alternative_reason '
+                'with the concrete missing prerequisite and test a genuinely new alternative. A negative result '
+                'for one key, feature, population or model does not rule out untested alternatives. '
                 'Use feature recipes to test proposed features, ablation to test removal, interactions for joint '
                 'signal missed by univariate tests, permutation for held-out importance, and stability for groups. '
                 'Use validation=auto for proxy models to respect the task time/group policy. '
                 'sample_rows/top_k control the computation and result size; set null when the full result is needed. '
                 'Proxy scores are internal fit-only evidence, never an experiment outer score or test score. '
                 'parent_id may reference a completed research node. Keep hypothesis, method and decision concise.\n' +
-                json.dumps(context, ensure_ascii=False, separators=(',', ':')), 'data_researcher')
+                json.dumps(context, ensure_ascii=False, separators=(',', ':')), 'data_researcher',
+                validation={'assigned_direction': row['direction']})
             parents = {item['node_id'] for item in self.nodes if item['stage'] == 'completed'}
             if plan.parent_id is not None and plan.parent_id not in parents:
                 self.agents.log('research_parent_ignored', research_node=row['node_id'], parent_id=plan.parent_id)
                 plan = plan.model_copy(update={'parent_id': None})
+            unique = {}
+            for request in plan.analyses:
+                unique.setdefault(measurement_key(request), request)
+            plan = plan.model_copy(update={'analyses': list(unique.values())})
+            keys = [(row['phase'], measurement_key(request)) for request in plan.analyses]
+            prior = {self.measurement_sources[key] for key in keys if key in self.measurement_sources}
+            row.update(question=plan.question, alternative_reason=plan.alternative_reason, reuses=sorted(prior))
+            if prior and all(key in self.measurement_sources for key in keys):
+                return {'status': 'duplicate', 'reuses': sorted(prior), 'duration_seconds': time.monotonic() - started}
+            # Requests are independent: execute/review only new measurements in a mixed plan.
+            plan = plan.model_copy(update={'analyses': [request for request, key in zip(plan.analyses, keys)
+                                                       if key not in self.measurement_sources]})
+            for key in keys:
+                self.measurement_sources.setdefault(key, row['node_id'])
             start = {'node_id': row['node_id'], 'phase': row['phase'], 'context_revision': self.revision,
-                     **plan.model_dump(), 'task_type': self.shared.get('requirements', {}).get('problem', {}).get('task_type'),
+                     **plan.model_dump(), 'reuses': sorted(prior),
+                     'task_type': self.shared.get('requirements', {}).get('problem', {}).get('task_type'),
                      'preparation_sha256': file_hash(self.directory / 'preparation.json')}
             start['analysis_sha256'] = fingerprint(start['analyses'])
             save(node / 'start.json', start)
-            row.update({key: start[key] for key in ('parent_id', 'question', 'hypothesis', 'method', 'decision', 'analyses')})
+            row.update({key: start[key] for key in ('parent_id', 'question', 'hypothesis', 'method', 'decision', 'analyses', 'alternative_reason')})
             self.stage(row, 'execution')
             try:
                 await self.process(['-m', 'agent.research_worker', '--root', str(self.directory), '--node', str(node)],
@@ -194,6 +227,13 @@ class Research:
                 'outer experiment before claiming better solution quality. Internal fit/validation must not '
                 'be confused with the experiment outer validation. Correlation, MI and shift do not prove causality. '
                 'A weak single feature may be useful jointly; marginal distributions do not establish class-conditional shift. '
+                'Assess importance by the modeling decision affected, and confidence by the actual evidence. '
+                'critical is reserved for invalid task/validation assumptions; high changes a major choice; '
+                'medium is a useful refinement; low is incidental. Do not rate every result high. A large '
+                'gain on a tiny or filtered proxy subset is not automatically important for the full task. '
+                'Give a stable topic per claim. State one measured conclusion and one concrete implication '
+                'per insight, with population/estimator limitations. Do not generalize a failed single-key '
+                'test to all possible entity keys, or a proxy result to test performance. '
                 'Return 1-2 concise summary sentences, up to 3 genuinely new insights with exact top-level '
                 'evidence_keys from measurements.values, and up to 3 unresolved questions. Zero insights is valid. '
                 'Mark interpretations explicitly. Do not rephrase cached/repeated findings as new discoveries. '
@@ -207,6 +247,16 @@ class Research:
             return {'status': 'cancelled' if isinstance(problem, asyncio.CancelledError) else 'failed',
                     'error': (str(problem) or 'Research cancelled').replace(self.agents.settings.api_key, '[REDACTED]'),
                     'duration_seconds': time.monotonic() - started}
+        finally:
+            # A timeout can leave only part of a plan measured. Do not reserve the unfinished checks forever.
+            try:
+                values = json.loads((node / 'measurements.json').read_text(encoding='utf-8'))['values']
+            except (OSError, json.JSONDecodeError):
+                values = {}
+            completed = {(row['phase'], measurement_key(request)) for request in row.get('analyses', [])
+                         if request['name'] in values}
+            self.measurement_sources = {key: source for key, source in self.measurement_sources.items()
+                                        if source != row['node_id'] or key in completed}
 
 
     def stage(self, row, stage):
@@ -225,20 +275,36 @@ class Research:
                 review = result['review']
                 path = self.directory / 'research' / 'nodes' / row['node_id'] / 'measurements.json'
                 measured = json.loads(path.read_text(encoding='utf-8'))['values'] if path.exists() else {}
+                successful = [request for request in row.get('analyses', []) if request['name'] in measured
+                    and (not isinstance(measured[request['name']], dict) or
+                         measured[request['name']].get('status') not in {'failed', 'unavailable'})]
+                row['measured_directions'] = sorted(directions(successful))
                 for request in row.get('analyses', []):
                     facts = measured.get(request['name'], {})
-                    if request['kind'] != 'feature' or facts.get('improvement', 0) <= 0:
+                    gain = facts.get('improvement') if isinstance(facts, dict) else None
+                    if request['kind'] != 'feature' or not isinstance(gain, (int, float)) or not math.isfinite(gain) or gain <= 0:
                         continue
+                    supporting = [item for item in review['insights'] if request['name'] in item['evidence_keys']]
+                    assessment = max(supporting, key=importance_score) if supporting else {}
                     candidate = {'research_node': row['node_id'], 'features': request['features'],
                         'columns': request.get('baseline_columns') or request.get('columns', []),
-                        'metric': facts['candidate']['metric'], 'improvement': facts['improvement'],
+                        'metric': facts['candidate']['metric'], 'improvement': gain,
+                        'relative_improvement': gain / max(abs(facts['baseline']['value']), 1e-12),
+                        'rows': facts.get('rows_used'), 'validation_rows': facts['candidate'].get('inner_validation_rows', 0),
+                        'filters': request.get('filters', []), 'validation': request.get('validation'),
+                        'importance': assessment.get('importance', 'medium'),
+                        'confidence': assessment.get('confidence', 'medium'),
                         'scope': 'Internal proxy holdout; not outer-validation evidence'}
-                    identity = fingerprint(candidate['features'])
-                    self.feature_candidates = [item for item in self.feature_candidates if fingerprint(item['features']) != identity]
+                    identity = measurement_key(request)
+                    candidate['measurement_key'] = identity
+                    self.feature_candidates = [item for item in self.feature_candidates if item.get('measurement_key') != identity]
                     self.feature_candidates.append(candidate)
-                    self.feature_candidates = sorted(self.feature_candidates, key=lambda item: -item['improvement'])[:3]
                 self.questions = list(dict.fromkeys([q for q in self.questions if q not in review['resolves']]
                                                    + review['open_questions']))
+                importance = max(review['insights'], key=importance_score).get('importance', 'medium') if review['insights'] else 'medium'
+                for question in review['open_questions']:
+                    self.question_metadata[question] = {'importance': importance, 'direction': row.get('direction'),
+                                                        'research_node': row['node_id']}
                 for insight in self.insights:
                     if insight['id'] in review['supersedes']:
                         insight.update(active=False, superseded_by=row['node_id'])
@@ -249,8 +315,13 @@ class Research:
                     if identity in known:
                         continue
                     known.add(identity)
+                    support = [request for request in successful if request['name'] in insight['evidence_keys']]
+                    families = directions(support)
+                    direction = row.get('direction') if row.get('direction') in families else next(iter(sorted(families)), None)
                     self.insights.append({**insight, 'id': f"{row['node_id']}:{index}",
                         'node_id': row['node_id'], 'phase': row['phase'], 'active': True,
+                        'direction': direction,
+                        'evidence': {key: evidence_summary(measured[key]) for key in insight['evidence_keys'] if key in measured},
                         'evidence_file': f"research/nodes/{row['node_id']}/measurements.json"})
                 self.revision += 1
             elif result['status'] == 'failed':
