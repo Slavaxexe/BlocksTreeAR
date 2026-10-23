@@ -64,8 +64,8 @@ class Settings:
 
     @property
     def base_url(self) -> str:
-        return os.getenv("OPENAI_BASE_URL", "https://inference.airi.net/v1").strip()
+        return os.getenv("OPENAI_BASE_URL", "https://changellenge.up.railway.app/v1").strip()
 
     @property
     def model(self) -> str:
-        return os.getenv("OPENAI_MODEL", "Qwen/Qwen3.8-27B").strip()
+        return os.getenv("OPENAI_MODEL", "qwen/qwen3.8-27b").strip()
