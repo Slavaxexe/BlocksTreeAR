@@ -9,6 +9,7 @@ import json
 import hashlib
 import math
 import os
+import re
 from pathlib import Path
 import signal
 import sys
@@ -25,7 +26,8 @@ from .data import check_code, file_hash, inventory, library_context, within
 from .storage import atomic_bytes, canonical, load, save
 
 ENTRY = "\nif __name__ == '__main__':\n    from alfa_agent.worker import main\n    main(fit_model)\n"
-IMPLEMENTATION_CALLS = 20
+IMPLEMENTATION_CALLS = 12  # more repairs rarely help: the hybrid repair and refusal limit settle sooner
+AUTOML_CODE = re.compile(r'autogluon|lightautoml|flaml|\bautoml\(')
 CHILD = {'threads': 2, 'shift_check': False}  # set per run from Options; children inherit nothing else
 
 
@@ -257,7 +259,9 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 if twin and twin != start.node_id:
                     raise DuplicateCode(f'Identical code was already measured as {twin}; a new node must change the experiment.')
                 await process(['-m', 'alfa_agent.worker', '--check', str(node), '--preparation', str(preparation_path)],
-                              node, node / 'execution.log', deadline, min(check_seconds, start.timeout_seconds))
+                              node, node / 'execution.log', deadline,
+                              # AutoML imports and searches take longer than a plain model on smoke rows
+                              min(150 if AUTOML_CODE.search(program.code) else check_seconds, start.timeout_seconds))
                 if file_hash(node / 'start.json') != start_hash or file_hash(preparation_path) != start.preparation_sha256:
                     raise ValueError('Saved plan or preparation changed during implementation')
                 stage = 'review'
@@ -403,7 +407,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         delta = Delta(preparation_sha256=file_hash(directory / 'preparation.json'), metric=preparation.metric)
         save(directory / 'delta.json', delta)
 
-        def create(parent_id, purpose, hypothesis, source='qwen', seen=0):
+        def create(parent_id, purpose, hypothesis, source='qwen', seen=0, timeout=None):
             start = Start(node_id=f'node_{len(starts):03d}', parent_id=parent_id, hypothesis=hypothesis, source=source,
                 preparation_sha256=delta.preparation_sha256,
                 context={'task': str(task_path), 'task_sha256': report.task_sha256, 'purpose': purpose,
@@ -413,7 +417,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     'runtime_interface': 'fit_model_v1',
                     'allowed_libraries': shared['allowed_libraries']},
                 outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
-                timeout_seconds=float(options.experiment_timeout))
+                timeout_seconds=float(timeout or options.experiment_timeout))
             node = directory / 'nodes' / start.node_id
             node.mkdir(parents=True)
             save(node / 'start.json', start)
@@ -428,9 +432,12 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 sources[start.node_id], baseline_id = prepared[0], start.node_id
                 # AutoML references run beside the LLM search; half the process limit leaves room for prediction checks.
                 # Small debug runs keep their node budget for the LLM search; AutoML needs at least 6 nodes.
-                for code, plan in automl(preparation.model_dump(mode='json'), CHILD['threads'],
-                                         .5 * options.experiment_timeout)[:max(0, min(3, options.max_nodes - 3))]:
-                    start = create(None, 'reference', Hypothesis.model_validate(plan), 'controller')
+                # AutoGluon gets a double process limit (60% of it to search): its stacking keeps improving with time.
+                for code, plan in automl(preparation.model_dump(mode='json'), CHILD['threads'], .5 * options.experiment_timeout,
+                                         long_limit=1.2 * options.experiment_timeout)[:max(0, min(3, options.max_nodes - 3))]:
+                    long = 'autogluon' in plan['pipeline']['model']['family']
+                    start = create(None, 'reference', Hypothesis.model_validate(plan), 'controller',
+                                   timeout=2 * options.experiment_timeout if long else None)
                     sources[start.node_id] = code
                     references.add(start.node_id)
 
@@ -506,7 +513,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 local = JSONAgents(settings, deadline, IMPLEMENTATION_CALLS, shared=agents, node_id=start.node_id)
                 task = asyncio.create_task(experiment(directory / 'nodes' / start.node_id, start, context, local, deadline, checkpoint,
                                                       code=sources.pop(start.node_id, None), blocking_review=not options.autopilot,
-                                                      check_seconds=150 if start.node_id in references else 45,
+                                                      # blends of several boosters need imports and fits beyond 45 s
+                                                      check_seconds=150 if start.node_id in references else 120 if options.autopilot else 45,
                                                       measured=measured))
                 active[task] = start
             if (not expired and not planning_failed and planner is None and (options.autopilot or len(active) < options.executors)

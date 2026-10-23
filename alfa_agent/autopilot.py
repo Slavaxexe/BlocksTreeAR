@@ -49,7 +49,8 @@ TOOLKIT_GUIDE = {
     'gbdt': 'gbdt(fit, preparation, transform=None, params=None, candidates=None) -> predictor: a ready LightGBM-only '
             'pipeline (loss/class weights chosen by the scorer). Classification predictors expose .proba(frame) and '
             '.classes for blending. It cannot train other learners.',
-    'automl': "automl(fit, preparation, engine, time_limit) -> predictor; engine 'autogluon'|'lightautoml'|'flaml'.",
+    'automl': "automl(fit, preparation, engine, time_limit, *, transform=None) -> predictor; engine 'autogluon'|'lightautoml'|"
+              "'flaml'. transform adds features first (e.g. target_stats). Only these arguments exist.",
     'example': 'features = Features(fit, preparation, kind="string"); target, y, classes = labels(fit, preparation)\n'
                'train, valid = split(fit, preparation)\n'
                'model = CatBoostClassifier(iterations=3000, learning_rate=0.05, thread_count=4, verbose=0, '
@@ -85,13 +86,14 @@ def template(preparation: dict, threads: int) -> tuple[str, dict] | None:
                          'final': 'retrain on all fit rows with 1.15x best iterations'}}}
 
 
-def automl(preparation: dict, threads: int, time_limit: float) -> list[tuple[str, dict]]:
+def automl(preparation: dict, threads: int, time_limit: float, long_limit: float | None = None) -> list[tuple[str, dict]]:
     """AutoGluon, LightAutoML and FLAML reference nodes under the GBDT node's applicability rules."""
     kind = task_kind(preparation)
     if kind is None:
         return []
     names = metric_names(preparation)
-    return [(AUTOML.format(toolkit=TOOLKIT, engine=engine, limit=int(time_limit)), {
+    limits = {engine: int(long_limit if engine == 'autogluon' and long_limit else time_limit) for engine in ('autogluon', 'lightautoml', 'flaml')}
+    return [(AUTOML.format(toolkit=TOOLKIT, engine=engine, limit=limits[engine]), {
         'rationale': f'Controller AutoML reference ({engine}): a strong library search the agent must beat or blend with.',
         'expected_effect': 'Competitive measured score from automated model search and ensembling under a time limit.',
         'pipeline': {'data': {'features': 'all columns except targets and ids'},
@@ -99,5 +101,6 @@ def automl(preparation: dict, threads: int, time_limit: float) -> list[tuple[str
                      'model': {'family': f'{engine} via toolkit.automl', 'task': kind['task'], 'probability_output': kind['proba'],
                                'metric': names.get(engine),
                                'preset': 'best_quality without dynamic stacking' if engine == 'autogluon' else 'default'},
-                     'training': {'time_limit_seconds': int(time_limit), 'threads': threads}}})
+                     'training': {'time_limit_seconds': limits[engine], 'threads': threads,
+                                  'validation': 'AutoGluon tunes on the shift-aware inner split' if engine == 'autogluon' else 'library default'}}})
             for engine in ('autogluon', 'lightautoml', 'flaml')]

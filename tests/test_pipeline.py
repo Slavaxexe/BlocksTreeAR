@@ -1045,7 +1045,7 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
         if len(starts) > 1 and not stuck_explore:
             self.assertGreaterEqual(peak, 2)
         if repair_both:
-            self.assertEqual([requests['node_001'], requests['node_002']], [20, 20])
+            self.assertEqual([requests['node_001'], requests['node_002']], [12, 12])
         return directory, report
 
     async def test_feedback_creates_branches_and_publishes_best_instead_of_latest(self):
@@ -1117,7 +1117,7 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((report.status, report.completed_nodes, report.failed_nodes), ('ready', 2, 2), report.errors)
             for node_id in ('node_001', 'node_002'):
                 calls = [c for c in report.llm_calls if c.node_id == node_id]
-                self.assertEqual(len(calls), 20)
+                self.assertEqual(len(calls), 12)
             self.assertEqual(report.running_nodes, [])
             self.assertEqual(report.queued_nodes, [])
             self.assertFalse(report.planning)
@@ -1298,11 +1298,12 @@ class SubmissionTests(unittest.TestCase):
         with patch('solution.cli', return_value=0) as cli:
             main(['task.md'])
             arguments = cli.call_args.args[0]
-            for option, value in {'--time-budget': '10500', '--experiment-timeout': '1200', '--max-nodes': '100'}.items():
+            for option, value in {'--time-budget': '7200', '--experiment-timeout': '1200', '--max-nodes': '1000',
+                                  '--executors': '6', '--threads': '2'}.items():
                 self.assertEqual(arguments[arguments.index(option) + 1], value)
             main(['task.md', '--time-budget=300', '--experiment-timeout', '60', '--max-nodes', '1'])
             self.assertEqual(cli.call_args.args[0], ['baseline', '--task', 'task.md', '--platform-output', '--time-budget=300',
-                '--experiment-timeout', '60', '--max-nodes', '1'])
+                '--experiment-timeout', '60', '--max-nodes', '1', '--executors', '6', '--threads', '2'])
 
     def test_zip_contains_only_root_modules_and_original_requirements(self):
         with tempfile.TemporaryDirectory() as temporary:

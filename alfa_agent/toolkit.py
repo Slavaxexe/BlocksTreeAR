@@ -390,8 +390,13 @@ def gbdt(fit, preparation, *, transform=None, params=None, candidates=None, tune
     return predict
 
 
-def automl(fit, preparation, engine, time_limit):
-    """AutoGluon ('autogluon'), LightAutoML ('lightautoml') or FLAML ('flaml') under time_limit seconds."""
+def automl(fit, preparation, engine, time_limit, *, transform=None):
+    """AutoGluon ('autogluon'), LightAutoML ('lightautoml') or FLAML ('flaml') under time_limit seconds.
+
+    transform(frame, fit, training) adds features first (as in Features/gbdt). AutoGluon tunes its ensemble on our
+    shift-aware inner split (tuning_data) instead of random folds, balances classes for macro metrics and gets
+    per-class probability multipliers for label metrics.
+    """
     kind = task_kind(preparation)
     if kind is None:
         raise ValueError('automl supports one target with row-wise predictions')
@@ -400,6 +405,8 @@ def automl(fit, preparation, engine, time_limit):
     ids = [c for c in preparation['data'].get('id_columns') or [] if c in fit]
     metric = metric_names(preparation).get(engine)
     fit = fit[fit[target].notna()].reset_index(drop=True)
+    source, fit = fit, (transform(fit.copy(), fit, True) if transform else fit)
+    prepare = (lambda frame: transform(frame.copy(), source, False)) if transform else (lambda frame: frame)
     drop = set(preparation['data']['target_columns']) | set(ids)
     features = lambda frame, vocab=None: frame[[c for c in frame.columns if c not in drop]].reset_index(drop=True).copy().assign(
         **{c: pd.Categorical(frame[c].reset_index(drop=True).astype(str).where(frame[c].reset_index(drop=True).notna()),
@@ -411,10 +418,24 @@ def automl(fit, preparation, engine, time_limit):
     if engine == 'autogluon':
         from autogluon.tabular import TabularPredictor
         problem = 'regression' if task == 'regression' else 'binary' if len(classes) == 2 else 'multiclass'
-        model = TabularPredictor(label=target, problem_type=problem, eval_metric=metric, path=workspace.name, verbosity=0)
-        model.fit(X.assign(**{target: y}), time_limit=limit, presets='best_quality' if len(fit) >= 2000 else 'medium_quality',
-                  num_cpus=THREADS, num_gpus=0, dynamic_stacking=False)
-        raw = lambda frame: model.predict_proba(features(frame))[classes[1]].to_numpy() if proba else model.predict(features(frame)).to_numpy()
+        table = X.assign(**{target: y})
+        train, valid = split(source, preparation) if len(fit) >= 2000 else (np.arange(len(fit)), None)
+        balance = task == 'classification' and metric in ('f1_macro', 'balanced_accuracy')
+        model = TabularPredictor(label=target, problem_type=problem, eval_metric=metric, path=workspace.name, verbosity=0,
+                                 **({'sample_weight': 'balance_weight'} if balance else {}))
+        model.fit(table.iloc[train], time_limit=limit, presets='best_quality' if len(fit) >= 2000 else 'medium_quality',
+                  num_cpus=THREADS, num_gpus=0, dynamic_stacking=False,
+                  **({'tuning_data': table.iloc[valid], 'use_bag_holdout': True} if valid is not None else {}))
+        matrix = lambda frame: model.predict_proba(features(frame))[list(classes)].to_numpy()
+        scale = None
+        if task == 'classification' and not proba and valid is not None:
+            scale = class_scale(matrix(fit.iloc[valid]), classes, source, valid, preparation)
+
+        def raw(frame):
+            frame = prepare(frame)
+            if task == 'regression':
+                return model.predict(features(frame)).to_numpy()
+            return matrix(frame)[:, 1] if proba else classes[np.argmax(matrix(frame) * (1. if scale is None else scale), axis=1)]
     elif engine == 'flaml':
         from flaml import AutoML
         vocab = {c: sorted(X[c].dropna().astype(str).unique()) for c in X.columns
@@ -422,7 +443,8 @@ def automl(fit, preparation, engine, time_limit):
         model = AutoML()
         model.fit(X_train=features(fit, vocab), y_train=y, task=task, metric=metric or 'auto', time_budget=limit,
                   n_jobs=THREADS, verbose=0, seed=0, log_file_name='')
-        raw = lambda frame: model.predict_proba(features(frame, vocab))[:, 1] if proba else np.asarray(model.predict(features(frame, vocab)))
+        raw = lambda frame: model.predict_proba(features(prepare(frame), vocab))[:, 1] if proba else \
+            np.asarray(model.predict(features(prepare(frame), vocab)))
     elif engine == 'lightautoml':
         from lightautoml.automl.presets.tabular_presets import TabularAutoML
         from lightautoml.tasks import Task
@@ -440,7 +462,7 @@ def automl(fit, preparation, engine, time_limit):
         order = classes if mapping is None else np.array(sorted(mapping, key=mapping.get), dtype=object)
 
         def raw(frame):
-            values = model.predict(frame.reset_index(drop=True)).data
+            values = model.predict(prepare(frame).reset_index(drop=True)).data
             if task == 'regression':
                 return values[:, 0]
             if len(order) == 2:
