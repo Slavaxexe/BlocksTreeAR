@@ -15,11 +15,13 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.compose import make_column_selector
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score, classification_report,
                              confusion_matrix, f1_score, log_loss, roc_auc_score)
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder
+from sklearn.utils.class_weight import compute_sample_weight
 from threadpoolctl import threadpool_limits
 
 from .classification_templates import plain_definition
@@ -131,9 +133,50 @@ def _inner_splits(frame, y, config, validation):
         yield fit, valid
 
 
+class ClassWeightedClassifier(ClassifierMixin, BaseEstimator):
+    """Fit-local class weights for XGBoost, which accepts sample_weight only.
+
+    Keeping this policy in a cloneable estimator also applies it to full refit;
+    neither class frequencies nor weights are copied from a validation fold.
+    Dictionary keys are the backend's explicitly recorded encoded class IDs.
+    """
+    def __init__(self, estimator, class_weight='balanced'):
+        self.estimator, self.class_weight = estimator, class_weight
+
+    def fit(self, x, y, **fit_options):
+        policy = self.class_weight
+        if isinstance(policy, dict):
+            policy = {int(label): float(value) for label, value in policy.items()}
+            if any(not math.isfinite(value) or value <= 0 for value in policy.values()):
+                raise ValueError('Encoded class weights must be finite positive numbers')
+            if set(np.unique(y)) - set(policy):
+                raise ValueError('class_weight dictionary must cover every encoded training class')
+        elif policy not in {None, 'balanced'}:
+            raise ValueError('XGBoost class_weight supports balanced, null, or encoded-class dictionary')
+        weights = compute_sample_weight(policy, y)
+        if 'sample_weight' in fit_options:
+            weights = weights * np.asarray(fit_options.pop('sample_weight'))
+        self.estimator_ = clone(self.estimator)
+        self.estimator_.fit(x, y, sample_weight=weights, **fit_options)
+        self.classes_ = self.estimator_.classes_
+        self.n_features_in_ = self.estimator_.n_features_in_
+        return self
+
+    def predict(self, x):
+        return self.estimator_.predict(x)
+
+    def predict_proba(self, x):
+        return self.estimator_.predict_proba(x)
+
+
 def _model(family, parameters, seed):
     cls, defaults = plain_definition(family, seed)
     params = dict(parameters)
+    # Resource hints are owned by this backend's threadpool, not nonexistent
+    # constructor parameters of HistGradientBoostingClassifier/MLPClassifier.
+    if family in {'hist_gradient_boosting', 'mlp', 'sgd'}:
+        params.pop('n_jobs', None)
+    class_weight = params.pop('class_weight', None) if family == 'xgboost' else None
     if family == 'lightgbm':
         aliases = {'bagging_fraction': 'subsample', 'bagging_freq': 'subsample_freq',
                    'feature_fraction': 'colsample_bytree', 'lambda_l1': 'reg_alpha', 'lambda_l2': 'reg_lambda',
@@ -166,7 +209,12 @@ def _model(family, parameters, seed):
             raise ValueError('GPU tree_method unavailable; select hist')
     if family == 'mlp' and isinstance(params.get('hidden_layer_sizes'), list):
         params['hidden_layer_sizes'] = tuple(params['hidden_layer_sizes'])
-    return cls(**params), params
+    model = cls(**params)
+    actual = {**params, 'backend_threads': 2}
+    if family == 'xgboost' and class_weight is not None:
+        model = ClassWeightedClassifier(model, class_weight)
+        actual.update(class_weight=class_weight, class_weight_adapter='fit_local_sample_weight')
+    return model, actual
 
 
 def _fit_plain(family, parameters, x, y, numeric, categorical, seed, deadline, config):
@@ -463,13 +511,28 @@ def run_job(job, time_budget):
         raise ValueError(f'Unsupported classification phase: {phase}')
     xfit, yfit, raw_fit = x.iloc[fit_idx], y.iloc[fit_idx], train.iloc[fit_idx]
     inner_scores, score, training_score, diagnostics = [], None, None, None
+    inner_warnings, requested_inner_folds, planned_inner_folds = [], 0, 0
     need_proba = metric in {'roc_auc', 'log_loss'} or specification.get('prediction_type') == 'probability'
     with threadpool_limits(limits=2):
         if phase == 'evaluate' and validation.get('inner_validation') == 'cv' and family not in {'flaml', 'autogluon'}:
-            for inner_fit, inner_valid in _inner_splits(raw_fit, yfit, config, validation):
+            splits = list(_inner_splits(raw_fit, yfit, config, validation))
+            requested_inner_folds, planned_inner_folds = int(validation.get('folds', 3)), len(splits)
+            last_fold_seconds, last_fit_rows = None, None
+            for inner_fit, inner_valid in splits:
+                if last_fold_seconds is not None:
+                    # Inner scores are advisory. Reserve the measured cost of a
+                    # larger fit on ALL outer-fit rows and output production.
+                    full_fit_reserve = last_fold_seconds * len(xfit) / last_fit_rows * 1.5 + 5.
+                    next_fold_estimate = last_fold_seconds * len(inner_fit) / last_fit_rows * 1.25
+                    if deadline - time.monotonic() <= full_fit_reserve + next_fold_estimate:
+                        inner_warnings.append('Inner CV stopped early to reserve time for the common outer-fit model and predictions; '
+                                              f'completed {len(inner_scores)} of {planned_inner_folds} planned folds')
+                        break
+                fold_started = time.monotonic()
                 fitted, _ = _fit_plain(family, parameters, xfit.iloc[inner_fit], yfit.iloc[inner_fit], numeric, categorical, seed, deadline, config)
                 prediction, probabilities = _predict(fitted, xfit.iloc[inner_valid], class_count, need_proba)
                 inner_scores.append(metric_score(yfit.iloc[inner_valid], prediction, probabilities, metric, class_count, positive))
+                last_fold_seconds, last_fit_rows = time.monotonic() - fold_started, len(inner_fit)
         if phase == 'final':
             bundle = joblib.load(source/'model.joblib')
             if not np.array_equal(bundle['label_encoder'].classes_, encoder.classes_):
@@ -518,7 +581,10 @@ def run_job(job, time_budget):
               'primary_metric': metric, 'metric': metric, 'direction': 'minimize' if metric == 'log_loss' else 'maximize',
               **hashes, 'score': score, 'score_scope': 'outer_validation' if phase == 'evaluate' else 'none_full_data_refit',
               'training_score': training_score, 'inner_cv_score': float(np.mean(inner_scores)) if inner_scores else None,
-              'inner_fold_scores': inner_scores, 'duration_seconds': time.monotonic()-started,
+              'inner_fold_scores': inner_scores, 'actual_inner_folds': len(inner_scores),
+              'requested_inner_folds': requested_inner_folds, 'planned_inner_folds': planned_inner_folds,
+              'inner_cv_complete': bool(planned_inner_folds and len(inner_scores) == planned_inner_folds),
+              'warnings': inner_warnings, 'duration_seconds': time.monotonic()-started,
               'actual_training_rows': len(fit_idx), 'total_labelled_rows': len(train),
               'outer_fit_rows': len(fit_idx) if phase == 'evaluate' else source_result.get('outer_fit_rows'),
               'outer_validation_rows': len(valid_idx) if valid_idx is not None else source_result.get('outer_validation_rows'),

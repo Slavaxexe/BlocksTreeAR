@@ -63,6 +63,15 @@ CLASSIFICATION_RULES = (
     'Never pass label names as numeric class_weight indices: backend label encoding is internal. '
     'For automatic CatBoost class balancing use auto_class_weights=Balanced, not class_weights=Balanced. '
     'Use stratified inner folds and ensure rare classes are present. Use inner holdout for FLAML/AutoGluon. '
+    'An experiment estimate includes every inner fold, the outer-fit model and prediction on train, validation '
+    'and hidden test. Multiclass boosting can be much more expensive than regression at the same tree count. '
+    'Candidate parameters override selected_models.parameters; omitting a key retains the upstream value. '
+    'XGBoost class_weight is a backend policy translated to fold-local sample_weight, not a native XGBoost '
+    'constructor option. Use class_weight=null to turn an upstream balancing policy off explicitly. '
+    'HistGradientBoosting uses backend threadpool limits; it has no native n_jobs constructor argument. '
+    'actual_parameters.backend_threads and class_weight_adapter describe backend behavior; do not copy '
+    'those reporting fields into candidate.parameters. Inspect actual_inner_folds and warnings before '
+    'claiming that all requested inner CV folds completed. The common outer score remains comparable. '
     'Preserve the fixed outer_split and do not tune thresholds/calibration on its labels. '
     'The backend aligns probabilities to classes; submit labels or probabilities according to submission.prediction_type. ')
 

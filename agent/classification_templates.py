@@ -54,4 +54,8 @@ def template_context(selected_models, requirements_text, installed):
             'The backend fits preprocessing inside each fold, owns label encoding and class-aligned predict_proba, '
             'scores the fixed outer holdout and refits the selected configuration on every labelled row. '
             'SGD must use loss=log_loss or modified_huber when probability output is needed. '
+            'XGBoost class_weight is a backend policy (balanced or encoded-class dictionary) converted into '
+            'sample_weight independently inside each training fit and final all-row refit. '
+            'HistGradientBoosting and MLP have no native n_jobs parameter; the backend owns two CPU threads. '
+            'Inner CV may stop after measured folds to reserve time for the common outer-fit validation. '
             'Do not apply regression losses or target transformations to classifiers.', 'models': result}

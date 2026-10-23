@@ -22,6 +22,7 @@ def extra_trees(seed):
 
 
 def hist_gradient_boosting(seed):
+    """No native n_jobs parameter; the backend fixes the threadpool to two."""
     from sklearn.ensemble import HistGradientBoostingClassifier
     return HistGradientBoostingClassifier, dict(max_iter=200, learning_rate=.1, l2_regularization=1., random_state=seed)
 
@@ -39,6 +40,11 @@ def catboost(seed):
 
 
 def xgboost(seed):
+    """class_weight is a backend policy converted to fit-local sample_weight.
+
+    Use 'balanced' or a dictionary keyed by encoded class IDs; class_weight is
+    never passed to XGBClassifier itself. The same policy survives full refit.
+    """
     from xgboost import XGBClassifier
     return XGBClassifier, dict(n_estimators=300, max_depth=6, learning_rate=.05, reg_lambda=1.,
                                tree_method='hist', device='cpu', n_jobs=2, random_state=seed)
