@@ -12,7 +12,7 @@ import time
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from pydantic import ValidationError
 
-from .autopilot import AUTOML_GUIDE
+from .autopilot import AUTOML_GUIDE, TOOLKIT_GUIDE
 from .config import Settings
 from .contracts import (CodeReview, DataFacts, Extraction, Hypotheses, Hypothesis, LLMCall, MetricFacts, OutputFacts,
                         PreparationDraft, ProblemFacts, Program, RunReport)
@@ -43,15 +43,27 @@ def runtime_contract(preparation):
 
 def implementation_context(context):
     """Keep the current plan authoritative; ancestor refusals are not execution facts."""
-    keys = ('task_text', 'preparation', 'preparation_code', 'installed_libraries', 'allowed_libraries',
-            'previous_code', 'execution_error', 'failed_stage', 'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
-    result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']), 'automl_guide': AUTOML_GUIDE,
+    keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error', 'failed_stage',
+            'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
+    result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
+              'toolkit': TOOLKIT_GUIDE, 'automl_guide': AUTOML_GUIDE,
               **{key: context[key] for key in keys if key in context}}
     if context.get('parent'):
         parent = context['parent']
         result['parent_reference'] = {'node_id': parent['start']['node_id'],
             'pipeline': parent['start']['hypothesis']['pipeline'], 'code': parent['code']}
     return result
+
+
+def explore_parent(context, leader):
+    """Best scored node outside the leader, with its code: explore grows a second branch instead of a star."""
+    nodes = [n for n in context['delta']['nodes'] if n['node_id'] != leader and n.get('result', {}).get('value') is not None]
+    if not nodes:
+        return None
+    sign = -1 if context['delta'].get('metric', {}).get('direction') == 'minimize' else 1
+    node = max(nodes, key=lambda n: sign * n['result']['value'])
+    code = context.get('codes', {}).get(node['node_id'])
+    return {'node_id': node['node_id'], 'score': node['result']['value'], 'pipeline': node['hypothesis']['pipeline'], 'code': code}
 
 
 def baker_context(context):
@@ -84,7 +96,8 @@ def baker_context(context):
     leader = next((n for n in measured if n['node_id'] == parent['start']['node_id']), None)
     recent = ([leader] if leader else []) + [n for n in measured if n is not leader][-2:]
     return {**{k: context[k] for k in keys if k in context}, 'runtime_contract': runtime_contract(context['preparation']),
-        'automl_guide': AUTOML_GUIDE,
+        'toolkit': TOOLKIT_GUIDE, 'automl_guide': AUTOML_GUIDE,
+        'explore_parent': explore_parent(context, parent['start']['node_id']),
         'parent': {'node_id': parent['start']['node_id'], 'pipeline': base, 'code': parent['code'],
                    'score': parent['finish']['value']},
         'diagnostics': [brief(n) for n in recent],
@@ -279,6 +292,11 @@ class JSONAgents:
 
     async def implement(self, context: dict, *, request_limit: int):
         return await self.ask(Program, "Implement the saved start.hypothesis as one compact experiment.py. "
+            "Prefer the project toolkit (context.toolkit): for one-target row tasks express the hypothesis as gbdt(...) with "
+            "a transform for features, params and candidates, or automl(...); it already handles categories, dates, "
+            "shift-aware inner validation, loss/class-weight selection by the task scorer and the final retrain. "
+            "Use target_stats inside transform for target-derived entity features (never compute them from the rows' "
+            "own targets). Write custom model code only when the hypothesis needs it; keep it short. "
             "CURRENT NODE: only context.start defines your assignment; parent_reference is optional reference code. "
             "On repair, correct previous_code using execution_error and failed_stage; do not repeat the same error. "
             "repair_progress counts unchanged executable code and failure; change the actual code, not comments or notes. "
@@ -344,7 +362,12 @@ class JSONAgents:
     async def plan_next(self, context, count: int = 2, *, rejections=None):
         prompt = ("Return exactly the requested_purposes, one proposal per purpose, in that order. "
             "The improve proposal extends the selected leader in parent with one substantive change. "
-            "The explore proposal tests a DIFFERENT model family or a substantially different pipeline, not small tuning of the leader. "
+            "The explore proposal tests a different hypothesis about the data or the task, not small tuning of the leader: "
+            "new feature families (entity/target statistics, group aggregates, interactions, transformations), a loss or "
+            "class treatment matched to the metric and measured shift, a blend with an AutoML or other strong branch, or "
+            "another learner when evidence suggests it. A different model family alone is a weak reason; tabular "
+            "neural networks, SVMs and KNN rarely beat gradient boosting here. Prefer explore_parent (the best node "
+            "outside the leader, with its code) as the explore parent so the tree grows a second branch. "
             "It may revive a previously losing branch; one bad result does not disqualify a family forever. "
             "Choose each parent_id from available_parents; improve must use parent's node_id. "
             "When both purposes are requested after the constant baseline, propose two different nonconstant approaches. "
@@ -387,6 +410,8 @@ class JSONAgents:
             "gain from class weights and probability multipliers tuned on an inner split with preparation['scorer']; "
             "a blend of 2-3 diverse strong models inside one fit_model; tuning learning rate, leaves, minimum leaf size and "
             "column sampling. Avoid methods superlinear in rows (SVC, KNN, Gaussian processes) above 20k rows. "
+            "toolkit describes short building blocks (gbdt with transform/params/candidates, target_stats, automl); plans "
+            "expressed through them are implemented quickly and reliably. "
             "AutoGluon, LightAutoML and FLAML are permitted tools (see automl_guide): controller reference nodes may already "
             "run them; you may improve from such a parent, run AutoML on engineered features, or blend AutoML with other "
             "models in one node when the measured history suggests complementary errors. "

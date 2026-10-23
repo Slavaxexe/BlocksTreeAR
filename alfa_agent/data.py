@@ -84,6 +84,10 @@ def profile(tables: dict) -> dict:
     return result
 
 
+# The one project module generated code may import (alfa_agent.toolkit, or alfa_toolkit in the flat ZIP).
+TOOLKIT = __name__.rpartition('data')[0] + 'toolkit'
+
+
 def check_code(code: str, functions: tuple[str, ...]):
     """A narrow generated interface, not an OS sandbox. Execution is separately bounded."""
     try:
@@ -99,7 +103,7 @@ def check_code(code: str, functions: tuple[str, ...]):
     for node in ast.walk(tree):
         imports = [a.name for a in node.names] if isinstance(node, ast.Import) else (
             [node.module or ''] if isinstance(node, ast.ImportFrom) else [])
-        if any(name.split('.')[0] not in allowed for name in imports):
+        if any(name.split('.')[0] not in allowed and name != TOOLKIT for name in imports):
             raise ValueError('Unsupported generated import: ' + ', '.join(imports))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {'eval', 'exec', '__import__'}:
             raise ValueError('Dynamic code execution is not part of the generated interface')

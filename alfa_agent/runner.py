@@ -428,6 +428,10 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 leader = leader or next(n for n in reversed(delta.nodes) if n.result.status == 'completed')
                 snapshot.update(parent=parent_view(leader.node_id),
                     available_parents=[n.node_id for n in delta.nodes if n.result.status == 'completed'])
+                scored = [n for n in delta.nodes if n.node_id != leader.node_id and n.result.value is not None]
+                if scored and delta.metric.direction:
+                    second = (min if delta.metric.direction == 'minimize' else max)(scored, key=lambda n: n.result.value)
+                    snapshot['codes'] = {second.node_id: parent_view(second.node_id)['code']}
             return snapshot
 
         planning_failed, snapshot, rejections, blocked_version, batch_version = False, {}, {}, -1, -1

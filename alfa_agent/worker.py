@@ -128,6 +128,24 @@ def shift_split(train, test, data, validation, fit, valid):
     return fit, valid, report
 
 
+def test_overlap(train, test, data):
+    """Share of test rows whose exact value occurs in train, for high-cardinality columns.
+
+    Near 1 for a many-valued attribute hints at repeated entities (the same object seen in train),
+    whose earlier targets can be strong leakage-safe features.
+    """
+    excluded = set(data.target_columns) | set(data.id_columns)
+    shares = {}
+    for column in test.columns:
+        if column in excluded or column not in train or train[column].nunique() < 50:
+            continue
+        try:
+            shares[str(column)] = round(float(test[column].isin(set(train[column].dropna())).mean()), 3)
+        except TypeError:
+            continue
+    return dict(sorted(shares.items(), key=lambda item: -item[1])[:15])
+
+
 def target_summary(train, targets):
     result = {}
     for column in targets:
@@ -169,6 +187,7 @@ def prepare(directory: Path):
         if shift.get('override'):
             issues.append('Validation split replaced: ' + shift['reason'])
         measured['target'] = target_summary(train, preparation.data.target_columns)
+        measured['test_overlap'] = test_overlap(train, test, preparation.data)
     buffer = io.BytesIO()
     np.savez(buffer, fit=fit.astype(np.int64), valid=valid.astype(np.int64))
     atomic_bytes(directory / 'split.npz', buffer.getvalue())

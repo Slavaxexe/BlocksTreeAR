@@ -17,6 +17,7 @@ AlfaHakaton/
 │   ├── contracts.py         Контракты фактов, подготовки, start / finish, review, delta и report
 │   ├── agents.py            Роли Qwen, компактное ревью, контексты, память ошибок / времени, гипотезы
 │   ├── autopilot.py         GBDT-baseline контроллера и AutoML-ноды (AutoGluon / LightAutoML / FLAML)
+│   ├── toolkit.py           gbdt / target_stats / automl: импортируемые блоки для сгенерированных нод
 │   ├── data.py              Инвентаризация, профиль, хеши, разрешённые библиотеки / версии, проверка кода
 │   ├── runner.py            Два исполнителя, guard повторов, replan, delta / лидер, резерв refit
 │   ├── worker.py            Подготовка, shift-проверка split, predictor / проверки, scorer, refit, бленд

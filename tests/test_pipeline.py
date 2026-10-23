@@ -203,7 +203,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
                 self.assertEqual(context['start'], json.loads(saved))
                 self.assertIn('task_text', context)
-                self.assertIn('preparation_code', context)
+                self.assertIn('toolkit', context)
+                self.assertNotIn('preparation_code', context)
                 self.assertEqual(context['start']['context']['installed_libraries'], context['installed_libraries'])
                 self.assertNotIn('extraction', context)
                 self.assertEqual(context['runtime_contract']['rows'], {'fit': 32, 'validation': 8, 'test': 5})
@@ -329,6 +330,21 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(report['adversarial_auc'], .8)
         self.assertEqual((report['override'], report['shifted_features'][0], len(valid)), ('adversarial_holdout', 'x', 80))
         self.assertNotIn('override', shift_split(train, shifted, data, {'strategy': 'group'}, mixed[:320], mixed[320:])[2])
+
+    def test_target_stats_never_use_a_training_row_own_or_later_targets(self):
+        from alfa_agent.toolkit import target_stats
+        fit = pd.DataFrame({'key': ['a', 'a', 'a', 'b', 'b'], 'year': [1, 2, 3, 1, 2], 'y': [10., 20., 30., 5., 7.]})
+        fit = pd.concat([fit] * 5, ignore_index=True).assign(y=lambda d: d.y + np.arange(len(d)) * 1e-3)
+        stats = target_stats(fit, fit, ['key'], 'y', training=True, time='year')
+        first = fit.year == 1
+        self.assertTrue(stats.loc[first, 'ts_key_mean'].isna().all())  # nothing earlier than the first period
+        row = fit.index[(fit.key == 'a') & (fit.year == 3)][0]
+        earlier = fit[(fit.key == 'a') & (fit.year < 3)].y
+        self.assertAlmostEqual(stats.loc[row, 'ts_key_mean'], earlier.mean())
+        later = target_stats(fit, pd.DataFrame({'key': ['a', 'c'], 'year': [4, 4]}), ['key'], 'y', time='year')
+        self.assertEqual((later['ts_key_count'].tolist(), np.isnan(later['ts_key_mean'].iloc[1])), ([15., 0.], True))
+        folds = target_stats(fit, fit, ['key'], 'y', training=True)
+        self.assertTrue(all(folds.loc[i, 'ts_key_mean'] != fit.loc[fit.key == fit.key[i], 'y'].mean() for i in range(5)))
 
     def test_blend_combines_numbers_by_weighted_mean_and_labels_by_weighted_vote(self):
         from alfa_agent.worker import combine
@@ -1209,7 +1225,7 @@ class SubmissionTests(unittest.TestCase):
             archive = build(Path(temporary) / 'submission.zip')
             with ZipFile(archive) as bundle:
                 self.assertEqual(set(bundle.namelist()), {'solution.py', 'requirements.txt', 'alfa_cli.py',
-                    'alfa_agents.py', 'alfa_autopilot.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py',
+                    'alfa_agents.py', 'alfa_autopilot.py', 'alfa_toolkit.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py',
                     'alfa_qwen.py', 'alfa_runner.py', 'alfa_storage.py', 'alfa_worker.py'})
                 self.assertEqual(bundle.read('requirements.txt'), Path('vendor/requirements_data_folder.txt').read_bytes())
                 for name in bundle.namelist():
