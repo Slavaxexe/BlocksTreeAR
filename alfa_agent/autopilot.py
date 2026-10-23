@@ -29,24 +29,35 @@ def ordinal(series):
     return values.astype(float)
 
 
+def dates(series):
+    present = series.dropna().astype(str)
+    if not len(present) or present.str.fullmatch(r'[\\d\\s:/.T+-]{{6,}}').mean() < .95:
+        return None
+    parsed = pd.to_datetime(series, errors='coerce', format='mixed')
+    return parsed if parsed.notna().sum() >= .95 * len(present) else None
+
+
 def schema(fit, preparation):
     data = preparation['data']
     drop = set(data['target_columns']) | set(data.get('id_columns') or [])
-    columns, vocab = [], {{}}
+    columns, vocab, stamps = [], {{}}, []
     for column in fit.columns:
         series = fit[column]
         if column in drop:
             continue
         if not (pd.api.types.is_bool_dtype(series) or pd.api.types.is_numeric_dtype(series)):
+            if pd.api.types.is_datetime64_any_dtype(series) or dates(series) is not None:
+                stamps.append(column)  # calendar parts instead of thousands of string categories
+                continue
             present = series.dropna().astype(str)
             if present.nunique() > max(1000, .5 * len(present)):
                 continue  # free text or an undeclared identifier
             vocab[column] = sorted(present.unique())
         columns.append(column)
-    return columns, vocab
+    return columns, vocab, stamps
 
 
-def encode(frame, columns, vocab):
+def encode(frame, columns, vocab, stamps):
     result = {{}}
     for column in columns:
         values = frame[column].reset_index(drop=True)
@@ -54,6 +65,11 @@ def encode(frame, columns, vocab):
             result[column] = pd.Categorical(values.astype(str).where(values.notna()), categories=vocab[column])
         else:
             result[column] = pd.to_numeric(values, errors='coerce').astype(float)
+    for column in stamps:
+        moment = pd.to_datetime(frame[column].reset_index(drop=True), errors='coerce', format='mixed')
+        for part in ('year', 'month', 'day', 'dayofweek', 'hour'):
+            result[column + '_' + part] = getattr(moment.dt, part).astype(float)
+        result[column + '_epoch_days'] = (moment - pd.Timestamp(0)).dt.total_seconds() / 86400.
     return pd.DataFrame(result)
 
 
@@ -80,8 +96,8 @@ def fit_model(fit, preparation):
     target = preparation['data']['target_columns'][0]
     scorer = preparation.get('scorer')
     fit = fit[fit[target].notna()].reset_index(drop=True)
-    columns, vocab = schema(fit, preparation)
-    X = encode(fit, columns, vocab)
+    columns, vocab, stamps = schema(fit, preparation)
+    X = encode(fit, columns, vocab, stamps)
     params = dict(n_estimators=5000, learning_rate=.05, num_leaves=31, min_child_samples=20, subsample=.8,
                   subsample_freq=1, colsample_bytree=.8, reg_lambda=1., n_jobs=THREADS, verbose=-1, random_state=0)
     if TASK == 'classification':
@@ -89,6 +105,8 @@ def fit_model(fit, preparation):
         counts = np.bincount(y, minlength=len(classes))
         balanced = len(y) / (len(classes) * counts)
         candidates = [('plain', {{}}, None), ('balanced', {{}}, balanced[y]), ('sqrt_balanced', {{}}, np.sqrt(balanced)[y])]
+        if len(classes) > 100:  # every candidate costs one model per class
+            candidates = candidates[2:]
         train, valid = inner_split(fit, y)
     else:
         y = fit[target].to_numpy(dtype=float)
@@ -97,6 +115,8 @@ def fit_model(fit, preparation):
         if y.min() >= 0:
             candidates.append(('log_target', {{}}, 'log'))
         train, valid = inner_split(fit, None)
+    if len(train) > 400000:  # candidate selection on a sample keeps large tables inside the process limit
+        train = np.sort(np.random.RandomState(1).choice(train, 400000, replace=False))
     reference = fit.iloc[valid].reset_index(drop=True)
 
     def train_one(extra, option, rows, eval_rows, trees=None):
@@ -165,7 +185,7 @@ def fit_model(fit, preparation):
 
     def predict(features):  # identifiers too: some generated writers read them from the predictions
         values = {{c: features[c].to_numpy() for c in ids if c in features}}
-        return pd.DataFrame({{**values, target: output(final, option, encode(features, columns, vocab), scale)}})
+        return pd.DataFrame({{**values, target: output(final, option, encode(features, columns, vocab, stamps), scale)}})
     return predict
 '''
 
