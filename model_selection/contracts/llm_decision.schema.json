@@ -1,0 +1,124 @@
+{
+ "$defs": {
+  "LLMCandidate": {
+   "properties": {
+    "model_id": {
+     "title": "Model Id",
+     "type": "string"
+    },
+    "loss": {
+     "title": "Loss",
+     "type": "string"
+    },
+    "target_transform": {
+     "default": "none",
+     "enum": [
+      "none",
+      "log1p"
+     ],
+     "title": "Target Transform",
+     "type": "string"
+    },
+    "priority": {
+     "maximum": 9,
+     "minimum": 1,
+     "title": "Priority",
+     "type": "integer"
+    },
+    "role": {
+     "enum": [
+      "primary",
+      "ensemble_member"
+     ],
+     "title": "Role",
+     "type": "string"
+    },
+    "rationale": {
+     "title": "Rationale",
+     "type": "string"
+    },
+    "evidence": {
+     "title": "Evidence",
+     "type": "object"
+    }
+   },
+   "required": [
+    "model_id",
+    "loss",
+    "priority",
+    "role",
+    "rationale",
+    "evidence"
+   ],
+   "title": "LLMCandidate",
+   "type": "object"
+  },
+  "LLMRejected": {
+   "properties": {
+    "model_id": {
+     "title": "Model Id",
+     "type": "string"
+    },
+    "reason": {
+     "title": "Reason",
+     "type": "string"
+    }
+   },
+   "required": [
+    "model_id",
+    "reason"
+   ],
+   "title": "LLMRejected",
+   "type": "object"
+  },
+  "ReasoningStep": {
+   "properties": {
+    "claim": {
+     "description": "Вывод одним предложением",
+     "title": "Claim",
+     "type": "string"
+    },
+    "evidence": {
+     "description": "Ключи из FACTS и их значения",
+     "title": "Evidence",
+     "type": "object"
+    }
+   },
+   "required": [
+    "claim",
+    "evidence"
+   ],
+   "title": "ReasoningStep",
+   "type": "object"
+  }
+ },
+ "properties": {
+  "reasoning": {
+   "items": {
+    "$ref": "#/$defs/ReasoningStep"
+   },
+   "title": "Reasoning",
+   "type": "array"
+  },
+  "candidates": {
+   "items": {
+    "$ref": "#/$defs/LLMCandidate"
+   },
+   "title": "Candidates",
+   "type": "array"
+  },
+  "rejected": {
+   "items": {
+    "$ref": "#/$defs/LLMRejected"
+   },
+   "title": "Rejected",
+   "type": "array"
+  }
+ },
+ "required": [
+  "reasoning",
+  "candidates"
+ ],
+ "title": "LLMDecision",
+ "type": "object"
+}

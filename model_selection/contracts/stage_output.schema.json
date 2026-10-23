@@ -1,0 +1,273 @@
+{
+ "$defs": {
+  "AutoMLHint": {
+   "properties": {
+    "flaml_metric": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Flaml Metric"
+    },
+    "flaml_estimator_list": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Flaml Estimator List",
+     "type": "array"
+    },
+    "autogluon_eval_metric": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Autogluon Eval Metric"
+    },
+    "autogluon_models": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Autogluon Models",
+     "type": "array"
+    },
+    "label_transform": {
+     "title": "Label Transform",
+     "type": "string"
+    },
+    "notes": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Notes",
+     "type": "array"
+    }
+   },
+   "required": [
+    "flaml_metric",
+    "flaml_estimator_list",
+    "autogluon_eval_metric",
+    "autogluon_models",
+    "label_transform",
+    "notes"
+   ],
+   "title": "AutoMLHint",
+   "type": "object"
+  },
+  "OutCandidate": {
+   "properties": {
+    "model_id": {
+     "title": "Model Id",
+     "type": "string"
+    },
+    "library": {
+     "title": "Library",
+     "type": "string"
+    },
+    "estimator": {
+     "title": "Estimator",
+     "type": "string"
+    },
+    "loss": {
+     "title": "Loss",
+     "type": "string"
+    },
+    "loss_native": {
+     "title": "Loss Native",
+     "type": "object"
+    },
+    "target_transform": {
+     "title": "Target Transform",
+     "type": "string"
+    },
+    "metric_consistent": {
+     "title": "Metric Consistent",
+     "type": "boolean"
+    },
+    "priority": {
+     "title": "Priority",
+     "type": "integer"
+    },
+    "role": {
+     "enum": [
+      "primary",
+      "ensemble_member"
+     ],
+     "title": "Role",
+     "type": "string"
+    },
+    "needs_scaling": {
+     "title": "Needs Scaling",
+     "type": "boolean"
+    },
+    "native_categorical": {
+     "title": "Native Categorical",
+     "type": "boolean"
+    },
+    "optimizer_applicable": {
+     "title": "Optimizer Applicable",
+     "type": "boolean"
+    },
+    "rationale": {
+     "title": "Rationale",
+     "type": "string"
+    },
+    "evidence": {
+     "title": "Evidence",
+     "type": "object"
+    }
+   },
+   "required": [
+    "model_id",
+    "library",
+    "estimator",
+    "loss",
+    "loss_native",
+    "target_transform",
+    "metric_consistent",
+    "priority",
+    "role",
+    "needs_scaling",
+    "native_categorical",
+    "optimizer_applicable",
+    "rationale",
+    "evidence"
+   ],
+   "title": "OutCandidate",
+   "type": "object"
+  }
+ },
+ "properties": {
+  "stage": {
+   "default": "model_family_and_loss_selection",
+   "title": "Stage",
+   "type": "string"
+  },
+  "version": {
+   "default": "1.0",
+   "title": "Version",
+   "type": "string"
+  },
+  "task": {
+   "title": "Task",
+   "type": "object"
+  },
+  "target_metric": {
+   "title": "Target Metric",
+   "type": "string"
+  },
+  "metric_source": {
+   "enum": [
+    "task_description",
+    "fallback"
+   ],
+   "title": "Metric Source",
+   "type": "string"
+  },
+  "metric_statistic": {
+   "title": "Metric Statistic",
+   "type": "string"
+  },
+  "loss_policy": {
+   "title": "Loss Policy",
+   "type": "object"
+  },
+  "diagnostics": {
+   "title": "Diagnostics",
+   "type": "object"
+  },
+  "probe": {
+   "title": "Probe",
+   "type": "object"
+  },
+  "candidates": {
+   "items": {
+    "$ref": "#/$defs/OutCandidate"
+   },
+   "title": "Candidates",
+   "type": "array"
+  },
+  "rejected": {
+   "items": {
+    "type": "object"
+   },
+   "title": "Rejected",
+   "type": "array"
+  },
+  "reasoning": {
+   "items": {
+    "type": "object"
+   },
+   "title": "Reasoning",
+   "type": "array"
+  },
+  "automl_hint": {
+   "$ref": "#/$defs/AutoMLHint"
+  },
+  "source": {
+   "enum": [
+    "qwen",
+    "rules_fallback"
+   ],
+   "title": "Source",
+   "type": "string"
+  },
+  "validation_errors": {
+   "items": {
+    "type": "string"
+   },
+   "title": "Validation Errors",
+   "type": "array"
+  },
+  "warnings": {
+   "items": {
+    "type": "string"
+   },
+   "title": "Warnings",
+   "type": "array"
+  },
+  "hints": {
+   "title": "Hints",
+   "type": "object"
+  },
+  "eda": {
+   "title": "Eda",
+   "type": "object"
+  },
+  "timings": {
+   "additionalProperties": {
+    "type": "number"
+   },
+   "title": "Timings",
+   "type": "object"
+  }
+ },
+ "required": [
+  "task",
+  "target_metric",
+  "metric_source",
+  "metric_statistic",
+  "loss_policy",
+  "diagnostics",
+  "probe",
+  "candidates",
+  "rejected",
+  "reasoning",
+  "automl_hint",
+  "source",
+  "validation_errors",
+  "warnings",
+  "hints",
+  "eda",
+  "timings"
+ ],
+ "title": "StageOutput",
+ "type": "object"
+}

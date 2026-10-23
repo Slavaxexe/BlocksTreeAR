@@ -1,0 +1,25 @@
+{
+ "task": {
+  "task_type": "regression",
+  "target": "site_eui",
+  "id_col": "id",
+  "target_metric": "RMSE",
+  "metric_params": {}
+ },
+ "paths": {
+  "train": "data/train.csv",
+  "test": "data/test.csv"
+ },
+ "hints": {
+  "categorical_cols": null,
+  "time_col": null,
+  "group_col": null,
+  "drop_cols": []
+ },
+ "budget": {
+  "probe_seconds": 300,
+  "probe_max_rows": 30000,
+  "probe_folds": 3
+ },
+ "eda": {}
+}

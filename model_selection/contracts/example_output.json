@@ -1,0 +1,407 @@
+{
+  "stage": "model_family_and_loss_selection",
+  "version": "1.0",
+  "task": {
+    "task_type": "regression",
+    "target": "site_eui",
+    "id_col": "id",
+    "target_metric": "RMSE",
+    "metric_params": {}
+  },
+  "target_metric": "rmse",
+  "metric_source": "task_description",
+  "metric_statistic": "mean",
+  "loss_policy": {
+    "metric": "rmse",
+    "metric_statistic": "mean",
+    "base": {
+      "loss": "l2",
+      "transform": "none",
+      "consistent": true
+    },
+    "alternatives": [
+      {
+        "loss": "gamma",
+        "transform": "none",
+        "consistent": true
+      },
+      {
+        "loss": "l2",
+        "transform": "log1p",
+        "consistent": false
+      },
+      {
+        "loss": "huber",
+        "transform": "none",
+        "consistent": false
+      }
+    ],
+    "loss_kw": {},
+    "notes": [
+      "y>=0 и скошен: log-link лосс оценивает СРЕДНЕЕ -> согласован с метрикой",
+      "log1p+l2 оценивает среднее в log-шкале -> смещение вниз; только через probe",
+      "много выбросов: Хьюбер тянет к медиане -> для mean-метрики только через probe"
+    ]
+  },
+  "diagnostics": {
+    "target": {
+      "y_n": 20000,
+      "y_mean": 235.6357,
+      "y_std": 362.647,
+      "y_min": 0.0367,
+      "y_max": 8333.031,
+      "y_p01": 4.8149,
+      "y_p50": 114.3698,
+      "y_p99": 1707.8948,
+      "y_skew": 5.4213,
+      "y_kurtosis": 57.4773,
+      "y_share_zero": 0.0,
+      "y_share_negative": 0.0,
+      "y_is_integer": false,
+      "y_n_unique": 20000,
+      "y_outlier_share_mad": 0.1061,
+      "y_top1pct_sq_share": 0.4779,
+      "y_tail_ratio_p99_p50": 14.9331,
+      "y_log1p_skew": -0.1164
+    },
+    "features": {
+      "n_rows": 20000,
+      "n_features": 43,
+      "n_numeric": 41,
+      "n_categorical": 2,
+      "categorical_cols": [
+        "facility_type",
+        "state"
+      ],
+      "max_cardinality": 60,
+      "high_card_cols": [
+        "facility_type"
+      ],
+      "missing_share_total": 0.0174,
+      "missing_share_max_col": 0.6001,
+      "n_cols_missing_gt_50pct": 1,
+      "n_constant_cols": 0,
+      "n_high_corr_pairs_095": 0,
+      "rows_per_feature": 465.1,
+      "top_signal_features": [
+        {
+          "feature": "num_0",
+          "spearman_abs": 0.298,
+          "pearson_abs": 0.267
+        },
+        {
+          "feature": "year_built",
+          "spearman_abs": 0.107,
+          "pearson_abs": 0.086
+        },
+        {
+          "feature": "num_1",
+          "spearman_abs": 0.093,
+          "pearson_abs": 0.06
+        },
+        {
+          "feature": "num_15",
+          "spearman_abs": 0.013,
+          "pearson_abs": 0.011
+        },
+        {
+          "feature": "num_37",
+          "spearman_abs": 0.012,
+          "pearson_abs": 0.005
+        },
+        {
+          "feature": "num_21",
+          "spearman_abs": 0.011,
+          "pearson_abs": 0.015
+        },
+        {
+          "feature": "num_35",
+          "spearman_abs": 0.011,
+          "pearson_abs": 0.002
+        },
+        {
+          "feature": "num_2",
+          "spearman_abs": 0.011,
+          "pearson_abs": 0.007
+        },
+        {
+          "feature": "num_26",
+          "spearman_abs": 0.011,
+          "pearson_abs": 0.008
+        },
+        {
+          "feature": "num_20",
+          "spearman_abs": 0.011,
+          "pearson_abs": 0.002
+        }
+      ],
+      "spearman_minus_pearson_top10": 0.011
+    }
+  },
+  "probe": {
+    "metric": "rmse",
+    "split": "kfold",
+    "k": 3,
+    "rows_used": 15000,
+    "seconds": 24.0,
+    "results": [
+      {
+        "id": "dummy",
+        "model_id": "dummy_mean",
+        "loss": "l2",
+        "transform": "none",
+        "metric_mean": 367.037914,
+        "metric_std": 18.301441,
+        "fold_scores": [
+          359.522749,
+          349.346585,
+          392.244408
+        ],
+        "fit_seconds": 0.0
+      },
+      {
+        "id": "ridge_l2_none",
+        "model_id": "ridge",
+        "loss": "l2",
+        "transform": "none",
+        "metric_mean": 326.483237,
+        "metric_std": 15.11033,
+        "fold_scores": [
+          314.199548,
+          317.481887,
+          347.768277
+        ],
+        "fit_seconds": 0.2
+      },
+      {
+        "id": "lightgbm_l2_none",
+        "model_id": "lightgbm",
+        "loss": "l2",
+        "transform": "none",
+        "metric_mean": 277.79666,
+        "metric_std": 17.149372,
+        "fold_scores": [
+          275.193649,
+          258.215885,
+          299.980447
+        ],
+        "fit_seconds": 3.5
+      },
+      {
+        "id": "lightgbm_gamma_none",
+        "model_id": "lightgbm",
+        "loss": "gamma",
+        "transform": "none",
+        "metric_mean": 280.859394,
+        "metric_std": 17.960528,
+        "fold_scores": [
+          273.750129,
+          263.296151,
+          305.531901
+        ],
+        "fit_seconds": 3.6
+      },
+      {
+        "id": "lightgbm_l2_log1p",
+        "model_id": "lightgbm",
+        "loss": "l2",
+        "transform": "log1p",
+        "metric_mean": 286.775841,
+        "metric_std": 18.670345,
+        "fold_scores": [
+          282.156631,
+          266.571676,
+          311.599217
+        ],
+        "fit_seconds": 3.7
+      },
+      {
+        "id": "lightgbm_huber_none",
+        "model_id": "lightgbm",
+        "loss": "huber",
+        "transform": "none",
+        "metric_mean": 287.335152,
+        "metric_std": 18.803543,
+        "fold_scores": [
+          279.48075,
+          269.260281,
+          313.264423
+        ],
+        "fit_seconds": 3.4
+      },
+      {
+        "id": "catboost_l2_none",
+        "model_id": "catboost",
+        "loss": "l2",
+        "transform": "none",
+        "metric_mean": 275.602799,
+        "metric_std": 16.096745,
+        "fold_scores": [
+          274.201385,
+          256.626492,
+          295.980519
+        ],
+        "fit_seconds": 9.5
+      }
+    ],
+    "skipped": []
+  },
+  "candidates": [
+    {
+      "model_id": "lightgbm",
+      "library": "lightgbm",
+      "estimator": "lightgbm.LGBMRegressor",
+      "loss": "l2",
+      "loss_native": {
+        "objective": "regression"
+      },
+      "target_transform": "none",
+      "metric_consistent": true,
+      "priority": 1,
+      "role": "primary",
+      "needs_scaling": false,
+      "native_categorical": true,
+      "optimizer_applicable": false,
+      "rationale": "основной бустинг; пара (лосс, трансформ) выбрана по probe",
+      "evidence": {}
+    },
+    {
+      "model_id": "catboost",
+      "library": "catboost",
+      "estimator": "catboost.CatBoostRegressor",
+      "loss": "l2",
+      "loss_native": {
+        "loss_function": "RMSE"
+      },
+      "target_transform": "none",
+      "metric_consistent": true,
+      "priority": 1,
+      "role": "primary",
+      "needs_scaling": false,
+      "native_categorical": true,
+      "optimizer_applicable": false,
+      "rationale": "категориальные высокой кардинальности",
+      "evidence": {}
+    },
+    {
+      "model_id": "xgboost",
+      "library": "xgboost",
+      "estimator": "xgboost.XGBRegressor",
+      "loss": "l2",
+      "loss_native": {
+        "objective": "reg:squarederror"
+      },
+      "target_transform": "none",
+      "metric_consistent": true,
+      "priority": 4,
+      "role": "ensemble_member",
+      "needs_scaling": false,
+      "native_categorical": true,
+      "optimizer_applicable": false,
+      "rationale": "третий бустинг для разнообразия ансамбля",
+      "evidence": {}
+    },
+    {
+      "model_id": "ridge",
+      "library": "sklearn",
+      "estimator": "sklearn.linear_model.Ridge",
+      "loss": "l2",
+      "loss_native": {},
+      "target_transform": "none",
+      "metric_consistent": true,
+      "priority": 5,
+      "role": "ensemble_member",
+      "needs_scaling": true,
+      "native_categorical": false,
+      "optimizer_applicable": false,
+      "rationale": "linear_gap=1.175: слабее, но некоррелированные ошибки",
+      "evidence": {}
+    },
+    {
+      "model_id": "extra_trees",
+      "library": "sklearn",
+      "estimator": "sklearn.ensemble.ExtraTreesRegressor",
+      "loss": "l2",
+      "loss_native": {
+        "criterion": "squared_error"
+      },
+      "target_transform": "none",
+      "metric_consistent": true,
+      "priority": 5,
+      "role": "ensemble_member",
+      "needs_scaling": false,
+      "native_categorical": false,
+      "optimizer_applicable": false,
+      "rationale": "бэггинг: декоррелированные ошибки к бустингу",
+      "evidence": {}
+    },
+    {
+      "model_id": "mlp",
+      "library": "sklearn",
+      "estimator": "sklearn.neural_network.MLPRegressor",
+      "loss": "l2",
+      "loss_native": {},
+      "target_transform": "none",
+      "metric_consistent": true,
+      "priority": 6,
+      "role": "ensemble_member",
+      "needs_scaling": true,
+      "native_categorical": false,
+      "optimizer_applicable": true,
+      "rationale": "много строк, преимущественно числовые признаки",
+      "evidence": {}
+    }
+  ],
+  "rejected": [
+    {
+      "model_id": "sgd_linear",
+      "reason": "n_rows=20000 < 1M: дублирует ridge без выигрыша"
+    },
+    {
+      "model_id": "random_forest",
+      "reason": "дублирует extra_trees и медленнее"
+    },
+    {
+      "model_id": "knn",
+      "reason": "n_features=43: проклятие размерности"
+    }
+  ],
+  "reasoning": [],
+  "automl_hint": {
+    "flaml_metric": "rmse",
+    "flaml_estimator_list": [
+      "catboost",
+      "extra_tree",
+      "lgbm",
+      "xgboost"
+    ],
+    "autogluon_eval_metric": "root_mean_squared_error",
+    "autogluon_models": [
+      "CAT",
+      "GBM",
+      "LR",
+      "NN_TORCH",
+      "XGB",
+      "XT"
+    ],
+    "label_transform": "none",
+    "notes": []
+  },
+  "source": "rules_fallback",
+  "validation_errors": [],
+  "warnings": [],
+  "hints": {
+    "categorical_cols": null,
+    "time_col": null,
+    "group_col": null,
+    "drop_cols": []
+  },
+  "eda": {
+    "note": "проброс от Марго"
+  },
+  "timings": {
+    "diagnostics_s": 0.2,
+    "probe_s": 24.0,
+    "total_s": 24.4
+  }
+}

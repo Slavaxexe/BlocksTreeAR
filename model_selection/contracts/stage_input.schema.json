@@ -1,0 +1,178 @@
+{
+ "$defs": {
+  "Budget": {
+   "properties": {
+    "probe_seconds": {
+     "default": 300,
+     "title": "Probe Seconds",
+     "type": "number"
+    },
+    "probe_max_rows": {
+     "default": 30000,
+     "title": "Probe Max Rows",
+     "type": "integer"
+    },
+    "probe_folds": {
+     "default": 3,
+     "title": "Probe Folds",
+     "type": "integer"
+    }
+   },
+   "title": "Budget",
+   "type": "object"
+  },
+  "Hints": {
+   "additionalProperties": true,
+   "description": "Подсказки из EDA. Всё опционально: этап работает и без них.",
+   "properties": {
+    "categorical_cols": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Categorical Cols"
+    },
+    "time_col": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Time Col"
+    },
+    "group_col": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Group Col"
+    },
+    "drop_cols": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Drop Cols",
+     "type": "array"
+    }
+   },
+   "title": "Hints",
+   "type": "object"
+  },
+  "Paths": {
+   "additionalProperties": true,
+   "properties": {
+    "train": {
+     "title": "Train",
+     "type": "string"
+    },
+    "test": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Test"
+    }
+   },
+   "required": [
+    "train"
+   ],
+   "title": "Paths",
+   "type": "object"
+  },
+  "TaskInfo": {
+   "additionalProperties": true,
+   "properties": {
+    "task_type": {
+     "const": "regression",
+     "default": "regression",
+     "title": "Task Type",
+     "type": "string"
+    },
+    "target": {
+     "title": "Target",
+     "type": "string"
+    },
+    "id_col": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": "id",
+     "title": "Id Col"
+    },
+    "target_metric": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Target Metric"
+    },
+    "metric_params": {
+     "title": "Metric Params",
+     "type": "object"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "title": "TaskInfo",
+   "type": "object"
+  }
+ },
+ "additionalProperties": true,
+ "properties": {
+  "task": {
+   "$ref": "#/$defs/TaskInfo"
+  },
+  "paths": {
+   "$ref": "#/$defs/Paths"
+  },
+  "hints": {
+   "$ref": "#/$defs/Hints"
+  },
+  "budget": {
+   "$ref": "#/$defs/Budget"
+  },
+  "eda": {
+   "title": "Eda",
+   "type": "object"
+  }
+ },
+ "required": [
+  "task",
+  "paths"
+ ],
+ "title": "StageInput",
+ "type": "object"
+}
