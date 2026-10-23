@@ -106,3 +106,52 @@ class OperationTests(unittest.TestCase):
                 'search_space': {'n_estimators': {'kind': 'int', 'low': 5, 'high': 10}}}}, defaults)
         selected = run_operation(state, {'kind': 'preprocess', 'parameters': {'feature_columns': ['a']}}, defaults)
         self.assertEqual(selected['transformer'].diagnostics_['selected_columns'], ['a'])
+
+    def test_catboost_seed_alias_is_not_added_twice(self):
+        from agent.operations import _estimator
+        model = _estimator('catboost.CatBoostClassifier', {'random_seed': 7}, {'num_cpus': 1})
+        self.assertEqual(model.get_params()['random_seed'], 7)
+        self.assertNotIn('random_state', model.get_params())
+
+    def test_flaml_fixed_replay_keeps_selected_parameters(self):
+        from agent.auto_settings import model_settings
+        from flaml.automl.state import SearchState
+        from flaml.automl.model import LGBMEstimator
+        from flaml.automl.task.factory import task_factory
+        fixed = {'n_estimators': 433, 'num_leaves': 4, 'learning_rate': 0.066}
+        plan = AutoMLPlan(engine='flaml', models=['lgbm'], model_parameters={'lgbm': fixed}, num_trials=1)
+        _, settings = model_settings(plan)
+        state = SearchState(LGBMEstimator, np.zeros((100, 3)), task_factory('classification'),
+                            custom_hp=settings['lgbm'], max_iter=1, budget=10)
+        for key, value in fixed.items():
+            self.assertEqual(state.init_config[0][key], value)
+
+    def test_repair_cannot_replace_stacking_with_a_blend(self):
+        operation = ToolCall(kind='saved_ensemble', parameters={
+            'source_nodes': ['node_001', 'node_002'], 'method': 'stacking'})
+        required, provided = operation.interface()
+        block = {'requires': required, 'provides': provided, 'operation': operation.model_dump()}
+        changed = operation.model_dump()
+        changed['parameters']['method'] = 'probabilities'
+        with self.assertRaisesRegex(ValueError, 'preserve method'):
+            ToolCall.model_validate(changed, context={'block': block})
+        changed['parameters']['method'] = 'stacking'
+        changed['parameters']['folds'] = 2
+        ToolCall.model_validate(changed, context={'block': block})
+
+    def test_identical_fit_loads_the_saved_model(self):
+        from pathlib import Path
+        import tempfile
+        from unittest.mock import patch
+        state = self.state(True)
+        with tempfile.TemporaryDirectory() as temporary:
+            state['preparation']['runtime'].update(run_directory=temporary, work_directory=temporary,
+                                                   preparation_sha256='a' * 64)
+            state.update(run_operation(state, {'kind': 'preprocess'}, {'task_type': 'classification'}))
+            call = {'kind': 'fit', 'parameters': {'estimator': 'sklearn.tree.DecisionTreeClassifier'}}
+            first = run_operation(state, call, {'task_type': 'classification'})
+            with patch('agent.operations._fit', side_effect=AssertionError('Model was retrained')):
+                second = run_operation(state, call, {'task_type': 'classification'})
+            np.testing.assert_array_equal(first['model']['estimator'].predict(state['test_features']),
+                                          second['model']['estimator'].predict(state['test_features']))
+            self.assertEqual(len(list(Path(temporary).glob('training_cache/*/result.pkl'))), 1)

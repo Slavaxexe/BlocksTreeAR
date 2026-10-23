@@ -16,6 +16,7 @@ from agent.data import file_hash
 from agent.operations import run_operation
 from agent.predictions import load_pair, save_pair
 from agent.storage import atomic_bytes, save
+from agent.ensemble_data import subset, concatenate
 
 
 class EnsembleTests(unittest.TestCase):
@@ -23,7 +24,10 @@ class EnsembleTests(unittest.TestCase):
         rng = np.random.default_rng(42)
         fit = pd.DataFrame({'x': rng.normal(size=100), 'z': rng.normal(size=100)})
         fit['y'] = np.where(fit.x > 0, 'yes', 'no') if classification else 3 * fit.x + fit.z
+        meta = fit.iloc[80:].copy().reset_index(drop=True)
+        fit = fit.iloc[:80].copy()
         query = fit.drop(columns='y').iloc[:12].copy()
+        combined = pd.concat([query, meta.drop(columns='y')], ignore_index=True)
         preparation = {'data': {'target_columns': ['y'], 'id_columns': []},
             'metric': {'name': 'Macro F1' if classification else 'RMSE', 'direction': 'maximize' if classification else 'minimize'},
             'output': {'columns': ['y']}, 'validation': {'strategy': 'stratified_random' if classification else 'random'}}
@@ -53,13 +57,15 @@ class EnsembleTests(unittest.TestCase):
             code_sha = assemble(node, start)
             metadata = {**preparation, 'runtime': {'deadline': time.monotonic() + 60, 'num_cpus': 1,
                 'run_directory': str(root), 'work_directory': str(node), 'preparation_sha256': sha}}
-            valid, test = execute(node, fit, query, query, metadata)
-            save_pair(node, {'validation': valid, 'test': test}, sha, code_sha, 'validation_predictions.csv')
+            valid, test = execute(node, fit, combined, query, metadata)
+            save_pair(node, {'validation': subset(valid, np.arange(12)), 'meta': subset(valid, np.arange(12, 32)), 'test': test}, sha, code_sha, 'validation_predictions.csv')
             save(node / 'finish.json', {'status': 'completed', 'preparation_sha256': sha, 'code_sha256': code_sha})
         work = root / 'nodes' / 'node_002'
         work.mkdir()
         metadata['runtime'].update(work_directory=str(work), deadline=time.monotonic() + 60)
-        return {'fit': fit, 'validation': query, 'test': query, 'preparation': metadata, 'auxiliary': {}}, defaults, sha
+        metadata['runtime'].update(meta_rows=20, outer_validation_rows=12)
+        return {'fit': fit, 'validation': combined, 'test': query, 'preparation': metadata,
+                'auxiliary': {'ensemble_meta': meta}}, defaults, sha
 
     def test_cached_and_conditional_blends_never_retrain(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -82,35 +88,26 @@ class EnsembleTests(unittest.TestCase):
             self.assertEqual(proposal.assembly.blocks[0].operation.kind, 'saved_ensemble')
             self.assertEqual(proposal.hypothesis.pipeline.model['sources'], base['source_nodes'])
 
-    def test_learned_combiners_use_fit_oof_and_reuse_cache(self):
+    def test_learned_combiners_never_retrain_sources(self):
         for classification in (False, True):
             with tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state, defaults, _ = self.setup_run(root, classification)
                 original_hash = file_hash(root / 'nodes/node_000/assembly.json')
-                observed = []
-                def tracked(node, fit, validation, test, preparation, auxiliary=None):
-                    self.assertNotIn('y', validation)
-                    self.assertLess(len(fit), len(state['fit']))
-                    observed.append(len(validation))
-                    return execute(node, fit, validation, test, preparation, auxiliary)
-                base = {'source_nodes': ['node_000', 'node_001'], 'folds': 2, 'method': 'stacking', 'passthrough': True}
-                with patch('agent.assembly.execute', side_effect=AssertionError('Invalid meta settings trained OOF')):
-                    with self.assertRaises(TypeError):
-                        run_operation(state, {'kind': 'saved_ensemble', 'parameters': {**base,
-                            'parameters': {'invented_parameter': 1}}}, defaults)
-                with patch('agent.assembly.execute', side_effect=tracked):
-                    result = run_operation(state, {'kind': 'saved_ensemble', 'parameters': base}, defaults)
-                self.assertEqual(len(observed), 4)
-                self.assertEqual(len(result['test_predictions']), 12)
-                with patch('agent.assembly.execute', side_effect=AssertionError('OOF cache was ignored')):
-                    result = run_operation(state, {'kind': 'saved_ensemble', 'parameters': {**base, 'method': 'gating'}}, defaults)
+                base = {'source_nodes': ['node_000', 'node_001'], 'method': 'stacking', 'passthrough': True}
+                with patch('agent.assembly.execute', side_effect=AssertionError('Ensemble retrained a source')):
+                    for method in ('stacking', 'gating'):
+                        result = run_operation(state, {'kind': 'saved_ensemble', 'parameters': {**base, 'method': method}}, defaults)
+                        self.assertEqual(len(result['test_predictions']), 12)
+                        self.assertFalse(result['validation_predictions'].attrs['meta_held_out'])
                 self.assertEqual(file_hash(root / 'nodes/node_000/assembly.json'), original_hash)
-                if classification:
-                    self.assertLessEqual(set(result['test_predictions'].y), {'yes', 'no'})
-                    self.assertIn('probabilities', result['test_predictions'].attrs)
                 facts = json.loads((root / 'nodes/node_002/ensemble_full_diagnostics.json').read_text())
-                self.assertEqual(facts['oof_rows'], len(state['fit']))
+                self.assertEqual(facts['oof_rows'], 20)
+                self.assertFalse(facts['source_retraining'])
+                # A learned source must not reuse its in-sample meta predictions for another stack.
+                state['auxiliary']['ensemble_meta'] = state['auxiliary']['ensemble_meta'].iloc[:10]
+                with self.assertRaisesRegex(ValueError, 'same ensemble holdout'):
+                    run_operation(state, {'kind': 'saved_ensemble', 'parameters': base}, defaults)
 
     def test_conditional_votes_align_classes_when_subsets_omit_labels(self):
         from agent.ensembles import conditional

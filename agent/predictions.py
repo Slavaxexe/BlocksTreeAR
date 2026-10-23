@@ -19,11 +19,11 @@ def attach_probabilities(frame, values, classes):
 
 def save_pair(directory, frames, preparation_sha256, code_sha256, validation_file):
     record = {'preparation_sha256': preparation_sha256, 'code_sha256': code_sha256,
-              'probabilities': False, 'frames': {}}
+              'probabilities': False, 'meta_held_out': frames['validation'].attrs.get('meta_held_out', True), 'frames': {}}
     probabilities = {}
     classes = None
     for scope, frame in frames.items():
-        name = validation_file if scope == 'validation' else 'test_predictions.csv'
+        name = validation_file if scope == 'validation' else scope + '_predictions.csv'
         path = within(directory, name)
         atomic_bytes(path, frame.to_csv(index=False).encode('utf-8'))
         record['frames'][scope] = {'file': name, 'sha256': file_hash(path), 'rows': len(frame),
@@ -34,7 +34,7 @@ def save_pair(directory, frames, preparation_sha256, code_sha256, validation_fil
                 raise ValueError('Validation/test probability class order differs')
             classes = probability['classes']
             probabilities[scope] = probability['values']
-    if len(probabilities) == 2:
+    if len(probabilities) == len(frames):
         buffer = io.BytesIO()
         np.savez_compressed(buffer, **probabilities)
         path = directory / 'probabilities.npz'
@@ -73,6 +73,8 @@ def load_pair(root, node_id, preparation_sha256, defaults=None, metric=None):
             with np.load(path, allow_pickle=False) as values:
                 for scope, frame in frames.items():
                     attach_probabilities(frame, values[scope], record['classes'])
+        for frame in frames.values():
+            frame.attrs['meta_held_out'] = record.get('meta_held_out', False)
         return frames
     # Older runs saved label/value CSVs without an extra prediction manifest.
     labels = (defaults or {}).get('class_labels') or []
@@ -100,13 +102,11 @@ def prediction_catalog(root, rows, leader_id, cache, defaults=None, metric=None)
                 # Baker needs only a compact comparison; do not retain test/probability matrices here.
                 validation = frames['validation'].copy()
                 validation.attrs = {}
-                cache[key] = {'validation': validation, 'probabilities': probabilities}
-            manifest = json.loads((directory / 'assembly.json').read_text(encoding='utf-8'))
-            trainable = all((block.get('operation') or {}).get('kind') in {
-                'constant', 'features', 'preprocess', 'fit', 'predict', 'automl', 'ensemble'} for block in manifest['blocks'])
+                cache[key] = {'validation': validation, 'probabilities': probabilities,
+                              'meta_ready': 'meta' in frames and frames['meta'].attrs.get('meta_held_out', False)}
             candidates.append({'node_id': row.node_id, 'value': row.result.value,
                 'probabilities': cache[key]['probabilities'],
-                'oof_recipe': trainable})
+                'oof_recipe': cache[key]['meta_ready'], 'meta_ready': cache[key]['meta_ready']})
         except (OSError, ValueError, KeyError):
             continue
     leader = next((row for row in rows if row.node_id == leader_id), None)

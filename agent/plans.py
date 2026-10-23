@@ -11,9 +11,46 @@ class Plan(BaseModel):
 class FeatureSpec(Plan):
     name: str = Field(min_length=1)
     operation: Literal['sum', 'mean', 'product', 'difference', 'ratio', 'signed_log',
-                       'missing', 'frequency', 'clip', 'group_mean', 'datetime']
+                       'missing', 'frequency', 'clip', 'group_mean', 'datetime', 'expression',
+                       'history', 'target_encoding']
     columns: list[str] = Field(min_length=1)
-    parameters: dict[str, Any] = Field(default_factory=dict)
+    parameters: dict[str, Any] = Field(default_factory=dict, description='For expression use {expression: formula}; x0/x1 or col(quoted column) read declared columns. Compose arithmetic, conditions, log1p, abs, sqrt, where, clip, frequency and group_mean/group_std/group_count. Statistics learn only on fit.')
+
+    @model_validator(mode='after')
+    def supervised_parameters(self):
+        if self.operation == 'history':
+            HistorySettings.model_validate(self.parameters)
+        elif self.operation == 'target_encoding':
+            TargetEncodingSettings.model_validate(self.parameters)
+        return self
+
+
+class HistorySettings(Plan):
+    time_column: str
+    value_column: str
+    aggregation: Literal['last', 'mean', 'sum', 'std', 'min', 'max', 'count', 'trend', 'age'] = 'last'
+    window: int | None = Field(default=None, ge=1, description='Number of distinct earlier periods, not rows')
+    lag: int = Field(default=1, ge=1, description='1 starts at the latest strictly earlier period')
+    min_history: int = Field(default=1, ge=1)
+    max_age: float | None = Field(default=None, gt=0, description='Time units for numeric time, days for timestamps')
+    fallback: Literal['missing', 'global'] = 'missing'
+    class_label: Any = Field(default=None, description='Encode this class as 1, others as 0; omit for numeric values')
+
+
+class TargetEncodingSettings(Plan):
+    target: str
+    smoothing: float = Field(default=10., ge=0)
+    folds: int = Field(default=5, ge=2)
+    seed: int = 42
+    validation: Literal['auto', 'random', 'group', 'time'] = 'auto'
+    group_column: str | None = None
+    time_column: str | None = None
+    class_label: Any = None
+
+
+class RowWeights(Plan):
+    time_column: str
+    half_life: float = Field(gt=0, description='Numeric time units, or days for timestamps; weight halves per half_life')
 
 
 class SearchSpace(Plan):
@@ -42,6 +79,8 @@ class AutoMLPlan(Plan):
     validation: Literal['holdout', 'cv'] = 'holdout'
     folds: int = Field(default=3, ge=2)
     holdout_fraction: float = Field(default=0.2, gt=0, lt=1)
+    split_column: str | None = Field(default=None, description='Optional explicit ordered column for the inner holdout; outer split stays fixed')
+    group_by: str | None = Field(default=None, description='Optional explicit grouping column for the inner holdout')
     bag_folds: int = Field(default=0, ge=0)
     stack_levels: int = Field(default=0, ge=0)
     ensemble: bool | None = None
@@ -49,6 +88,7 @@ class AutoMLPlan(Plan):
     columns: list[str] = Field(default_factory=list)
     drop_columns: list[str] = Field(default_factory=list)
     features: list[FeatureSpec] = Field(default_factory=list)
+    row_weights: RowWeights | None = None
 
     @model_validator(mode='before')
     @classmethod
@@ -58,6 +98,10 @@ class AutoMLPlan(Plan):
 
     @model_validator(mode='after')
     def supported_combination(self):
+        if (self.features or self.row_weights) and (self.validation == 'cv' or self.bag_folds or self.stack_levels):
+            raise ValueError('Feature recipes require validation=holdout with bag_folds=stack_levels=0; the adapter rebuilds recipes on its explicit inner train')
+        if self.engine == 'flaml' and (self.features or self.row_weights) and self.ensemble:
+            raise ValueError('Use separate saved ensembles after feature-aware FLAML; internal stacking cannot rebuild recipes inside its folds')
         if self.bag_folds == 1:
             raise ValueError('Bagging needs zero or at least two folds')
         if self.engine == 'flaml' and (self.bag_folds or self.stack_levels):
@@ -82,14 +126,22 @@ class EnsemblePlan(Plan):
     source_nodes: list[str] = Field(min_length=2, description='Completed nodes from prediction_sources, on the same preparation')
     method: Literal['mean', 'vote', 'probabilities', 'conditional', 'stacking', 'gating']
     weights: list[float] = Field(default_factory=list)
+    optimize_weights: bool = Field(default=False, description='Tune nonnegative blend weights on saved inner-holdout predictions, never outer validation')
+    weight_trials: int = Field(default=64, ge=1, description='Maximum local weight candidates, no LLM calls')
     combine: Literal['mean', 'vote', 'probabilities'] | None = None
     rules: list[BlendRule] = Field(default_factory=list, description='First matching rule wins; default weights apply otherwise')
-    folds: int = Field(default=3, ge=2)
-    seed: int = 42
     estimator: str | None = Field(default=None, description='Installed sklearn-compatible class path; stacking defaults to LogisticRegression/Ridge, gating to shallow DecisionTreeClassifier with predict_proba')
     parameters: dict[str, Any] = Field(default_factory=dict, description='Combiner constructor kwargs, not source-model settings')
     feature_columns: list[str] = Field(default_factory=list, description='Raw features for gating or stacking passthrough; [] selects all allowed features')
     passthrough: bool = Field(default=False, description='Stacking also sees preprocessed raw features alongside source predictions; supports nonlinear dependencies')
+
+    @model_validator(mode='before')
+    @classmethod
+    def legacy_oof_settings(cls, value):
+        # Old saved plans may contain these; shared holdout no longer varies per ensemble.
+        if isinstance(value, dict):
+            return {key: item for key, item in value.items() if key not in {'folds', 'seed'}}
+        return value
 
     @model_validator(mode='after')
     def compatible_sources(self):
@@ -102,6 +154,8 @@ class EnsemblePlan(Plan):
                 raise ValueError('Weights must match sources and be nonnegative with a positive sum')
         if self.method == 'conditional' and not self.rules:
             raise ValueError('Conditional blending needs at least one rule')
+        if self.optimize_weights and self.method not in {'mean', 'vote', 'probabilities'}:
+            raise ValueError('Weight optimization applies to mean, vote or probability blending')
         if self.method != 'conditional' and self.rules:
             raise ValueError('Rules apply only to conditional blending')
         return self
@@ -145,8 +199,8 @@ class ToolCall(Plan):
     def operation_parameters(self, info: ValidationInfo):
         fields = {
             'constant': set(), 'features': {'recipes'},
-            'preprocess': {'feature_columns', 'drop_columns', 'numeric_imputer', 'encoding', 'scaling', 'pca_components'},
-            'fit': {'estimator', 'parameters', 'search_space', 'num_trials', 'validation', 'group_by', 'split_column'},
+            'preprocess': {'feature_columns', 'drop_columns', 'numeric_imputer', 'encoding', 'native_backend', 'scaling', 'pca_components'},
+            'fit': {'estimator', 'parameters', 'search_space', 'num_trials', 'validation', 'group_by', 'split_column', 'row_weights', 'seeds'},
             'predict': {'output'}, 'ensemble': {'sources', 'weights', 'method'},
         }
         if self.kind == 'automl':
@@ -157,8 +211,23 @@ class ToolCall(Plan):
             unknown = set(self.parameters) - fields[self.kind]
             if unknown:
                 raise ValueError(f'Unknown {self.kind} settings: {sorted(unknown)}')
+        if self.kind == 'fit':
+            if self.parameters.get('row_weights') is not None:
+                RowWeights.model_validate(self.parameters['row_weights'])
+            seeds = self.parameters.get('seeds', [])
+            if not isinstance(seeds, list) or any(type(seed) is not int for seed in seeds):
+                raise ValueError('seeds must be a list of integers')
         block = (info.context or {}).get('block')
         if block is not None:
+            original = block.get('operation')
+            if original:
+                if self.kind != original['kind']:
+                    raise ValueError('Repair must preserve the operation kind and hypothesis')
+                fixed = ('method', 'source_nodes') if self.kind == 'saved_ensemble' else (
+                    ('engine',) if self.kind == 'automl' else ())
+                for key in fixed:
+                    if self.parameters.get(key) != original.get('parameters', {}).get(key):
+                        raise ValueError(f'Repair must preserve {key}; create a new hypothesis to change it')
             from .operations import CATALOG
             entry = CATALOG[self.kind]
             required = {self.inputs.get(key, key) for key in entry['requires']}
@@ -173,7 +242,7 @@ class ToolCall(Plan):
 class AnalysisRequest(Plan):
     name: str = Field(pattern=r'^[a-z][a-z0-9_]{0,63}$')
     kind: Literal['quality', 'association', 'correlation', 'shift', 'groups', 'redundancy',
-                  'missingness', 'interactions', 'predictive', 'permutation', 'ablation', 'feature', 'stability']
+                  'missingness', 'interactions', 'predictive', 'permutation', 'ablation', 'feature', 'stability', 'entities']
     columns: list[str] = Field(default_factory=list)
     target: str | None = None
     dataset: Literal['fit', 'validation', 'test'] = Field(default='fit', description='Actual table for descriptive analyses; supervised analyses use fit only')
@@ -189,5 +258,6 @@ class AnalysisRequest(Plan):
     validation: Literal['auto', 'random', 'group', 'time'] = 'auto'
     validation_fraction: float = Field(default=0.25, gt=0, lt=1)
     split_column: str | None = None
+    key_candidates: list[list[str]] = Field(default_factory=list, description='For entities: proposed single/composite keys; [] uses columns as one key. No target access required.')
     filters: list[RowFilter] = Field(default_factory=list)
     comparison_filters: list[RowFilter] = Field(default_factory=list)

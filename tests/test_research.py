@@ -100,7 +100,7 @@ class WorkerTests(unittest.TestCase):
                      'preparation_sha256': file_hash(root / 'preparation.json')})
                 execute(root, node)
                 values = json.loads((node / 'measurements.json').read_text())['values']
-                self.assertEqual(values['rows']['rows_used'], 8 if phase == 'structure' else 6)
+                self.assertEqual(values['rows']['rows_used'], 8 if phase == 'structure' else json.loads((root / 'preparation.json').read_text())['validation']['model_fit_rows'])
                 self.assertEqual(values['rows']['target_available'], phase == 'fit')
                 self.assertFalse(json.loads((node / 'measurements.json').read_text())['target_access']['validation'])
                 self.assertFalse(json.loads((node / 'measurements.json').read_text())['target_access']['test'])
@@ -129,7 +129,7 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 context = json.loads(prompt.rsplit('\n', 1)[1])
                 if schema is ResearchPlan:
                     return ResearchPlan(question=client.node_id, hypothesis='Rows exist', method='Count rows',
-                                        decision='Set training budget', analyses=CHECKS)
+                                        decision='Set training budget', analyses=CHECKS, parent_id='research_999')
                 return ResearchReview.model_validate(review(open_questions=['Explain duplicates']), context=kwargs['validation'])
 
             async def process(args, cwd, log, deadline, timeout):
@@ -211,6 +211,7 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 if title == 'Program':
                     running_counts.append(len(json.loads((output / 'report.json').read_text())['running_nodes']))
                 if title == 'ResearchPlan':
+                    self.assertTrue((task.parent / 'submission.csv').is_file(), 'Cheap baseline must be published before EDA')
                     reply = {'question': context['node_id'], 'hypothesis': 'The input has rows', 'method': 'Count rows',
                              'decision': 'Budget fitting', 'analyses': CHECKS}
                 elif title == 'ResearchReview':
@@ -269,6 +270,9 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(preparations), 2)
             self.assertEqual(preparations[1]['data_research']['revision'], 2)
             baker = [context for title, context in contexts if title == 'Ideas']
+            self.assertIn('published_cheap_baseline', report.checks)
+            first_baker = next(index for index, (title, _) in enumerate(contexts) if title == 'Ideas')
+            self.assertTrue(any(title == 'ResearchPlan' and context['phase'] == 'fit' for title, context in contexts[:first_baker]))
             self.assertGreaterEqual(baker[0]['data_research']['revision'], 2)
             self.assertEqual(baker[-1]['data_research']['revision'], 4)
             self.assertNotIn('Program', [title for title, _ in contexts])
@@ -280,7 +284,8 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
             for node in snapshot['research_nodes']:
                 if node['phase'] == 'fit':
                     self.assertFalse(node['measurements']['target_access']['validation'])
-                    self.assertEqual(node['measurements']['values']['rows']['rows_used'], 6)
+                    self.assertEqual(node['measurements']['values']['rows']['rows_used'],
+                                     json.loads((root / 'preparation.json').read_text())['validation']['model_fit_rows'])
             self.assertEqual(split_hash, json.loads((root / 'preparation.json').read_text())['validation']['split_sha256'])
 
 

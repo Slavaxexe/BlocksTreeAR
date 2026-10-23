@@ -11,11 +11,11 @@ from sklearn.impute import SimpleImputer
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import get_scorer
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import LabelEncoder, OrdinalEncoder, StandardScaler
 
-from .features import create_features
+from .features import SUPERVISED_GUIDE, create_features
 from .plans import AnalysisRequest
 
 
@@ -33,7 +33,9 @@ CATALOG = {
     'ablation': 'Retrain with/without selected features or groups on the same internal holdout.',
     'feature': 'Create proposed feature recipes; compare baseline and augmented proxy models on internal holdout.',
     'stability': 'Association stability across specified groups, or two disjoint seeded fit subsets.',
+    'entities': 'Test proposed key_candidates (lists of columns), or columns as one composite key. Reports repeats, duplicate key/period ambiguity, comparison-table overlap and strictly earlier-history coverage. split_column supplies ordered time. Full filtered tables, no target access needed; overlap is not proof of entity identity.',
 }
+CATALOG['feature'] += ' ' + SUPERVISED_GUIDE
 
 SCORERS = {
     'rmse': 'neg_root_mean_squared_error', 'rootmeansquarederror': 'neg_root_mean_squared_error',
@@ -134,33 +136,22 @@ def _model(frame, classification, estimator, seed):
 
 
 def _inner_split(data, y, request, policy, classification):
-    strategy = request.validation
-    if strategy == 'auto':
-        description = str(policy.get('strategy', '')).lower()
-        strategy = 'group' if policy.get('group_columns') or 'group' in description else (
-            'time' if any(word in description for word in ('time', 'temporal', 'chronological')) else 'random')
-    if strategy == 'group':
-        column = request.group_by or next(iter(policy.get('group_columns', [])), None)
-        if not column:
-            raise ValueError('Group proxy validation needs group_by')
-        groups = data[column].astype('string').fillna('__missing__')
-        return next(GroupShuffleSplit(n_splits=1, test_size=request.validation_fraction,
-                                      random_state=request.seed).split(data, y, groups))
-    if strategy == 'time':
-        column = request.split_column or policy.get('split_column') or policy.get('time_column')
-        if not column or data[column].isna().any():
-            raise ValueError('Temporal proxy validation needs a non-missing split_column')
-        periods = sorted(data[column].unique())
-        if len(periods) < 2:
-            raise ValueError('Temporal proxy validation needs at least two distinct periods')
-        cut = max(1, int(len(periods) * (1 - request.validation_fraction)))
-        validation = data[column].isin(periods[cut:]).to_numpy()
-        return np.flatnonzero(~validation), np.flatnonzero(validation)
+    from .validation import metadata, structured_holdout
+    policy = metadata(policy)
+    if request.group_by:
+        policy['group_columns'] = [request.group_by]
+    if request.split_column:
+        policy['time_column'] = request.split_column
+    indices = structured_holdout(data, policy, request.validation_fraction, request.seed, request.validation)
+    if indices is not None:
+        return indices
     return train_test_split(np.arange(len(data)), test_size=request.validation_fraction,
                             random_state=request.seed, stratify=y if classification else None)
 
 
 def _predictive(frame, columns, target, classification, request, metric, cache, recipes=(), policy=None):
+    from .validation import metadata
+    policy = metadata(policy)
     scorer_name = SCORERS.get(''.join(c for c in metric.lower() if c.isalnum()))
     if scorer_name is None:
         raise ValueError(f'No verified proxy scorer for {metric!r}; choose a descriptive analysis')
@@ -177,23 +168,53 @@ def _predictive(frame, columns, target, classification, request, metric, cache, 
         train, valid = _inner_split(data, y, request, policy or {}, classification)
         # Recipe statistics are learned on the inner training rows, not on its holdout.
         # Recipe inputs may be needed for calculation without being model features.
-        raw_columns = list(dict.fromkeys([*columns, *(column for recipe in recipes for column in recipe.columns if column in data)]))
-        x_train, x_valid = create_features([data.iloc[train][raw_columns], data.iloc[valid][raw_columns]],
-                                          recipes, forbidden=[target])
+        dependencies = [column for recipe in recipes for column in [*recipe.columns,
+            recipe.parameters.get('time_column'), recipe.parameters.get('group_column'),
+            recipe.parameters.get('value_column')] if column in data and column != target]
+        policy_columns = [*(policy or {}).get('group_columns', []), (policy or {}).get('time_column'),
+                          (policy or {}).get('split_column'), request.group_by, request.split_column]
+        dependencies += [column for column in policy_columns if column in data and column != target]
+        raw_columns = list(dict.fromkeys([*columns, *dependencies]))
+        training = data.iloc[train][list(dict.fromkeys([*raw_columns, target]))]
+        recipe_policy = dict(policy or {})
+        if request.validation != 'auto':
+            recipe_policy['strategy'] = request.validation
+            recipe_policy['group_columns'] = [request.group_by] if request.validation == 'group' and request.group_by else []
+            if request.split_column:
+                recipe_policy['time_column'] = request.split_column
+        x_train, x_valid = create_features([training, data.iloc[valid][raw_columns]],
+                                          recipes, forbidden=[target], policy=recipe_policy)
+        history_masks = {recipe.name: x_valid[recipe.name].notna().to_numpy()
+                         for recipe in recipes if recipe.operation == 'history'}
         all_columns = list(dict.fromkeys([*columns, *(recipe.name for recipe in recipes)]))
         x_train, x_valid = _matrix(x_train, all_columns), _matrix(x_valid, all_columns)
         model = _model(x_train, classification, request.estimator, request.seed)
         model.fit(x_train, y[train])
         scorer = get_scorer(scorer_name)
         score = float(scorer(model, x_valid, y[valid]))
-        cache[key] = (model, x_valid, y[valid], scorer, score, len(train))
-    model, valid, y_valid, scorer, score, train_rows = cache[key]
+        slices = {}
+        for name, covered in history_masks.items():
+            slices[name] = {'coverage': float(covered.mean()),
+                'coverage_definition': 'Finite feature after configured fallback; entities measures key-specific strict-past coverage before fallback'}
+            for scope, mask in [('with_history', covered), ('without_history', ~covered)]:
+                subset_score = None
+                if mask.any():
+                    try:
+                        measured = float(scorer(model, x_valid.loc[mask], y[valid][mask]))
+                        subset_score = _number(-measured if scorer_name.startswith('neg_') else measured)
+                    except ValueError:
+                        pass  # Some classification metrics need classes absent from a small slice.
+                slices[name][scope] = {'rows': int(mask.sum()), 'value': subset_score}
+        cache[key] = (model, x_valid, y[valid], scorer, score, len(train), slices)
+    model, valid, y_valid, scorer, score, train_rows, slices = cache[key]
     negative = scorer_name.startswith('neg_')
     result = {'metric': metric, 'value': -score if negative else score,
               'direction': 'minimize' if negative else 'maximize', 'estimator': request.estimator,
               'inner_train_rows': train_rows, 'inner_validation_rows': len(valid),
               'feature_count': valid.shape[1], 'comparison_score': score,
               'scope': 'Proxy evaluation inside fit only; not the experiment outer-validation score'}
+    if slices:
+        result['history_slices'] = slices
     return result, (model, valid, y_valid, scorer)
 
 
@@ -208,6 +229,9 @@ def analyze_features(state, value, *, task_type=None, cache=None):
     targets = preparation['data']['target_columns']
     ids = preparation['data'].get('id_columns', [])
     columns = sorted(request.columns or [c for c in frame if c not in {*targets, *ids}])
+    if request.kind == 'groups':
+        # The target has its own summary below; listing it twice is redundant, not an input feature.
+        columns = [column for column in columns if column not in targets]
     if set(columns) & set(targets):
         raise ValueError('Use target= for the response; columns must contain input features only')
     if not set(columns) <= set(frame):
@@ -215,14 +239,18 @@ def analyze_features(state, value, *, task_type=None, cache=None):
     target = request.target or (targets[0] if len(targets) == 1 else None)
     if target is not None and target not in targets:
         raise ValueError('Analysis target must be a declared task target')
-    if request.sample_rows and len(frame) > request.sample_rows:
+    if request.kind != 'entities' and request.sample_rows and len(frame) > request.sample_rows:
         frame = frame.sample(request.sample_rows, random_state=request.seed)
     classification = ('class' in str(task_type).lower() or 'binary' in str(task_type).lower()) if task_type else (
         target in frame and not pd.api.types.is_numeric_dtype(frame[target]))
     result = {'kind': request.kind, 'scope': request.dataset, 'rows_used': len(frame), 'rows_available': len(state[request.dataset]),
               'target_available': target in frame, 'features': columns,
               'filters': [item.model_dump() for item in request.filters]}
-    if request.kind == 'quality':
+    if request.kind == 'entities':
+        from .entity_analysis import inspect_entities
+        other = _population(state[request.compare], request.comparison_filters)
+        result.update(inspect_entities(frame, other, request, targets))
+    elif request.kind == 'quality':
         result['columns'] = {name: {'missing_rate': float(frame[name].isna().mean()),
             'unique': int(frame[name].nunique()), 'constant': bool(frame[name].nunique(dropna=False) <= 1),
             'quantiles': {str(q): _number(v) for q, v in frame[name].astype(float).quantile([0, .01, .5, .99, 1]).items()}

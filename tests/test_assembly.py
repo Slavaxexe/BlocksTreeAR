@@ -6,7 +6,7 @@ import unittest
 
 import pandas as pd
 
-from agent.assembly import BlockError, assemble, execute, initialize
+from agent.assembly import BlockError, assemble, execute, initialize, block_path
 from agent.contracts import Assembly, Start
 from agent.data import file_hash
 from agent.storage import save
@@ -67,8 +67,9 @@ class AssemblyTests(unittest.TestCase):
                                            pd.DataFrame({'signal': [5]}), {})
                 self.assertEqual(validation.target.tolist(), [6, 14])
                 self.assertEqual(test.target.tolist(), [10])
+                self.assertFalse((node / 'modules/features.py').exists())
                 for b in (features, model):
-                    self.assertEqual(file_hash(node / 'modules' / (b['name'] + '.py')), hashes[b['name']])
+                    self.assertEqual(file_hash(block_path(node, b['name'])), hashes[b['name']])
             source = root / 'nodes/node_001/modules/features.py'
             source.write_text(FEATURES + '\n# changed source\n', encoding='utf-8')
             with self.assertRaisesRegex(BlockError, 'Source block changed'):

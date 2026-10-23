@@ -487,6 +487,8 @@ class JSONAgents:
             "nonempty disjoint integer positional indices; reproducible; use config.validation.\n"
             "Record the actually used strategy and any limitations in config['validation']; group_columns "
             "must be a list of actual column names if group isolation is required, otherwise []. "
+            "If the chosen strategy uses time, record the actual ordered column as time_column; "
+            "use this shared metadata name rather than inventing a task-specific key. "
             "The worker saves this metadata and verifies that declared groups do not overlap. "
             "Do not claim measured class counts before the code has inspected the table.\n"
             "score(reference: DataFrame, predictions: DataFrame, config: dict) -> float: "
@@ -519,7 +521,7 @@ class JSONAgents:
         payload = compact({'operations': CATALOG, 'automl_engines': CAPABILITIES,
             **task_context(context), **{key: context[key] for key in fields if key in context},
             'prediction_sources': table(context.get('prediction_sources', [])),
-            'data_research': {key: research[key] for key in ('revision', 'insights', 'omitted_insight_count') if key in research}})
+            'data_research': {key: research[key] for key in ('revision', 'insights', 'feature_candidates', 'omitted_insight_count') if key in research}})
         for key in ('queued_ideas', 'previous_ideas', 'experiments', 'available_parents'):
             payload.setdefault(key, context.get(key, []))
         payload.setdefault('occupied_slots', context.get('occupied_slots', {}))
@@ -543,13 +545,13 @@ class JSONAgents:
             "Set automl for FLAML/AutoGluon: exact model IDs from automl_engines, fixed parameters or typed "
             "search_space, internal validation/folds, bagging/stacking and feature recipes. Do not repeat "
             "an unchanged automl_portfolio default. Other ready models use installed sklearn-compatible fit/predict. "
-            "Standalone preprocess produces numeric arrays; native CatBoost cat_features requires AutoML. "
+            "Standalone preprocess supports encoding=native with native_backend=catboost/lightgbm/xgboost; use the matching estimator library. Ordinary ordinal/onehot still produces numeric arrays. "
             "The standalone fit operation supports one inner holdout; AutoML supports its declared CV settings. "
             "LightAutoML, arbitrary torch loops and resampling/deduplication have no ready operation. "
             "For recombination set ensemble using completed prediction_sources: mean/vote/probabilities "
             "reuse predictions cheaply; conditional changes fixed weights by feature rules. Stacking/gating "
-            "need oof_recipe sources and train/cache fit-only OOF predictions, costing training time. "
-            "Stacking passthrough adds features; gating predicts per-object expert weights. Start with cheap "
+            "need meta_ready sources with saved predictions on the common inner holdout. They train only the combiner, never the sources. "
+            "Set optimize_weights=true for simple blends to tune weights locally on saved meta predictions, without LLM calls or source retraining. Feature expression recipes compose arithmetic, conditions, vector functions and fit-only group statistics; EDA kind=feature can compare them on an internal split. Stacking passthrough adds features; gating predicts per-object expert weights. Start with cheap "
             "blends of complementary sources; disagreement alone does not prove gain. Use vote for labels, "
             "mean for regression, probability blending only when available. An ensemble keeps a main parent "
             "and may use several source nodes. Try useful small refinements late in the run. "
@@ -589,9 +591,12 @@ class JSONAgents:
             'Aliases connect multiple models and their prediction pairs to ensemble. After features, map '
             'preprocess fit/validation/test to the produced tables. feature_columns selects the COMPLETE '
             'input subset; [] keeps all. Categoricals are inferred; never select only categorical columns '
-            'unless the hypothesis explicitly removes all other features. Standalone preprocessing produces '
-            'numeric arrays, so CatBoost must not receive native cat_features. fit supports one fit-only '
+            'unless the hypothesis explicitly removes all other features. ordinal/onehot preprocessing produces '
+            'numeric arrays; native keeps a DataFrame and requires the matching estimator backend. fit supports one fit-only '
             'inner holdout; AutoML supports declared CV. All supervised tuning uses held-out fit predictions, '
+            'For history/target_encoding use standalone features/preprocess/fit or AutoML features with holdout '
+            'and no internal bagging/stacking. Keep all key/time inputs available for recipe evaluation even if excluded from '
+            'preprocess.feature_columns. row_weights belongs to fit; seeds averages the selected estimator. '
             'never outer labels or in-sample predictions. Use supplied API facts and exact AutoML IDs. '
             'Describe the actual algorithm/configuration, without claiming unexecuted measurements.\n')
         plan = await self.ask(NodePlan, prompt + json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
@@ -611,7 +616,9 @@ class JSONAgents:
             {'operation': previous, 'error': payload['execution_error']}, focus=previous, max_chars=4500)
         return await self.ask(ToolCall,
             'Repair ONLY the failed operation configuration, never Python. Preserve target_block '
-            'requires/provides and the hypothesis. Neighbors show its data producers/consumers. Fix the '
+            'requires/provides and the hypothesis. Keep the operation kind, AutoML engine, and saved-ensemble '
+            'method/source_nodes unchanged. Do not replace stacking/gating with averaging to bypass an error. '
+            'Neighbors show its data producers/consumers. Fix the '
             'actual exception using previous_operation and supplied API facts. Data loading, split, metric '
             'and writer stay fixed. Only fit has labels; supervised tuning must use held-out fit predictions. '
             'Do not claim successful execution. Return the corrected ToolCall.\n' +
@@ -634,7 +641,7 @@ class JSONAgents:
             'inputs. Earlier repair errors may already be fixed. Interrupted training is not proof of a bug. '
             'Diagnostics override planned settings: selected_columns are actual features, completed_trials '
             'are actual trials, single_holdout/splits=1 is not CV. Source prediction blending does not retrain; '
-            'only full stacking/gating diagnostics confirm OOF training. Gates use per-row loss as a proxy, '
+            'full stacking/gating diagnostics confirm combiner training on saved inner-holdout predictions; sources are never retrained. Gates use per-row loss as a proxy, '
             'not per-row Macro F1. All supervised selection must use held-out/OOF predictions inside fit; '
             'flag in-sample tuning, separately from outer-label leakage. Freeze settings before full-fit refit. '
             'Use comparisons to explain the measured change without claiming causality from one score. '

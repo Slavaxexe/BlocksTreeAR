@@ -107,6 +107,7 @@
         "data_research",
         "baseline",
         "search",
+        "final_refit",
         "complete"
       ],
       "title": "Stage",
@@ -229,6 +230,15 @@
       "default": 6,
       "title": "Max Parallel Nodes",
       "type": "integer"
+    },
+    "search_parallel_limit": {
+      "default": 6,
+      "title": "Search Parallel Limit",
+      "type": "integer"
+    },
+    "api_budget": {
+      "title": "Api Budget",
+      "type": "object"
     },
     "max_parallel_agents": {
       "default": 8,

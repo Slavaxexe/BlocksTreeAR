@@ -9,6 +9,15 @@ import time
 from urllib.parse import urlsplit
 
 
+def module_file(directory, name):
+    path = directory / 'modules' / (name + '.py')
+    if path.exists():
+        return path
+    start = json.loads((directory / 'start.json').read_text(encoding='utf-8'))
+    block = next(block for block in start['assembly']['blocks'] if block['name'] == name)
+    return module_file(directory.parent / block['source_node'], name)
+
+
 def collect(root: Path, *extra_roots: Path) -> dict:
     """Read known JSON, including partial extractions; no CSV, .env or API access."""
     roots, runs = (root, *extra_roots), []
@@ -86,7 +95,8 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
                               "delta": read(directory / "delta.json"), "code": source(directory / 'experiment.py'),
                               "analysis": read(directory / 'analysis.json'), "analysis_error": read(directory / 'analysis_error.json'),
                               "assembly": read(directory / 'assembly.json') or start.get('assembly'),
-                              "modules": {p.stem: source(p) for p in sorted((directory / 'modules').glob('*.py'))},
+                              "modules": {b["name"]: source(module_file(directory, b["name"]))
+                                          for b in (read(directory / "assembly.json") or {}).get("blocks", [])},
                               "progress": read(directory / 'progress.json'), "attempts": attempts,
                               "executions": [{'number': p.name, 'status': read(p / 'status.json'),
                                               'error': read(p / 'error.json')}
@@ -373,7 +383,7 @@ function drawExtraction(r) {
   c.replaceChildren(); marker(c); c.setAttribute('viewBox', '0 0 735 680'); c.style.width = '735px'; c.style.height = '680px';
   $('summary').replaceChildren();
   for (const [label, value] of [['Статус запуска', extractionStatus(r)], ['Сохранено блоков', accepted+'/4'],
-    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',search:'Поиск гипотез',complete:'Завершён'}[report?.stage]??'Извлечение'],
+    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',search:'Поиск гипотез',final_refit:'Финальное обучение',complete:'Завершён'}[report?.stage]??'Извлечение'],
     ['Вызовов в отчёте', report?.llm_calls?.length ?? '—']]) {
     const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
   }

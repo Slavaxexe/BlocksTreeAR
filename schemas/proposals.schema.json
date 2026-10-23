@@ -30,6 +30,17 @@
     "Block": {
       "additionalProperties": false,
       "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolCall"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "name": {
           "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Name",
@@ -178,6 +189,50 @@
         "assembly"
       ],
       "title": "Proposal",
+      "type": "object"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "constant",
+            "features",
+            "preprocess",
+            "fit",
+            "predict",
+            "automl",
+            "ensemble",
+            "saved_ensemble"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "parameters": {
+          "title": "Parameters",
+          "type": "object"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map canonical operation inputs to saved state keys",
+          "title": "Inputs",
+          "type": "object"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map canonical outputs to custom state keys",
+          "title": "Outputs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ToolCall",
       "type": "object"
     }
   },

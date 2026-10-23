@@ -32,10 +32,12 @@ class Research:
         self.active, self.clients, self.nodes, self.insights = {}, {}, [], []
         self.questions = []
         self.model_feedback = []
+        self.feature_candidates = []
         self.revision, self.failures = 0, 0
         self.stop_reason = None
+        self.phase_deadline = None
         # Research shares the global API budget and reserves most calls for model search.
-        self.call_limit = min(24, max(0, (options.max_llm_calls - 8) // 3))
+        self.call_limit = options.max_llm_calls if options.research_unlimited else min(24, max(0, (options.max_llm_calls - 8) // 3))
         self.persist()
 
     @property
@@ -47,6 +49,7 @@ class Research:
                 'insights': [{k: row[k] for k in ('id', 'phase', 'statement', 'kind')}
                              for row in self.insights if row['active']],
                 'open_questions': self.questions,
+                'feature_candidates': self.feature_candidates,
                 'validation_policy': 'Research proposes changes; the fixed split is never modified during model search'}
 
     def report(self):
@@ -63,15 +66,18 @@ class Research:
         self.shared['data_research'] = self.view()
 
     def fill(self, phase='fit', limit=None):
-        cap = min(self.options.max_research_nodes, limit or self.options.max_research_nodes)
+        unlimited = self.options.research_unlimited
+        cap = limit if limit is not None else (float('inf') if unlimited else self.options.max_research_nodes)
+        if not unlimited:
+            cap = min(cap, self.options.max_research_nodes)
         while (not self.stop_reason and len(self.active) < self.options.research_parallel
-               and len(self.nodes) < cap and self.failures < 3):
+               and len(self.nodes) < cap and (unlimited or self.failures < 3)):
             spent = sum(client.requests for client in self.clients.values())
             reserved = sum(self.clients[row['node_id']].max_calls - self.clients[row['node_id']].requests
                            for row in self.active.values())
-            allowance = min(6, self.call_limit - spent - reserved)
+            allowance = self.agents.remaining_calls if unlimited else min(6, self.call_limit - spent - reserved)
             # A structured analysis plan and its review each need an API call. Preserve model-search headroom.
-            if allowance < 2 or self.agents.remaining_calls < reserved + allowance + 4:
+            if allowance < 2 or (not unlimited and self.agents.remaining_calls < reserved + allowance + 4):
                 if not self.active:
                     self.stop_reason = 'llm_limit'
                 break
@@ -80,15 +86,15 @@ class Research:
                    'context_revision': self.revision,
                    'focus': 'quality, semantics and grouping' if len(self.nodes) % 2 == 0
                             else 'distributions and useful feature relationships'}
-            client = JSONAgents(self.agents.settings, self.agents.deadline, allowance,
+            client = JSONAgents(self.agents.settings, min(self.agents.deadline, self.phase_deadline or self.agents.deadline), allowance,
                                 shared=self.agents, node_id=node_id)
             self.clients[node_id] = client
             self.nodes.append(row)
             task = asyncio.create_task(self.investigate(row, client))
             self.active[task] = row
-        if len(self.nodes) >= self.options.max_research_nodes and not self.active:
+        if not unlimited and len(self.nodes) >= self.options.max_research_nodes and not self.active:
             self.stop_reason = 'node_limit'
-        elif self.failures >= 3:
+        elif not unlimited and self.failures >= 3:
             self.stop_reason = 'repeated_failures'
         self.persist()
         self.refresh()
@@ -99,6 +105,26 @@ class Research:
             done, _ = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
             self.collect(done)
 
+    async def window(self, phase, deadline, limit=None):
+        """Bound initial EDA by wall time; completed evidence survives cancellation."""
+        self.phase_deadline = min(deadline, self.agents.deadline)
+        try:
+            while time.monotonic() < self.phase_deadline:
+                self.fill(phase, limit=limit)
+                if not self.active:
+                    break
+                done, _ = await asyncio.wait(self.tasks, timeout=max(0., self.phase_deadline - time.monotonic()),
+                                             return_when=asyncio.FIRST_COMPLETED)
+                self.collect(done)
+        finally:
+            tasks = self.tasks
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.collect(set(tasks))
+            self.phase_deadline = None
+
     async def investigate(self, row, client):
         started = time.monotonic()
         node = self.directory / 'research' / 'nodes' / row['node_id']
@@ -107,10 +133,12 @@ class Research:
                    'model_feedback': self.model_feedback,
                    'data_research': select_research(self.view(), [row['focus'], self.model_feedback]),
                    'profile': research_profile_view(json.loads((self.directory / 'research' / 'profile.json').read_text(encoding='utf-8'))),
-                   'analysis_catalog': CATALOG,
+                   'analysis_catalog': {key: value for key, value in CATALOG.items()
+                       if row['phase'] == 'fit' or key in {'quality', 'correlation', 'shift', 'groups', 'redundancy', 'entities'}},
                    'history': research_history([item for item in self.nodes if item is not row]),
                    'target_access': {'fit': row['phase'] == 'fit', 'validation': False, 'test': False},
-                   'focus': row['focus'], 'timeout_seconds': self.options.research_timeout}
+                   'focus': row['focus'], 'timeout_seconds': max(0., client.deadline - time.monotonic())
+                   if self.options.research_unlimited else self.options.research_timeout}
         context.pop('installed_libraries', None)  # AnalysisRequest already enumerates its ready estimators.
         context = compact(context)
         try:
@@ -131,7 +159,8 @@ class Research:
                 json.dumps(context, ensure_ascii=False, separators=(',', ':')), 'data_researcher')
             parents = {item['node_id'] for item in self.nodes if item['stage'] == 'completed'}
             if plan.parent_id is not None and plan.parent_id not in parents:
-                raise ValueError('Research parent must be a completed node')
+                self.agents.log('research_parent_ignored', research_node=row['node_id'], parent_id=plan.parent_id)
+                plan = plan.model_copy(update={'parent_id': None})
             start = {'node_id': row['node_id'], 'phase': row['phase'], 'context_revision': self.revision,
                      **plan.model_dump(), 'task_type': self.shared.get('requirements', {}).get('problem', {}).get('task_type'),
                      'preparation_sha256': file_hash(self.directory / 'preparation.json')}
@@ -141,7 +170,8 @@ class Research:
             self.stage(row, 'execution')
             try:
                 await self.process(['-m', 'agent.research_worker', '--root', str(self.directory), '--node', str(node)],
-                                   node, node / 'execution.log', self.agents.deadline, self.options.research_timeout)
+                                   node, node / 'execution.log', min(self.agents.deadline, self.phase_deadline or self.agents.deadline),
+                                   max(0., client.deadline - time.monotonic()) if self.options.research_unlimited else self.options.research_timeout)
             except TimeoutError:
                 if not (node / 'measurements.json').exists():
                     raise
@@ -193,6 +223,20 @@ class Research:
             if result['status'] == 'completed':
                 self.failures = 0
                 review = result['review']
+                path = self.directory / 'research' / 'nodes' / row['node_id'] / 'measurements.json'
+                measured = json.loads(path.read_text(encoding='utf-8'))['values'] if path.exists() else {}
+                for request in row.get('analyses', []):
+                    facts = measured.get(request['name'], {})
+                    if request['kind'] != 'feature' or facts.get('improvement', 0) <= 0:
+                        continue
+                    candidate = {'research_node': row['node_id'], 'features': request['features'],
+                        'columns': request.get('baseline_columns') or request.get('columns', []),
+                        'metric': facts['candidate']['metric'], 'improvement': facts['improvement'],
+                        'scope': 'Internal proxy holdout; not outer-validation evidence'}
+                    identity = fingerprint(candidate['features'])
+                    self.feature_candidates = [item for item in self.feature_candidates if fingerprint(item['features']) != identity]
+                    self.feature_candidates.append(candidate)
+                    self.feature_candidates = sorted(self.feature_candidates, key=lambda item: -item['improvement'])[:3]
                 self.questions = list(dict.fromkeys([q for q in self.questions if q not in review['resolves']]
                                                    + review['open_questions']))
                 for insight in self.insights:

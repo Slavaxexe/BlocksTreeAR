@@ -21,10 +21,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="Markdown с условием; пути к данным отсчитываются от его каталога.")
     parser.add_argument("--output-dir", type=Path, help="Новый каталог запуска; существующий не перезаписывается.")
     parser.add_argument("--time-budget", type=float, default=600)
+    parser.add_argument("--final-refit-seconds", type=float, default=300, help="Резерв на refit лучшего решения; 0 отключает. Входит в общий time-budget.")
     parser.add_argument("--experiment-timeout", type=float, default=240)
     parser.add_argument("--max-experiments", type=int, default=10, help="Всего нод, включая baseline.")
     parser.add_argument("--parallel", type=int, default=6, help="Одновременных нод основного дерева: по умолчанию 6.")
-    parser.add_argument("--research-parallel", type=int, default=0, help="Одновременных нод исследования данных; по умолчанию отключено.")
+    parser.add_argument("--research-parallel", type=int, default=2, help="Одновременных нод исследования данных; по умолчанию 2, 0 отключает.")
+    parser.add_argument("--eda-fraction", type=float, default=.15, help="Доля общего времени для начального EDA после сохранения baseline; по умолчанию 0.15.")
+    parser.add_argument("--research-unlimited", action="store_true", help="Убрать отдельные лимиты EDA по нодам, времени, вызовам и последовательным ошибкам; общий бюджет прогона и таймауты API остаются.")
     parser.add_argument("--max-research-nodes", type=int, default=12, help="Всего исследовательских нод на запуск.")
     parser.add_argument("--research-timeout", type=float, default=60, help="Лимит выполнения одного исследования, секунд.")
     parser.add_argument("--parallel-agents", type=int, default=8, help="Одновременных обращений к Qwen для всех ролей.")
@@ -55,7 +58,9 @@ def main(argv: list[str] | None = None) -> int:
                     output_dir=output, max_experiments=args.max_experiments if args.command == "search" else 1,
                     parallel=args.parallel, parallel_agents=args.parallel_agents, max_llm_calls=args.max_llm_calls,
                     max_code_attempts=args.max_code_attempts, research_parallel=args.research_parallel,
-                    max_research_nodes=args.max_research_nodes, research_timeout=args.research_timeout, automl=args.automl)
+                    max_research_nodes=args.max_research_nodes, research_timeout=args.research_timeout, automl=args.automl,
+                    final_refit_seconds=args.final_refit_seconds, eda_fraction=args.eda_fraction,
+                    research_unlimited=args.research_unlimited)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")

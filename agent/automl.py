@@ -4,7 +4,6 @@ from pathlib import Path
 import json
 import re
 import time
-from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -65,7 +64,7 @@ def _features(fit, validation, test, targets, ids):
     return frames
 
 
-def _fit_flaml(x, y, metric, classification, runtime, seed, plan):
+def _fit_flaml(x, y, metric, classification, runtime, seed, plan, validation=None, weights=None):
     from flaml import AutoML
     from flaml.automl.model import CatBoostEstimator
 
@@ -113,6 +112,10 @@ def _fit_flaml(x, y, metric, classification, runtime, seed, plan):
             'train_time_limit': min(30., budget / 4)}
     else:
         validation_options['split_ratio'] = plan.holdout_fraction
+    if validation is not None:
+        validation_options = {'eval_method': 'holdout', 'X_val': validation[0], 'y_val': validation[1],
+                              'retrain_full': False, 'sample': False,
+                              'train_time_limit': min(30., budget / 4)}
     models, parameters = model_settings(plan, smoke)
     model.fit(X_train=x, y_train=y, task='classification' if classification else 'regression',
               metric=metric, time_budget=budget,
@@ -122,12 +125,14 @@ def _fit_flaml(x, y, metric, classification, runtime, seed, plan):
               mem_thres=int(float(runtime.get('memory_limit_gb', 6)) * 1024 ** 3),
               log_file_name=str(Path(runtime.get('work_directory', '.')) /
                                 ('flaml_smoke_search.jsonl' if smoke else 'flaml_full_search.jsonl')),
-              **validation_options, model_history=False, seed=seed, verbose=1)
+              **validation_options, **({'sample_weight': weights} if weights is not None else {}),
+              model_history=False, seed=seed, verbose=1)
+    # A fixed one-trial replay fits directly, without an inner validation score.
     return model, {'best_estimator': model.best_estimator, 'best_config': model.best_config,
-                   'inner_best_loss': float(model.best_loss)}
+                   'inner_best_loss': float(model.best_loss) if np.isfinite(model.best_loss) else None}
 
 
-def _fit_autogluon(x, y, metric, classification, runtime, seed, plan):
+def _fit_autogluon(x, y, metric, classification, runtime, seed, plan, validation=None, weights=None):
     from autogluon.tabular import TabularPredictor
 
     label = '__automl_target__'
@@ -135,18 +140,27 @@ def _fit_autogluon(x, y, metric, classification, runtime, seed, plan):
         label += '_'
     data = x.copy()
     data[label] = y.to_numpy()
-    if classification and int(y.value_counts().min()) < 2:
+    if classification and validation is None and int(y.value_counts().min()) < 2:
         raise ValueError('AutoGluon inner validation requires at least two fit rows per class')
     smoke = bool(runtime.get("is_smoke_check"))
     bags = 0 if smoke else (plan.bag_folds or (plan.folds if plan.validation == "cv" else 0))
     fraction = max(plan.holdout_fraction, min(0.5, (y.nunique() + 1) / len(y))) if classification else plan.holdout_fraction
     if bags:
         train, tune = data, None
+    elif validation is not None:
+        train, tune = data, validation[0].copy()
+        tune[label] = np.asarray(validation[1])
     else:
         train, tune = train_test_split(data, test_size=fraction, random_state=seed,
                                       stratify=y if classification else None)
-    path = Path(runtime.get('work_directory', '.')) / f'autogluon_{uuid4().hex}'
-    model = TabularPredictor(label=label, eval_metric=metric,
+    path = Path(runtime.get('work_directory', '.')) / 'autogluon'
+    weighting = {}
+    if weights is not None:
+        weight_column = label + '_weight'
+        train[weight_column] = weights
+        tune[weight_column] = 1.
+        weighting = {'sample_weight': weight_column, 'weight_evaluation': False}
+    model = TabularPredictor(label=label, eval_metric=metric, **weighting,
                             problem_type=('binary' if y.nunique() == 2 else 'multiclass')
                             if classification else 'regression', path=str(path), verbosity=1,
                             learner_kwargs={'label_count_threshold': 1})
@@ -165,6 +179,9 @@ def _fit_autogluon(x, y, metric, classification, runtime, seed, plan):
               num_stack_levels=0 if smoke else plan.stack_levels,
               dynamic_stacking=False, calibrate_decision_threshold=False,
               fit_weighted_ensemble=False if smoke else (True if plan.ensemble is None else plan.ensemble))
+    # Keep only the winning predictor and the models it actually depends on.
+    model.delete_models(models_to_keep='best', dry_run=False)
+    # Retain the single native training cache needed by refit_full; no copies in child nodes.
     return model, {'best_model': model.model_best, 'model_directory': str(path),
                    'inner_fit_rows': len(train), 'inner_validation_rows': len(tune) if tune is not None else len(data),
                    'inner_validation': 'out_of_fold' if bags else 'holdout', 'bag_folds': bags}
@@ -187,7 +204,7 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
 
     task_type/prediction_type/class_labels should come from extracted requirements.
     Unknown metrics or ambiguous multi-class probability schemas fail explicitly.
-    Group/time splits are excluded until their inner validation policy is provided.
+    Feature-aware and group/time candidates use an explicit inner holdout, then frozen refit.
     """
     plan = AutoMLPlan.model_validate(config or {'engine': engine})
     if plan.engine != engine:
@@ -204,10 +221,12 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
     targets = binding.get('target_columns', [])
     if len(targets) != 1:
         raise ValueError('Built-in AutoML requires exactly one supervised target')
-    validation_policy = preparation.get('validation', {})
-    strategy = str(validation_policy.get('strategy', '')).lower()
-    if validation_policy.get('group_columns') or any(word in strategy for word in ('time', 'temporal', 'group')):
-        raise ValueError('Built-in AutoML is not enabled for temporal/group validation yet')
+    from .validation import metadata, strategy
+    validation_policy = metadata(preparation.get('validation', {}))
+    if plan.split_column:
+        validation_policy.update(time_column=plan.split_column, strategy='time')
+    if plan.group_by:
+        validation_policy.update(group_columns=[plan.group_by], strategy='group')
     name = re.sub(r'[^a-z0-9]', '', str(preparation['metric'].get('name', '')).lower())
     if name not in _METRICS:
         raise ValueError(f'Built-in AutoML does not have a verified mapping for metric {name!r}')
@@ -222,8 +241,11 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
             raise ValueError('AutoML task type conflicts with its metric')
     target = targets[0]
     ids = binding.get('id_columns', [])
-    fit, validation, test = create_features([state['fit'], state['validation'], state['test']],
-                                            plan.features, forbidden=targets)
+    inherited = state['fit'].attrs.get('feature_recipes', [])
+    recipes = [*inherited, *(feature.model_dump() for feature in plan.features)]
+    created = [recipe['name'] for recipe in inherited]
+    raw = [state[scope].drop(columns=created) for scope in ('fit', 'validation', 'test')]
+    fit, validation, test = create_features(raw, recipes, forbidden=targets, policy=validation_policy)
     columns = plan.columns or [c for c in fit if c not in {*targets, *ids}]
     columns = list(dict.fromkeys([*columns, *(feature.name for feature in plan.features)]))
     if set(columns) & set(targets):
@@ -245,12 +267,47 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
         seed_value = validation_policy.get('random_state')
     seed = int(seed_value if seed_value is not None else 42)
     started = time.monotonic()
+    explicit = bool(recipes or plan.row_weights or strategy(validation_policy) != 'random')
+    selection_x, selection_y, selection_runtime = x, y, runtime
+    tuning, weights, refit_weights = None, None, None
+    if explicit:
+        from .eda import _inner_split
+        from .plans import AnalysisRequest
+        from .supervised_features import row_weights
+        if plan.validation != 'holdout' or plan.bag_folds or plan.stack_levels or (engine == 'flaml' and plan.ensemble):
+            raise ValueError('Feature/group/time-aware AutoML requires holdout without bagging/stacking; combine completed nodes separately')
+        request = AnalysisRequest(name='automl_selection', kind='predictive', seed=seed,
+                                  validation_fraction=plan.holdout_fraction)
+        train_rows, valid_rows = _inner_split(raw[0], y, request, validation_policy, classification)
+        inner_fit, inner_valid = create_features([raw[0].iloc[train_rows], raw[0].iloc[valid_rows]],
+                                                 recipes, forbidden=targets, policy=validation_policy)
+        selection_x, tune_x, _ = _features(inner_fit[columns], inner_valid[columns], inner_valid[columns], targets, ids)
+        selection_y = y.iloc[train_rows].reset_index(drop=True)
+        tuning = (tune_x, y.iloc[valid_rows].reset_index(drop=True))
+        selection_runtime = {**runtime, 'deadline': time.monotonic() + _remaining(runtime) * .6}
+        if plan.row_weights:
+            parameters = plan.row_weights.model_dump()
+            weights = row_weights(raw[0].iloc[train_rows], parameters)
+            refit_weights = row_weights(raw[0], parameters)
     if engine == 'flaml':
-        model, diagnostics = _fit_flaml(x, y, flaml_metric, classification, runtime, seed, plan)
+        model, diagnostics = _fit_flaml(selection_x, selection_y, flaml_metric, classification,
+                                      selection_runtime, seed, plan, tuning, weights)
     elif engine == 'autogluon':
-        model, diagnostics = _fit_autogluon(x, y, ag_metric, classification, runtime, seed, plan)
+        model, diagnostics = _fit_autogluon(selection_x, selection_y, ag_metric, classification,
+                                          selection_runtime, seed, plan, tuning, weights)
     else:
         raise ValueError(f'Unknown built-in AutoML engine: {engine}')
+    if explicit:
+        import cloudpickle
+        from .selected_model import freeze
+        from .storage import atomic_bytes
+        model = freeze(model, engine, classification).refit(x, y, runtime, refit_weights)
+        selected_file = Path(runtime['work_directory']) / 'selected_model.pkl'
+        atomic_bytes(selected_file, cloudpickle.dumps(model))
+        diagnostics.update(selected_model_file=str(selected_file), refitted_on_fit=True,
+                           inner_fit_rows=len(train_rows), inner_validation_rows=len(valid_rows),
+                           inner_validation='explicit_holdout', recipe_statistics='inner_train_only',
+                           full_fit_rows=len(fit))
     columns = [column for column in preparation['output'].get('columns', []) if column not in ids]
     if not columns:
         columns = [target]
@@ -291,6 +348,23 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
         return attach_probabilities(pd.DataFrame(values[:, order], columns=columns), values, classes)
 
     valid_predictions, test_predictions = predict(valid_x), predict(test_x)
+    if not runtime.get('is_smoke_check') and runtime.get('fit_row_positions') is not None:
+        import io
+        from .storage import atomic_bytes
+        buffer = io.BytesIO()
+        np.savez(buffer, rows=runtime['fit_row_positions'])
+        atomic_bytes(Path(runtime['work_directory']) / 'training_rows.npz', buffer.getvalue())
+    if engine == 'flaml' and not explicit and not runtime.get('is_smoke_check'):
+        import cloudpickle
+        from .storage import atomic_bytes
+        # Persist inference components, not AutoML search state and copies of training data.
+        snapshot = {'model': model.model, 'feature_transformer': model.feature_transformer,
+                    'label_transformer': model.label_transformer, 'columns': list(x.columns),
+                    'categories': {column: x[column].cat.categories.tolist()
+                                   for column in x.select_dtypes(include='category')}}
+        model_file = Path(runtime['work_directory']) / 'model.pkl'
+        atomic_bytes(model_file, cloudpickle.dumps(snapshot))
+        diagnostics['model_file'] = str(model_file)
     diagnostics.update(configuration=plan.model_dump(), engine=engine, elapsed_seconds=time.monotonic() - started,
                        fit_rows=len(fit), feature_count=x.shape[1], target=target,
                        prediction_type='probabilities' if probability else 'values')

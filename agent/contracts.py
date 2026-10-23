@@ -1,9 +1,10 @@
 """Stable JSON envelopes; task names and algorithms are deliberately open-ended."""
 
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from .plans import AutoMLPlan, AnalysisRequest, ToolCall, EnsemblePlan
+from .validation import metadata
 
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 NodeID = Annotated[str, Field(pattern=r"^node_[0-9]{3}$")]
@@ -129,6 +130,8 @@ class PreparationDraft(Contract):
     output: OutputBinding
     code: str = Field(min_length=1, description="Complete prepare.py source implementing the requested Python interface")
 
+    normalize_validation = field_validator('validation')(metadata)
+
 
 class Preparation(Contract):
     schema_version: Literal[2] = 2
@@ -144,6 +147,8 @@ class Preparation(Contract):
     source_hashes: dict[str, str] = Field(default_factory=dict)
     code_sha256: SHA256
     issues: list[str] = Field(default_factory=list)
+
+    normalize_validation = field_validator('validation')(metadata)
 
 
 class Pipeline(Contract):
@@ -289,8 +294,8 @@ class Ideas(Contract):
                     if not set(idea.ensemble.source_nodes) <= sources.keys():
                         raise ValueError('Select completed sources from prediction_sources')
                     selected = [sources[node] for node in idea.ensemble.source_nodes]
-                    if idea.ensemble.method in {'stacking', 'gating'} and not all(item['oof_recipe'] for item in selected):
-                        raise ValueError('Learned ensembles need trainable source recipes for fit-only OOF')
+                    if (idea.ensemble.method in {'stacking', 'gating'} or idea.ensemble.optimize_weights) and not all(item.get('meta_ready', item.get('oof_recipe', False)) for item in selected):
+                        raise ValueError('Learned ensembles need meta_ready sources with saved held-out predictions; sources are not retrained')
                     if (idea.ensemble.method == 'probabilities' or idea.ensemble.combine == 'probabilities') and not all(
                             item['probabilities'] for item in selected):
                         raise ValueError('These sources have no saved probabilities; use vote/mean')
@@ -586,7 +591,7 @@ class LLMCall(Contract):
 class RunReport(Contract):
     schema_version: Literal[2] = 2
     status: Literal["running", "ready", "partial", "failed"]
-    stage: Literal["extraction", "preparation", "data_research", "baseline", "search", "complete"] = "extraction"
+    stage: Literal["extraction", "preparation", "data_research", "baseline", "search", "final_refit", "complete"] = "extraction"
     mode: Literal["qwen"] = "qwen"
     task_sha256: SHA256
     checks: list[str] = Field(default_factory=list)

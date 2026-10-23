@@ -40,22 +40,16 @@ class Search:
     def seed_automl(self):
         """Queue the fixed portfolio once, after a working initial predictor exists."""
         self.automl_seeded = True
-        if not self.options.automl:
+        if not self.options.automl or self.shared.get('initial_eda'):
             return
         preparation = self.shared['preparation']
         requirements = self.shared['requirements']
         problem = requirements.get('problem', {})
         task = str(problem.get('task_type') or '').lower()
         metric = str(preparation['metric'].get('name') or '').lower().replace('-', '_').replace(' ', '_')
-        validation = preparation.get('validation', {})
-        split_description = ' '.join(str(validation.get(key) or '') for key in
-                                     ('strategy', 'method', 'scheme', 'split_type')).lower()
         if (len(preparation['data']['target_columns']) != 1
                 or not any(kind in task for kind in ('regression', 'classification', 'binary', 'multiclass'))
                 or any(kind in task for kind in ('multioutput', 'multilabel', 'forecast', 'rank'))
-                or validation.get('group_columns')
-                or validation.get('time_column') or validation.get('time_columns')
-                or any(kind in split_description for kind in ('temporal', 'time_series', 'chronological', 'time_based', 'group', 'time'))
                 or metric not in {'rmse', 'root_mean_squared_error', 'mae', 'mean_absolute_error',
                                   'mse', 'mean_squared_error', 'r2', 'r2_score', 'accuracy', 'accuracy_score',
                                   'roc_auc', 'auc', 'log_loss', 'logloss', 'f1', 'f1_macro', 'macro_f1'}):

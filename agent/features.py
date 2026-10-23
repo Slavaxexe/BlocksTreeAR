@@ -5,7 +5,23 @@ import pandas as pd
 from .plans import FeatureSpec
 
 
-def create_features(frames, recipes, *, forbidden=()):
+SUPERVISED_GUIDE = (
+    'history: columns=single/composite key; parameters={time_column,value_column,'
+    'aggregation:last/mean/sum/std/min/max/count/trend/age,window:null or number of distinct periods,'
+    'lag:1,min_history:1,max_age:null,fallback:missing/global,class_label:null}. '
+    'value_column may be a declared target ONLY here: every row uses fit values with strictly earlier time, '
+    'excluding the same period and future; duplicate key/time values are aggregated. '
+    'target_encoding: columns=key, parameters={target,smoothing:10,folds:5,seed:42,validation:auto/random/group/time,'
+    'group_column:null,time_column:null,class_label:null}. Training rows are encoded out of fold; '
+    'queries use fit only; temporal encoding uses strictly earlier data. Use class_label for categorical targets. '
+    'AutoML supports these recipes with holdout and bag_folds=stack_levels=0; '
+    'feature statistics are rebuilt on inner train, then the selected model is refit on all fit. '
+    'FLAML internal ensemble must be false; saved ensembles remain available. Time/group inputs cannot be targets.')
+
+
+def create_features(frames, recipes, *, forbidden=(), policy=None):
+    from .validation import metadata
+    policy = metadata(policy)
     frames = [frame.reset_index(drop=True).copy() for frame in frames]
     recipes = [value if isinstance(value, FeatureSpec) else FeatureSpec.model_validate(value) for value in recipes]
     inherited = frames[0].attrs.get('feature_recipes', [])
@@ -19,7 +35,22 @@ def create_features(frames, recipes, *, forbidden=()):
         if not set(columns) <= set(frames[0]):
             raise ValueError(f'Unknown feature inputs: {sorted(set(columns) - set(frames[0]))}')
         fit = frames[0]
-        if op == 'frequency':
+        if op in {'history', 'target_encoding'}:
+            from .supervised_features import history, target_encoding
+            protected = {parameters.get('time_column'), parameters.get('group_column')} & set(forbidden)
+            if protected:
+                raise ValueError('Target cannot define a time or grouping column')
+            if op == 'target_encoding' and parameters['target'] not in forbidden:
+                raise ValueError('Target encoding must name a declared task target')
+            results = (history(frames, columns, parameters) if op == 'history' else
+                       target_encoding(frames, columns, parameters, policy or {}))
+            for frame, result in zip(frames, results):
+                frame[spec.name] = np.where(np.isfinite(result), result, np.nan)
+            continue
+        if op == 'expression':
+            from .feature_expression import FeatureExpression
+            expression = FeatureExpression(parameters['expression'], columns).fit(fit)
+        elif op == 'frequency':
             frequencies = fit[columns[0]].astype('string').fillna('__missing__').value_counts(normalize=True)
         elif op == 'clip':
             bounds = pd.to_numeric(fit[columns[0]], errors='coerce').quantile(
@@ -31,7 +62,9 @@ def create_features(frames, recipes, *, forbidden=()):
             averages = values.groupby(fit[columns[0]].astype('string').fillna('__missing__')).mean()
             fallback = values.mean()
         for frame in frames:
-            if op == 'missing':
+            if op == 'expression':
+                result = expression.transform(frame)
+            elif op == 'missing':
                 result = frame[columns].isna().any(axis=1).astype(int)
             elif op == 'frequency':
                 result = frame[columns[0]].astype('string').fillna('__missing__').map(frequencies).fillna(0)

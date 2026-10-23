@@ -1,5 +1,357 @@
 {
   "$defs": {
+    "AutoMLPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
+          "enum": [
+            "flaml",
+            "autogluon"
+          ],
+          "title": "Engine",
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Models",
+          "type": "array"
+        },
+        "model_parameters": {
+          "additionalProperties": {
+            "type": "object"
+          },
+          "title": "Model Parameters",
+          "type": "object"
+        },
+        "search_space": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/SearchSpace"
+            },
+            "type": "object"
+          },
+          "title": "Search Space",
+          "type": "object"
+        },
+        "num_trials": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Num Trials"
+        },
+        "validation": {
+          "default": "holdout",
+          "enum": [
+            "holdout",
+            "cv"
+          ],
+          "title": "Validation",
+          "type": "string"
+        },
+        "folds": {
+          "default": 3,
+          "minimum": 2,
+          "title": "Folds",
+          "type": "integer"
+        },
+        "holdout_fraction": {
+          "default": 0.2,
+          "exclusiveMaximum": 1.0,
+          "exclusiveMinimum": 0.0,
+          "title": "Holdout Fraction",
+          "type": "number"
+        },
+        "split_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit ordered column for the inner holdout; outer split stays fixed",
+          "title": "Split Column"
+        },
+        "group_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit grouping column for the inner holdout",
+          "title": "Group By"
+        },
+        "bag_folds": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Bag Folds",
+          "type": "integer"
+        },
+        "stack_levels": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stack Levels",
+          "type": "integer"
+        },
+        "ensemble": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ensemble"
+        },
+        "budget_fraction": {
+          "default": 1.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "title": "Budget Fraction",
+          "type": "number"
+        },
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "drop_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Drop Columns",
+          "type": "array"
+        },
+        "features": {
+          "items": {
+            "$ref": "#/$defs/FeatureSpec"
+          },
+          "title": "Features",
+          "type": "array"
+        },
+        "row_weights": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RowWeights"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "engine"
+      ],
+      "title": "AutoMLPlan",
+      "type": "object"
+    },
+    "BlendRule": {
+      "additionalProperties": false,
+      "properties": {
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/RowFilter"
+          },
+          "minItems": 1,
+          "title": "Conditions",
+          "type": "array"
+        },
+        "weights": {
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "title": "Weights",
+          "type": "array"
+        }
+      },
+      "required": [
+        "conditions",
+        "weights"
+      ],
+      "title": "BlendRule",
+      "type": "object"
+    },
+    "EnsemblePlan": {
+      "additionalProperties": false,
+      "properties": {
+        "source_nodes": {
+          "description": "Completed nodes from prediction_sources, on the same preparation",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Source Nodes",
+          "type": "array"
+        },
+        "method": {
+          "enum": [
+            "mean",
+            "vote",
+            "probabilities",
+            "conditional",
+            "stacking",
+            "gating"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "weights": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Weights",
+          "type": "array"
+        },
+        "optimize_weights": {
+          "default": false,
+          "description": "Tune nonnegative blend weights on saved inner-holdout predictions, never outer validation",
+          "title": "Optimize Weights",
+          "type": "boolean"
+        },
+        "weight_trials": {
+          "default": 64,
+          "description": "Maximum local weight candidates, no LLM calls",
+          "minimum": 1,
+          "title": "Weight Trials",
+          "type": "integer"
+        },
+        "combine": {
+          "anyOf": [
+            {
+              "enum": [
+                "mean",
+                "vote",
+                "probabilities"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Combine"
+        },
+        "rules": {
+          "description": "First matching rule wins; default weights apply otherwise",
+          "items": {
+            "$ref": "#/$defs/BlendRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "estimator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Installed sklearn-compatible class path; stacking defaults to LogisticRegression/Ridge, gating to shallow DecisionTreeClassifier with predict_proba",
+          "title": "Estimator"
+        },
+        "parameters": {
+          "description": "Combiner constructor kwargs, not source-model settings",
+          "title": "Parameters",
+          "type": "object"
+        },
+        "feature_columns": {
+          "description": "Raw features for gating or stacking passthrough; [] selects all allowed features",
+          "items": {
+            "type": "string"
+          },
+          "title": "Feature Columns",
+          "type": "array"
+        },
+        "passthrough": {
+          "default": false,
+          "description": "Stacking also sees preprocessed raw features alongside source predictions; supports nonlinear dependencies",
+          "title": "Passthrough",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source_nodes",
+        "method"
+      ],
+      "title": "EnsemblePlan",
+      "type": "object"
+    },
+    "FeatureSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "sum",
+            "mean",
+            "product",
+            "difference",
+            "ratio",
+            "signed_log",
+            "missing",
+            "frequency",
+            "clip",
+            "group_mean",
+            "datetime",
+            "expression",
+            "history",
+            "target_encoding"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        },
+        "parameters": {
+          "description": "For expression use {expression: formula}; x0/x1 or col(quoted column) read declared columns. Compose arithmetic, conditions, log1p, abs, sqrt, where, clip, frequency and group_mean/group_std/group_count. Statistics learn only on fit.",
+          "title": "Parameters",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "operation",
+        "columns"
+      ],
+      "title": "FeatureSpec",
+      "type": "object"
+    },
     "Idea": {
       "additionalProperties": false,
       "properties": {
@@ -43,6 +395,30 @@
           "minLength": 1,
           "title": "Expected Effect",
           "type": "string"
+        },
+        "automl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AutoMLPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Executable AutoML configuration; null for composed trusted operations"
+        },
+        "ensemble": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnsemblePlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Combine completed prediction sources; compiled without a node-planner call"
         },
         "priority": {
           "default": 50,
@@ -103,6 +479,120 @@
         "reason"
       ],
       "title": "IdeaUpdate",
+      "type": "object"
+    },
+    "RowFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "eq",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "isin",
+            "isna",
+            "notna"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "column",
+        "operation"
+      ],
+      "title": "RowFilter",
+      "type": "object"
+    },
+    "RowWeights": {
+      "additionalProperties": false,
+      "properties": {
+        "time_column": {
+          "title": "Time Column",
+          "type": "string"
+        },
+        "half_life": {
+          "description": "Numeric time units, or days for timestamps; weight halves per half_life",
+          "exclusiveMinimum": 0.0,
+          "title": "Half Life",
+          "type": "number"
+        }
+      },
+      "required": [
+        "time_column",
+        "half_life"
+      ],
+      "title": "RowWeights",
+      "type": "object"
+    },
+    "SearchSpace": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "int",
+            "float",
+            "categorical"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "low": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Low"
+        },
+        "high": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "High"
+        },
+        "log": {
+          "default": false,
+          "title": "Log",
+          "type": "boolean"
+        },
+        "choices": {
+          "items": {},
+          "title": "Choices",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "SearchSpace",
       "type": "object"
     }
   },

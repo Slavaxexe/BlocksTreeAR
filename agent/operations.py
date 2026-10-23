@@ -10,7 +10,7 @@ from sklearn.metrics import get_scorer
 from sklearn.preprocessing import LabelEncoder
 
 from .eda import SCORERS, _inner_split, _matrix
-from .features import create_features
+from .features import SUPERVISED_GUIDE, create_features
 from .plans import AnalysisRequest, AutoMLPlan, SearchSpace, ToolCall
 
 
@@ -18,22 +18,29 @@ CATALOG = {
     'constant': {'requires': ['fit', 'validation', 'test', 'preparation'],
                  'provides': ['validation_predictions', 'test_predictions'], 'parameters': 'No settings: cheap mean/mode/prior baseline.'},
     'features': {'requires': ['fit', 'validation', 'test', 'preparation'],
-                 'provides': ['fit_table', 'validation_table', 'test_table'], 'parameters': 'recipes: [{name,operation,columns,parameters}]. Operations: sum/mean/product/missing (one or more columns); difference/ratio (two); signed_log/frequency (one); clip (one, lower=.01/upper=.99 quantiles); group_mean ([group,numeric]); datetime (one, part=year/month/day/dayofweek/hour). Fit-only statistics.'},
+                 'provides': ['fit_table', 'validation_table', 'test_table'], 'parameters': 'recipes: [{name,operation,columns,parameters}]. Operations: sum/mean/product/missing (one or more columns); difference/ratio (two); signed_log/frequency (one); clip (one, lower=.01/upper=.99 quantiles); group_mean ([group,numeric]); datetime (one, part=year/month/day/dayofweek/hour); expression: parameters.expression with x0/x1 or col(column_name), arithmetic, conditions, abs/log1p/log/exp/sqrt/sin/cos/tanh/minimum/maximum/where/clip/isna/fillna/length/lower/contains/concat/frequency/group_mean/group_std/group_count. Statistics are fit-only.'},
     'preprocess': {'requires': ['fit', 'validation', 'test', 'preparation'],
                    'provides': ['fit_features', 'fit_targets', 'validation_features', 'test_features', 'transformer'],
-                   'parameters': 'feature_columns: COMPLETE feature subset, []=all features; NOT a list of categorical columns. Categoricals are detected by dtype automatically. drop_columns removes from that subset. numeric_imputer=median/mean/constant; encoding=ordinal/onehot; scaling=none/standard/robust/minmax; pca_components optional.'},
+                   'parameters': 'feature_columns: COMPLETE feature subset, []=all features; NOT a list of categorical columns. Categoricals are detected by dtype automatically. drop_columns removes from that subset. numeric_imputer=median/mean/constant; encoding=ordinal/onehot/native; native_backend=catboost/lightgbm/xgboost; scaling=none/standard/robust/minmax; pca_components optional.'},
     'fit': {'requires': ['fit_features', 'fit_targets', 'transformer', 'fit', 'preparation'], 'provides': ['model'],
             'parameters': 'estimator: installed sklearn-compatible class path; parameters: constructor kwargs; search_space: domains {kind:int/float,low,high,log:false} or {kind:categorical,choices:[...]}; num_trials=10; validation=auto/random/group/time, group_by/split_column for one inner holdout (no CV/folds/OOF in this operation).'},
     'predict': {'requires': ['model', 'validation_features', 'test_features', 'preparation'],
                 'provides': ['validation_predictions', 'test_predictions'], 'parameters': 'output=required/probabilities. Use outputs aliases for ensemble inputs.'},
     'automl': {'requires': ['fit', 'validation', 'test', 'preparation'],
-               'provides': ['validation_predictions', 'test_predictions'], 'parameters': 'engine=flaml/autogluon; models:[str], model_parameters:{model:{kw:value}}, search_space:{model:{kw:typed_domain}}, num_trials; validation=holdout/cv, folds=3, holdout_fraction=.2; bag_folds=0/2+, stack_levels=0 (AutoGluon only); ensemble:bool; budget_fraction in (0,1]; columns/drop_columns, features:FeatureSpec list. No group/time adapter.'},
+               'provides': ['validation_predictions', 'test_predictions'], 'parameters': 'engine=flaml/autogluon; models:[str], model_parameters:{model:{kw:value}}, search_space:{model:{kw:typed_domain}}, num_trials; validation=holdout/cv, folds=3, holdout_fraction=.2; split_column/group_by optionally name the inner time/group column; otherwise use shared validation metadata. bag_folds=0/2+, stack_levels=0 (AutoGluon only); ensemble:bool; budget_fraction in (0,1]; columns/drop_columns, features:FeatureSpec list; row_weights:{time_column,half_life}. With recipes, weights or group/time policy: explicit fit-only holdout, no bagging/stacking (FLAML ensemble=false), then frozen refit on all fit. Without these constraints native CV is available.'},
     'saved_ensemble': {'requires': ['fit', 'validation', 'test', 'preparation', 'auxiliary'],
         'provides': ['validation_predictions', 'test_predictions'],
-        'parameters': 'EnsemblePlan: source_nodes, method=mean/vote/probabilities/conditional/stacking/gating. Cached blending needs no training. Conditional rules use input features. Learned methods train on fit-only OOF; folds, estimator/parameters, feature_columns and passthrough control them.'},
+        'parameters': 'EnsemblePlan: source_nodes, method=mean/vote/probabilities/conditional/stacking/gating. Cached blending needs no training. Conditional rules use input features. Learned methods train only the combiner on saved shared inner-holdout predictions (meta_ready sources); estimator/parameters, feature_columns and passthrough control them. optimize_weights=true tunes blend weights on saved meta_ready predictions; weight_trials=64. No source retraining.'},
     'ensemble': {'requires': ['preparation'], 'provides': ['validation_predictions', 'test_predictions'],
                  'parameters': 'sources: [[validation_state_key,test_state_key],...]; weights optional; method=mean/vote/probabilities. List every source state key in block.requires.'},
 }
+
+CATALOG['features']['parameters'] += ' ' + SUPERVISED_GUIDE
+CATALOG['fit']['parameters'] += (
+    ' row_weights:{time_column,half_life} optionally discounts older fit rows exponentially; numeric time units '
+    'or days for timestamps. Estimator must support sample_weight. seeds:[int,...] fits fixed parameters '
+    'with each seed and averages predictions (probabilities/votes for classifiers), within the same node budget. '
+    'Loss/objective and tree count are ordinary constructor parameters; no forced target transform.')
 
 
 def _classification(state, defaults):
@@ -114,11 +121,18 @@ def _preprocess(state, parameters):
     scalers = {'standard': StandardScaler, 'robust': RobustScaler, 'minmax': MinMaxScaler}
     if scaling != 'none':
         steps.append(scalers[scaling]())
-    encoding = (OneHotEncoder(handle_unknown='ignore', sparse_output=False) if parameters.get('encoding', 'ordinal') == 'onehot'
-                else OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
-    transformer = ColumnTransformer([('numeric', make_pipeline(*steps), numeric), ('categorical', encoding, categorical)])
-    if parameters.get('pca_components') is not None:
-        transformer = make_pipeline(transformer, PCA(n_components=parameters['pca_components'], random_state=42))
+    if parameters.get('encoding') == 'native':
+        from .native_categories import NativeCategories
+        if scaling != 'none' or parameters.get('pca_components') is not None:
+            raise ValueError('Native categories cannot be combined with scaling or PCA')
+        transformer = NativeCategories(parameters.get('native_backend', 'catboost'),
+                                       parameters.get('numeric_imputer', 'median'))
+    else:
+        encoding = (OneHotEncoder(handle_unknown='ignore', sparse_output=False) if parameters.get('encoding', 'ordinal') == 'onehot'
+                    else OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+        transformer = ColumnTransformer([('numeric', make_pipeline(*steps), numeric), ('categorical', encoding, categorical)])
+        if parameters.get('pca_components') is not None:
+            transformer = make_pipeline(transformer, PCA(n_components=parameters['pca_components'], random_state=42))
     arrays = [transformer.fit_transform(frames[0]), *(transformer.transform(frame) for frame in frames[1:])]
     # Keep the exact input table, including new features and group/time columns.
     transformer.fit_source_ = state['fit']
@@ -149,7 +163,7 @@ def _estimator(path, parameters, runtime):
         return value
     options = construct(dict(parameters))
     available = inspect.signature(factory).parameters
-    if 'random_state' in available:
+    if 'random_state' in available and 'random_seed' not in options:
         options.setdefault('random_state', 42)
     for key in ('n_jobs', 'thread_count'):
         if key in available:
@@ -173,6 +187,8 @@ def _suggest(trial, name, value):
 
 
 def _fit(state, parameters, defaults):
+    from .model_fitting import fit_model, fit_seeds
+    from .supervised_features import row_weights
     features, targets = state['fit_features'], state['fit_targets']
     classification = _classification(state, defaults)
     targets = np.asarray(targets)
@@ -186,10 +202,17 @@ def _fit(state, parameters, defaults):
         targets = labels.transform(targets)
     runtime = state['preparation'].get('runtime', {})
     options = dict(parameters.get('parameters', {}))
+    from .native_categories import NativeCategories
+    if isinstance(state['transformer'], NativeCategories):
+        options = state['transformer'].estimator_parameters(parameters['estimator'], options)
     model = _estimator(parameters['estimator'], options, runtime)
+    source = getattr(state['transformer'], 'fit_source_', state['fit']).reset_index(drop=True)
+    weights = row_weights(source, parameters['row_weights']) if parameters.get('row_weights') else None
     search = parameters.get('search_space', {})
     diagnostics = {'estimator': parameters['estimator'], 'fit_rows': len(targets),
-                   'parameters': options, 'inner_validation': None}
+                   'parameters': options, 'inner_validation': None,
+                   'row_weights': parameters.get('row_weights'), 'seeds': parameters.get('seeds', []),
+                   'weight_range': [float(weights.min()), float(weights.max())] if weights is not None else None}
     if search:
         # Check parameter names during smoke, before the expensive search.
         probe = {name: (domain.get('choices', [None])[0] if domain['kind'] == 'categorical' else domain['low'])
@@ -206,8 +229,16 @@ def _fit(state, parameters, defaults):
                                     state['preparation'].get('validation', {}), classification)
         recipes = source.attrs.get('feature_recipes', [])
         base = source.drop(columns=[recipe['name'] for recipe in recipes])
-        inner_fit, inner_valid = create_features([base.iloc[train], base.iloc[valid]], recipes,
-            forbidden=state['preparation']['data']['target_columns'])
+        inner_source = base.iloc[train]
+        inner_weights = row_weights(inner_source, parameters['row_weights']) if weights is not None else None
+        recipe_policy = dict(state['preparation'].get('validation', {}))
+        if request.validation != 'auto':
+            recipe_policy.update(strategy=request.validation,
+                group_columns=[request.group_by] if request.validation == 'group' and request.group_by else [])
+            if request.split_column:
+                recipe_policy['time_column'] = request.split_column
+        inner_fit, inner_valid = create_features([inner_source, base.iloc[valid]], recipes,
+            forbidden=state['preparation']['data']['target_columns'], policy=recipe_policy)
         columns = list(state['transformer'].feature_names_in_)
         transformer = clone(state['transformer'])
         inner_fit = transformer.fit_transform(_matrix(inner_fit, columns))
@@ -215,7 +246,7 @@ def _fit(state, parameters, defaults):
         def objective(trial):
             selected = {name: _suggest(trial, name, domain) for name, domain in search.items()}
             candidate = clone(model).set_params(**selected)
-            candidate.fit(inner_fit, targets[train])
+            fit_model(candidate, inner_fit, targets[train], inner_weights)
             return float(scorer(candidate, inner_valid, targets[valid]))
         study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=42))
         remaining = runtime.get('deadline', time.monotonic() + 60) - time.monotonic()
@@ -226,7 +257,7 @@ def _fit(state, parameters, defaults):
             completed_trials=sum(trial.state == optuna.trial.TrialState.COMPLETE for trial in study.trials),
             inner_validation={'method': 'single_holdout', 'splits': 1, 'strategy': request.validation,
                               'train_rows': len(train), 'validation_rows': len(valid)})
-    model.fit(features, targets)
+    model = fit_seeds(model, features, targets, weights, parameters.get('seeds', []), classification, runtime)
     return {'model': {'estimator': model, 'labels': labels, 'classification': classification,
                        'diagnostics': diagnostics}}
 
@@ -309,18 +340,37 @@ def run_operation(state, value, defaults=None):
     elif call.kind == 'features':
         targets = state['preparation']['data']['target_columns']
         frames = create_features([state[key] for key in ('fit', 'validation', 'test')],
-                                 call.parameters.get('recipes', []), forbidden=targets)
+                                 call.parameters.get('recipes', []), forbidden=targets,
+                                 policy=state['preparation'].get('validation', {}))
         result = dict(zip(('fit_table', 'validation_table', 'test_table'), frames))
     elif call.kind == 'preprocess':
         result = _preprocess(state, call.parameters)
     elif call.kind == 'fit':
-        result = _fit(state, call.parameters, defaults)
+        from .training_cache import cached
+        result = cached(state, call, defaults, lambda inputs: _fit(inputs, call.parameters, defaults))
     elif call.kind == 'predict':
         result = _predict(state, call.parameters, defaults)
     elif call.kind == 'automl':
         from .automl import run_automl
         plan = AutoMLPlan.model_validate(call.parameters)
-        result = run_automl(state, engine=plan.engine, config=plan.model_dump(), **defaults)
+        from .training_cache import cached
+        from tempfile import TemporaryDirectory
+        def train(inputs):
+            return run_automl(inputs, engine=plan.engine, config=plan.model_dump(), **defaults)
+        runtime = state['preparation'].get('runtime', {})
+        if runtime.get('is_smoke_check'):
+            # Tiny smoke predictors are disposable; do not keep another AutoGluon model tree.
+            with TemporaryDirectory(prefix='automl-smoke-') as temporary:
+                metadata = {**state['preparation'], 'runtime': {**runtime, 'work_directory': temporary}}
+                result = train({**state, 'preparation': metadata})
+        else:
+            result = cached(state, call, defaults, train)
+        if runtime.get('work_directory'):
+            from .storage import save
+            from pathlib import Path
+            phase = 'smoke' if runtime.get('is_smoke_check') else 'full'
+            save(Path(runtime['work_directory']) / f'{plan.engine}_{phase}_diagnostics.json',
+                 result['automl_diagnostics'])
     elif call.kind == 'saved_ensemble':
         from .ensembles import run_saved_ensemble
         result = run_saved_ensemble(state, call.parameters, defaults)

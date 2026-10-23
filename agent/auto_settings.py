@@ -32,4 +32,9 @@ def model_settings(plan, smoke=False):
     if plan.engine == 'flaml':
         parameters = {name: {key: {'domain': value} for key, value in fields.items()}
                       for name, fields in parameters.items() if fields}
+        # FLAML's single-trial path reads init_value, not the search domain.
+        for name, fields in parameters.items():
+            for key, setting in fields.items():
+                if key not in plan.search_space.get(name, {}):
+                    setting['init_value'] = setting['domain']
     return models, parameters

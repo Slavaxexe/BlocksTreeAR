@@ -27,6 +27,7 @@ CAPABILITIES = {
         'Optional model families still require their installed dependencies; pretrained downloads are unavailable.',
         'is_unbalance and scale_pos_weight are binary-classification settings, not generic multiclass balancing.',
         'CV stays within fit; the shared outer split and metric are fixed.',
+        'Features or group/time policy use an explicit inner holdout and frozen full-fit refit; no bagging/stacking or FLAML internal ensemble in this mode. Saved ensembles remain available.',
     ]} for engine, names in MODELS.items()
 }
 

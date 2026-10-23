@@ -44,27 +44,32 @@ def block_catalog(directory: Path, nodes) -> dict:
     return catalog
 
 
+def block_path(node: Path, name: str) -> Path:
+    local = node / 'modules' / (name + '.py')
+    if local.exists():
+        return local
+    start = load(node / 'start.json', Start)
+    block = next(block for block in start.assembly.blocks if block.name == name)
+    source = node.parent / block.source_node
+    return block_path(source, name)
+
+
 def initialize(node: Path, start: Start):
-    """Copy reused bytes once. A node never imports mutable files from another node."""
+    """Reused blocks stay in their owner node; repairs write a local replacement."""
     (node / 'modules').mkdir(parents=True)
     for block in start.assembly.blocks:
         if block.source_node is None:
             continue
-        source = node.parent / block.source_node / 'modules' / f'{block.name}.py'
-        expected = start.context['source_hashes'][block.name]
-        if file_hash(source) != expected:
+        source = block_path(node.parent / block.source_node, block.name)
+        if file_hash(source) != start.context['source_hashes'][block.name]:
             raise BlockError(block.name, 'Source block changed after planning')
-        atomic_bytes(node / 'modules' / source.name, source.read_bytes())
-        configuration = source.with_suffix('.json')
-        if configuration.exists():
-            atomic_bytes(node / 'modules' / configuration.name, configuration.read_bytes())
     atomic_bytes(node / start.implementation, WRAPPER.encode('utf-8'))
 
 
 def assemble(node: Path, start: Start) -> str:
     blocks = []
     for block in start.assembly.blocks:
-        path = node / 'modules' / f'{block.name}.py'
+        path = block_path(node, block.name)
         try:
             check_code(path.read_text(encoding='utf-8'), ('run',))
         except (OSError, ValueError) as error:
@@ -84,7 +89,7 @@ def implementation_hash(node: Path) -> str:
     digest = hashlib.sha256((node / 'experiment.py').read_bytes())
     digest.update((node / 'assembly.json').read_bytes())
     for block in manifest['blocks']:
-        path = node / 'modules' / f"{block['name']}.py"
+        path = block_path(node, block['name'])
         if file_hash(path) != block['sha256']:
             raise BlockError(block['name'], 'Assembled block changed after its check')
         digest.update(path.read_bytes())
@@ -92,7 +97,8 @@ def implementation_hash(node: Path) -> str:
 
 
 def sources(node: Path) -> dict[str, str]:
-    return {path.stem: path.read_text(encoding='utf-8') for path in sorted((node / 'modules').glob('*.py'))}
+    start = load(node / 'start.json', Start)
+    return {block.name: block_path(node, block.name).read_text(encoding='utf-8') for block in start.assembly.blocks}
 
 
 def execute(node: Path, fit, validation, test, preparation, auxiliary=None):
@@ -118,7 +124,7 @@ def execute(node: Path, fit, validation, test, preparation, auxiliary=None):
             missing = set(block['requires']) - state.keys()
             if missing:
                 raise ValueError(f'Missing state inputs: {sorted(missing)}')
-            program = module(node / 'modules' / f'{name}.py', block['sha256'])
+            program = module(block_path(node, name), block['sha256'])
             updates = program.run(MappingProxyType(state))
             if not isinstance(updates, dict):
                 raise ValueError('run(state) must return a dict of state updates')

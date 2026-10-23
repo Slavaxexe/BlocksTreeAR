@@ -183,7 +183,7 @@ def analyzer_context(context):
                        'hypothesis': {'rationale': row['hypothesis']['rationale'],
                                       'pipeline': row['hypothesis']['pipeline']}, 'result': row['result']},
         'saved_operations': operations, 'comparisons': comparisons,
-        'automl_diagnostics': [{key: value for key, value in facts.items() if key not in {'configuration', 'model_directory'}}
+        'automl_diagnostics': [{key: value for key, value in facts.items() if key not in {'configuration', 'model_directory', 'model_file'}}
                               for facts in context.get('automl_diagnostics', [])],
         'repair_attempts': context.get('repair_attempts', []), 'execution_stages': context.get('execution_stages', []),
         'input_facts': context.get('input_facts', {}), 'data_research': context.get('data_research')})
@@ -233,7 +233,7 @@ def execution_contract(preparation):
         'completed_setup': ['requirements_extracted', 'input_tables_loaded', 'profile_measured',
                             'fit_validation_split_saved', 'scorer_and_submission_writer_defined'],
         'inputs': {
-            'fit': {'type': 'DataFrame', 'rows': preparation.validation['fit_rows'],
+            'fit': {'type': 'DataFrame', 'rows': preparation.validation.get('model_fit_rows', preparation.validation['fit_rows']),
                     'target_columns': preparation.data.target_columns},
             'validation': {'type': 'DataFrame', 'rows': preparation.validation['validation_rows'],
                            'target_columns': [], 'row_order': 'fixed'},

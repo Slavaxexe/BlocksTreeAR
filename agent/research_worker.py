@@ -77,6 +77,12 @@ def execute(root, node):
         with np.load(split_path, allow_pickle=False) as split:
             fit = train.iloc[split['fit']].copy()
             validation = train.iloc[split['valid']].drop(columns=targets).copy()
+        if preparation.validation.get('ensemble_split_file'):
+            inner_path = within(root, preparation.validation['ensemble_split_file'])
+            if file_hash(inner_path) != preparation.validation['ensemble_split_sha256']:
+                raise ValueError('Research ensemble split changed after preparation')
+            with np.load(inner_path, allow_pickle=False) as inner:
+                fit = train.iloc[inner['train']].copy()
     state = {'fit': fit, 'validation': validation, 'test': tables['test'].drop(columns=targets, errors='ignore'),
              'auxiliary': {role: frame for role, frame in tables.items() if role not in {'train', 'test'}},
              'preparation': preparation.model_dump(mode='json'),

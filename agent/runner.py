@@ -19,7 +19,7 @@ from .assembly import BlockError, assemble, block_catalog, initialize, sources
 from .config import Settings
 from .context import (execution_contract, history_view, model_feedback, preparation_view,
                       requirements, research_profile_view)
-from .contracts import Delta, Extraction, Finish, NodeDelta, Preparation, Start
+from .contracts import Assembly, Block, Delta, Extraction, Finish, Hypothesis, NodeDelta, Pipeline, Preparation, Proposal, Start
 from .data import check_code, file_hash, installed_libraries, inventory, within
 from .qwen import QwenError
 from .search import Search
@@ -38,9 +38,12 @@ class Options:
     max_llm_calls: int = 80
     max_code_attempts: int = 5
     automl: bool = True
-    research_parallel: int = 0
+    research_parallel: int = 2
     max_research_nodes: int = 12
     research_timeout: float = 60
+    final_refit_seconds: float = 300
+    eda_fraction: float = .15
+    research_unlimited: bool = False
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -251,12 +254,16 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                     raise
                 execution_update('failed')
                 failed_block = getattr(error, 'block', None)
+                error_text = str(error)
                 if (node / 'block_error.json').exists():
-                    failed_block = json.loads((node / 'block_error.json').read_text(encoding='utf-8'))['block']
+                    block_error = json.loads((node / 'block_error.json').read_text(encoding='utf-8'))
+                    failed_block = block_error['block']
+                    # Library warnings can bury the exception in the combined stdout/stderr log.
+                    error_text = block_error['error']
                 if isinstance(error, TimeoutError) and (node / 'progress.json').exists():
                     failed_block = json.loads((node / 'progress.json').read_text(encoding='utf-8'))['block']
                 target = failed_block
-                detail = {'stage': stage, 'block': target, 'error': str(error)[-5000:],
+                detail = {'stage': stage, 'block': target, 'error': error_text[-5000:],
                           'traceback': traceback.format_exc()}
                 save(log_dir / 'error.json', detail)
                 if target is None:
@@ -268,7 +275,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                     raise
                 failed_stage, stage, code_hash = stage, 'implementation', None
                 checkpoint(stage=stage, block=target)
-                await write_block(target, str(error)[-5000:], failed_stage)
+                await write_block(target, error_text[-5000:], failed_stage)
     except (Exception, asyncio.CancelledError) as error:
         target = getattr(error, 'block', None) or target
         agents.log('experiment_failed', node_id=start.node_id, block=target, stage=stage,
@@ -305,7 +312,13 @@ async def run(task_path: Path, options: Options, settings: Settings):
             or options.parallel_agents < 1 or options.max_llm_calls < 1 or options.max_code_attempts < 1):
         raise ValueError('Use 1..1000 experiments and positive parallel, LLM call and code attempt limits')
     task_path = task_path.resolve()
-    deadline = time.monotonic() + options.time_budget
+    if not math.isfinite(options.final_refit_seconds) or options.final_refit_seconds < 0:
+        raise ValueError('Final refit reserve must be finite and nonnegative')
+    if not 0 <= options.eda_fraction < 1:
+        raise ValueError('EDA fraction must be between 0 (disabled) and 1 (exclusive)')
+    overall_deadline = time.monotonic() + options.time_budget
+    final_reserve = min(options.final_refit_seconds, options.time_budget * .2) if options.time_budget >= 60 else 0.
+    deadline = overall_deadline - final_reserve
     agents = JSONAgents(settings, deadline, max_calls=options.max_llm_calls, parallel_agents=options.parallel_agents)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     directory = (options.output_dir or Path('artifacts') / f'{task_path.parent.name}-{stamp}-{uuid4().hex[:6]}').resolve()
@@ -367,6 +380,30 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 save(directory / 'best.json', {'node_id': selected, 'value': result.value,
                      'submission_file': source.relative_to(directory).as_posix()})
             published = selected
+
+    def launch(node_id, proposal):
+        catalog = block_catalog(directory, delta.nodes)
+        hashes = {block.name: next(item['sha256'] for item in catalog[block.source_node] if item['name'] == block.name)
+                  for block in proposal.assembly.blocks if block.source_node is not None}
+        start = Start(node_id=node_id, parent_id=proposal.parent_id, purpose=proposal.purpose, source='builtin',
+            hypothesis=proposal.hypothesis, assembly=proposal.assembly, preparation_sha256=delta.preparation_sha256,
+            context={'task': str(task_path), 'task_sha256': report.task_sha256, 'source_hashes': hashes,
+                     'analysis_revision': revision, 'installed_libraries': shared['installed_libraries'],
+                     'research_revision': research.revision if research else 0,
+                     'max_code_attempts': options.max_code_attempts},
+            outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
+            timeout_seconds=float(options.experiment_timeout))
+        node = directory / 'nodes' / node_id
+        node.mkdir(parents=True)
+        save(node / 'start.json', start)
+        starts[node_id] = start
+        task = asyncio.create_task(experiment(node, start, shared, agents, deadline,
+            lambda **values: checkpoint(node_id, **values)))
+        active[task] = start
+        checkpoint(node_id, stage='queued', blocks={
+            block.name: {'stage': 'queued' if block.name in start.assembly.write_blocks else 'reused', 'attempt': 0}
+            for block in start.assembly.blocks})
+        return task
 
     async def analyze(row):
         references = {'node_000', row.parent_id, delta.best_node_id}
@@ -432,17 +469,37 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     update(warnings=report.warnings + [f'Preparation required code repair {attempt + 1}/2'])
 
         shared.update(requirements=requirements(extraction, prepared=True), installed_libraries=context['installed_libraries'])
-        if options.research_parallel and options.max_research_nodes:
-            preparation = await prepare_inputs(inspect_only=True)
+        preparation = await prepare_inputs(inspect_only=True)
+        update(stage='baseline')
+        await process(['-m', 'agent.worker', '--baseline', str(directory)], directory,
+                      directory / 'baseline' / 'baseline.log', deadline, options.experiment_timeout)
+        published = 'safety_baseline'
+        update(checks=report.checks + ['published_cheap_baseline'])
+        eda_deadline = deadline if options.research_unlimited else min(deadline, time.monotonic() + options.time_budget * options.eda_fraction)
+        if (options.research_parallel and options.max_experiments > 1 and
+                (options.research_unlimited or options.max_research_nodes and options.eda_fraction)):
             shared['preparation'] = preparation_view(preparation)
             save(directory / 'research' / 'structure_preparation.json', preparation)
             atomic_bytes(directory / 'research' / 'structure_prepare.py', (directory / 'prepare.py').read_bytes())
             research = Research(agents, directory, options, shared, process, notify, update)
             update(stage='data_research')
-            await research.bootstrap()
+            agents.log('initial_eda_started', budget_seconds=None if options.research_unlimited else options.time_budget * options.eda_fraction,
+                       research_unlimited=options.research_unlimited)
+            structure_deadline = eda_deadline if options.research_unlimited else min(eda_deadline, time.monotonic() + options.time_budget * options.eda_fraction * .4)
+            await research.window('structure', structure_deadline,
+                                  limit=options.research_parallel)
             context.update(data_research=research.view(), preparation_phase='finalize_validation',
                            data_profile=research_profile_view(json.loads((directory / 'research' / 'profile.json').read_text(encoding='utf-8'))))
-        preparation = await prepare_inputs()
+        if research and research.revision:
+            preparation = await prepare_inputs()
+        else:
+            try:
+                await process(['-m', 'agent.worker', '--prepare', str(directory)], directory,
+                              directory / 'preparation.log', deadline, options.experiment_timeout)
+                preparation = load(directory / 'preparation.json', Preparation)
+            except (ValueError, OSError, TimeoutError) as error:
+                context['execution_error'] = str(error)[-5000:]
+                preparation = await prepare_inputs()
         shared.update({'requirements': requirements(extraction, prepared=True), 'preparation': preparation_view(preparation),
                   'execution_contract': execution_contract(preparation),
                   'installed_libraries': context['installed_libraries']})
@@ -450,7 +507,27 @@ async def run(task_path: Path, options: Options, settings: Settings):
         save_delta()
         update(checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
 
+        from .plans import ToolCall
+        baseline_plan = Proposal(purpose='baseline', hypothesis=Hypothesis(
+            rationale='Cheap constant predictor before model search', expected_effect='A working reference submission',
+            pipeline=Pipeline(data={}, preprocessing={}, model={'name': 'Constant predictor'}, training={'fit_only': True})),
+            assembly=Assembly(blocks=[Block(name='constant', operation=ToolCall(kind='constant'),
+                description='Fit-only mean/mode/prior prediction', requires=['fit', 'validation', 'test', 'preparation'],
+                provides=['validation_predictions', 'test_predictions'])], write_blocks=['constant']))
+        update(stage='baseline')
+        baseline_task = launch('node_000', baseline_plan)
+        baseline_finish = await baseline_task
+        baseline_start = active.pop(baseline_task)
+        record(baseline_start, baseline_finish)
+        delta = delta.model_copy(update={'nodes': [row.model_copy(update={'analysis_status': 'skipped'}) for row in delta.nodes]})
+        save_delta()
+        if research:
+            update(stage='data_research')
+            await research.window('fit', eda_deadline)
+            shared['initial_eda'] = True
+            agents.log('initial_eda_finished', research_revision=research.revision, nodes=len(research.nodes))
         search = Search(agents, directory, options, shared, notify)
+        search.next_node = 1
         while True:
             expired = time.monotonic() >= deadline
             if expired:
@@ -506,28 +583,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
             for node_id, proposal in search.collect(done):
                 if time.monotonic() >= deadline:
                     continue
-                catalog = block_catalog(directory, delta.nodes)
-                hashes = {block.name: next(item['sha256'] for item in catalog[block.source_node] if item['name'] == block.name)
-                          for block in proposal.assembly.blocks if block.source_node is not None}
-                start = Start(node_id=node_id, parent_id=proposal.parent_id, purpose=proposal.purpose,
-                    source="builtin",
-                    hypothesis=proposal.hypothesis, assembly=proposal.assembly,
-                    preparation_sha256=delta.preparation_sha256,
-                    context={'task': str(task_path), 'task_sha256': report.task_sha256, 'source_hashes': hashes,
-                             'analysis_revision': revision, 'installed_libraries': shared['installed_libraries'],
-                             'research_revision': research.revision if research else 0,
-                             'max_code_attempts': options.max_code_attempts},
-                    outputs={'validation': 'validation_predictions.csv', 'submission': preparation.output.filename},
-                    timeout_seconds=float(options.experiment_timeout))
-                node = directory / 'nodes' / node_id
-                node.mkdir(parents=True)
-                save(node / 'start.json', start)
-                starts[node_id] = start
-                active[asyncio.create_task(experiment(node, start, shared, agents, deadline,
-                    lambda node_id=node_id, **values: checkpoint(node_id, **values)))] = start
-                checkpoint(node_id, stage='queued', blocks={
-                    block.name: {'stage': 'queued' if block.name in start.assembly.write_blocks else 'reused', 'attempt': 0}
-                    for block in start.assembly.blocks})
+                launch(node_id, proposal)
         completed_checks = (['saved_starts'] if starts else [])
         completed_checks += ['assembled_modules'] if any(n.result.code_sha256 for n in delta.nodes) else []
         completed_checks += ['recorded_finishes'] if delta.nodes else []
@@ -535,7 +591,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         update(status='ready' if delta.best_node_id else 'partial' if published else 'failed',
                stage='complete', stop_reason=stop_reason,
                checks=report.checks + completed_checks)
-        agents.log('run_finished', status=report.status, stop_reason=stop_reason,
+        agents.log('search_finished', status=report.status, stop_reason=stop_reason,
                    requests=agents.budget['requests'], experiments=len(starts), best_node=delta.best_node_id)
     except Exception as error:
         agents.log('controller_failed', error_type=type(error).__name__, traceback=traceback.format_exc())
@@ -551,4 +607,20 @@ async def run(task_path: Path, options: Options, settings: Settings):
             await research.close(stop_reason)
         for node_id in list(agents.root.call_reservations):
             agents.release_calls(node_id)
+    if final_reserve and delta and delta.best_node_id and time.monotonic() < overall_deadline:
+        selected = delta.best_node_id
+        remaining = min(options.final_refit_seconds, overall_deadline - time.monotonic())
+        update(status='running', stage='final_refit')
+        try:
+            await process(['-m', 'agent.finalize', '--run-directory', str(directory),
+                           '--node-id', selected, '--time-budget', str(max(1., remaining - 1))],
+                          directory, directory / 'final' / 'refit.log', overall_deadline, remaining)
+            best = json.loads((directory / 'best.json').read_text(encoding='utf-8'))
+            save(directory / 'best.json', {**best, 'submission_file': 'final/submission.csv', 'refitted': True})
+            update(status='ready', stage='complete', checks=report.checks + ['final_refit'])
+        except (ValueError, OSError, TimeoutError) as error:
+            save(directory / 'final' / 'refit_error.json', {'error': str(error)[-3000:]})
+            update(status='ready', stage='complete', warnings=report.warnings +
+                   ['Final refit failed; the previously published experimental submission is preserved'])
+    agents.log('run_finished', status=report.status, best_node=report.best_node, requests=agents.budget['requests'])
     return directory, report
