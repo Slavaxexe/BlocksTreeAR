@@ -215,15 +215,21 @@ def gbdt(fit, preparation, *, transform=None, params=None, candidates=None, tune
         classes, y = np.unique(fit[target].to_numpy(), return_inverse=True)
         balanced = len(y) / (len(classes) * np.bincount(y, minlength=len(classes)))
         weights = {None: None, 'balanced': balanced[y], 'sqrt_balanced': np.sqrt(balanced)[y]}
-        candidates = candidates or ([('plain', {}, None), ('balanced', {}, 'balanced'), ('sqrt_balanced', {}, 'sqrt_balanced')]
-                                    if len(classes) <= 100 else [('sqrt_balanced', {}, 'sqrt_balanced')])
+        defaults = ([('plain', {}, None), ('balanced', {}, 'balanced'), ('sqrt_balanced', {}, 'sqrt_balanced')]
+                    if len(classes) <= 100 else [('sqrt_balanced', {}, 'sqrt_balanced')])
         train, valid = inner_split(fit, y, temporal_column(preparation))
     else:
         y = fit[target].to_numpy(dtype=float)
         spread = float(np.median(np.abs(y - np.median(y)))) or float(np.std(y)) or 1.
-        candidates = candidates or ([('l2', {}, None), ('huber', {'objective': 'huber', 'alpha': 1.5 * spread}, None)]
-                                    + ([('log_target', {}, 'log')] if y.min() >= 0 else []))
+        defaults = ([('l2', {}, None), ('huber', {'objective': 'huber', 'alpha': 1.5 * spread}, None)]
+                    + ([('log_target', {}, 'log')] if y.min() >= 0 else []))
+        # LightGBM's own Huber alpha (0.9) is tiny on most target scales; derive it from the data unless given.
+        candidates = [(name, {**extra, 'alpha': 1.5 * spread} if extra.get('objective') == 'huber' and 'alpha' not in extra
+                       else extra, option) for name, extra, option in candidates or []]
         train, valid = inner_split(fit, None, temporal_column(preparation))
+    # Node candidates add to the defaults: a plan never loses the measured baseline choices.
+    seen = {(json.dumps(extra, sort_keys=True), option) for _, extra, option in candidates or []}
+    candidates = list(candidates or []) + [c for c in defaults if (json.dumps(c[1], sort_keys=True), c[2]) not in seen]
     if len(train) > 400000:  # candidate selection on a sample keeps large tables inside the process limit
         train = np.sort(np.random.RandomState(1).choice(train, 400000, replace=False))
     reference = fit.iloc[valid].reset_index(drop=True)
@@ -232,7 +238,7 @@ def gbdt(fit, preparation, *, transform=None, params=None, candidates=None, tune
         model_params = {**settings, **extra, **({'n_estimators': trees} if trees else {})}
         stop = [lgb.early_stopping(100, verbose=False)]
         if task == 'classification':
-            weight = weights[option]
+            weight = weights.get(option)  # unknown options train unweighted
             model = lgb.LGBMClassifier(**model_params)
             if eval_rows is None:
                 return model.fit(X.iloc[rows], y[rows], sample_weight=None if weight is None else weight[rows])

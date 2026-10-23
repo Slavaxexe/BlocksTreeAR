@@ -35,7 +35,8 @@ TOOLKIT_GUIDE = {
             'transform(frame, fit, training) -> frame adds features (keep row order; training=True only when frame '
             'is fit itself). params override LightGBM parameters (num_leaves, learning_rate, min_child_samples, '
             'colsample_bytree, reg_lambda, ...). candidates: [(name, extra_params, option)], option None|"log"|'
-            '"balanced"|"sqrt_balanced".',
+            '"balanced"|"sqrt_balanced"; they are tried IN ADDITION to the defaults, and a Huber candidate without '
+            'alpha gets a data-derived alpha.',
     'target_stats': 'target_stats(reference, frame, keys, target, *, training=False, time=None, folds=5, prefix=None) '
                     '-> DataFrame aligned to frame.index: mean target (per class for labels), count and latest earlier '
                     'value for rows sharing `keys` (a repeated entity). training=True: each row sees only earlier '
