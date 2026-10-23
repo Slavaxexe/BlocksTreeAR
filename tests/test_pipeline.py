@@ -365,6 +365,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(reference)[:2], ['sklearn.ensemble.RandomForestRegressor', 'sklearn.linear_model.Ridge'])
         self.assertIn('n_estimators', reference['sklearn.ensemble.RandomForestRegressor'])
         self.assertIn('.fit(', reference['sklearn.ensemble.RandomForestRegressor'])
+        toolkit = api_reference('from alfa_agent.toolkit import automl\ndef fit_model(fit, preparation):\n'
+                                '    return automl(fit, preparation, "flaml", 10, features=1)', "unexpected keyword argument 'features'")
+        self.assertIn('time_limit', toolkit['alfa_agent.toolkit.automl'])
 
     def test_toolkit_utilities_encode_per_library_split_by_shift_and_expose_probabilities(self):
         from alfa_agent.toolkit import Features, class_scale, gbdt, inner_score, labels, output, split

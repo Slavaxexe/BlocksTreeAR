@@ -110,7 +110,7 @@ def api_reference(code: str, error: str = '', limit: int = 4000) -> dict[str, st
     for node in ast.walk(tree):
         name = dotted(node.func) if isinstance(node, ast.Call) else None
         root = name.split('.')[0] if name else None
-        if root in aliases and 'toolkit' not in aliases[root]:
+        if root in aliases:  # toolkit included: its real keyword names stop invented arguments too
             paths.append(aliases[root] + name[len(root):])
     paths = list(dict.fromkeys(paths))
     paths.sort(key=lambda path: path.rsplit('.', 1)[-1] not in error)  # stable: error-named objects first
