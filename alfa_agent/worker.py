@@ -280,7 +280,8 @@ def predict(preparation: Preparation, root: Path, fit_model, *, small=False):
     reference = train.iloc[valid].reset_index(drop=True)
     validation_input = reference.drop(columns=preparation.data.target_columns)
     with threadpool_limits(limits=THREADS):
-        predictor = fit_model(train.iloc[fit].copy(), with_scorer(config, reader, preparation))
+        # A fresh 0..n-1 index: generated code mixes label and positional indexing.
+        predictor = fit_model(train.iloc[fit].reset_index(drop=True), with_scorer(config, reader, preparation))
         if not callable(predictor):
             raise ValueError('fit_model must return a fitted callable: predict(features) -> DataFrame')
         valid_predictions = prediction_frame(predictor, validation_input.copy())

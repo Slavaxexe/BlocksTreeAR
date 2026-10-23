@@ -44,7 +44,7 @@ def runtime_contract(preparation):
 
 def implementation_context(context):
     """Keep the current plan authoritative; ancestor refusals are not execution facts."""
-    keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error', 'failed_stage',
+    keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error', 'error_location', 'failed_stage',
             'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
     result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
               'toolkit': TOOLKIT_GUIDE,

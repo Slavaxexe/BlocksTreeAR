@@ -1,7 +1,7 @@
 """Stable JSON envelopes; task names and algorithms are deliberately open-ended."""
 
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 NodeID = Annotated[str, Field(pattern=r"^node_[0-9]{3}$")]
@@ -223,6 +223,11 @@ class Hypotheses(Contract):
 class PlanConflict(Contract):
     missing_input: Literal['validation_targets']
     plan_quote: str = Field(min_length=1, max_length=400)
+
+    @field_validator('plan_quote', mode='before')
+    @classmethod
+    def shorten(cls, value):  # the start of an over-long exact quote is still an exact quote
+        return value[:400] if isinstance(value, str) else value
 
 
 class Program(Contract):

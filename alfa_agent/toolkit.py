@@ -208,9 +208,9 @@ def gbdt(fit, preparation, *, transform=None, params=None, candidates=None, tune
     data = transform(fit.copy(), fit, True) if transform else fit
     columns, vocab, stamps = schema(data, preparation)
     X = encode(data, columns, vocab, stamps)
-    settings = dict(n_estimators=5000, learning_rate=.05, num_leaves=31, min_child_samples=20, subsample=.8,
-                    subsample_freq=1, colsample_bytree=.8, reg_lambda=1., n_jobs=THREADS, verbose=-1, random_state=0,
-                    **(params or {}))
+    settings = {**dict(n_estimators=5000, learning_rate=.05, num_leaves=31, min_child_samples=20, subsample=.8,
+                       subsample_freq=1, colsample_bytree=.8, reg_lambda=1., n_jobs=THREADS, verbose=-1, random_state=0),
+                **(params or {})}  # node parameters override the defaults
     if task == 'classification':
         classes, y = np.unique(fit[target].to_numpy(), return_inverse=True)
         balanced = len(y) / (len(classes) * np.bincount(y, minlength=len(classes)))

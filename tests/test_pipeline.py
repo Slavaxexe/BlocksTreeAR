@@ -1225,7 +1225,7 @@ class SubmissionTests(unittest.TestCase):
             archive = build(Path(temporary) / 'submission.zip')
             with ZipFile(archive) as bundle:
                 self.assertEqual(set(bundle.namelist()), {'solution.py', 'requirements.txt', 'alfa_cli.py',
-                    'alfa_agents.py', 'alfa_autopilot.py', 'alfa_toolkit.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py',
+                    'alfa_agents.py', 'alfa_autopilot.py', 'alfa_library_docs.py', 'alfa_toolkit.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py',
                     'alfa_qwen.py', 'alfa_runner.py', 'alfa_storage.py', 'alfa_worker.py'})
                 self.assertEqual(bundle.read('requirements.txt'), Path('vendor/requirements_data_folder.txt').read_bytes())
                 for name in bundle.namelist():

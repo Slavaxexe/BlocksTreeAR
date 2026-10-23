@@ -247,6 +247,11 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 if not repairable or agents.requests >= request_limit or time.monotonic() >= deadline:
                     raise
                 context.update(previous_code=program.code, execution_error=str(error)[-5000:], failed_stage=stage)
+                if 'toolkit.py' in str(error):  # the frame is in project code the node cannot edit
+                    context['error_location'] = ('Raised inside the project toolkit called from your code: change the '
+                                                 'arguments or data you pass, or stop using that toolkit call.')
+                else:
+                    context.pop('error_location', None)
                 checkpoint(f'{start.node_id}: code repair after {stage}; saved start is unchanged')
     except (Exception, asyncio.CancelledError) as error:
         message = (str(error) or 'Experiment cancelled').replace(agents.settings.api_key, '[REDACTED]')[-5000:]
