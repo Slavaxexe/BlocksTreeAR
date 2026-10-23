@@ -12,8 +12,9 @@ import time
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from pydantic import ValidationError
 
-from .autopilot import AUTOML_GUIDE, TOOLKIT_GUIDE
+from .autopilot import TOOLKIT_GUIDE
 from .config import Settings
+from .library_docs import DOCS, library_notes
 from .contracts import (CodeReview, DataFacts, Extraction, Hypotheses, Hypothesis, LLMCall, MetricFacts, OutputFacts,
                         PreparationDraft, ProblemFacts, Program, RunReport)
 from .qwen import QwenError
@@ -46,7 +47,9 @@ def implementation_context(context):
     keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error', 'failed_stage',
             'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
     result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
-              'toolkit': TOOLKIT_GUIDE, 'automl_guide': AUTOML_GUIDE,
+              'toolkit': TOOLKIT_GUIDE,
+              # Notes only for libraries the error or plan mentions (error first), so the context stays small.
+              'library_notes': library_notes(str(context.get('execution_error', '')) + json.dumps(context['start']['hypothesis'])),
               **{key: context[key] for key in keys if key in context}}
     if context.get('parent'):
         parent = context['parent']
@@ -96,7 +99,7 @@ def baker_context(context):
     leader = next((n for n in measured if n['node_id'] == parent['start']['node_id']), None)
     recent = ([leader] if leader else []) + [n for n in measured if n is not leader][-2:]
     return {**{k: context[k] for k in keys if k in context}, 'runtime_contract': runtime_contract(context['preparation']),
-        'toolkit': TOOLKIT_GUIDE, 'automl_guide': AUTOML_GUIDE,
+        'toolkit': TOOLKIT_GUIDE, 'library_notes_available': sorted(DOCS),
         'explore_parent': explore_parent(context, parent['start']['node_id']),
         'parent': {'node_id': parent['start']['node_id'], 'pipeline': base, 'code': parent['code'],
                    'score': parent['finish']['value']},
@@ -412,7 +415,8 @@ class JSONAgents:
             "column sampling. Avoid methods superlinear in rows (SVC, KNN, Gaussian processes) above 20k rows. "
             "toolkit describes short building blocks (gbdt with transform/params/candidates, target_stats, automl); plans "
             "expressed through them are implemented quickly and reliably. "
-            "AutoGluon, LightAutoML and FLAML are permitted tools (see automl_guide): controller reference nodes may already "
+            "Name the library in the plan: the implementer then receives its version-specific notes (library_notes_available). "
+            "AutoGluon, LightAutoML and FLAML are permitted tools: controller reference nodes may already "
             "run them; you may improve from such a parent, run AutoML on engineered features, or blend AutoML with other "
             "models in one node when the measured history suggests complementary errors. "
             "Libraries may use 4 threads.\n"
