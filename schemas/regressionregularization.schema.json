@@ -1,0 +1,37 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "policy": {
+      "title": "Policy",
+      "type": "string"
+    },
+    "optimizer": {
+      "title": "Optimizer",
+      "type": "string"
+    },
+    "hyperparameter_search": {
+      "title": "Hyperparameter Search",
+      "type": "string"
+    },
+    "parameters_to_tune": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Parameters To Tune",
+      "type": "array"
+    },
+    "rationale": {
+      "title": "Rationale",
+      "type": "string"
+    }
+  },
+  "required": [
+    "policy",
+    "optimizer",
+    "hyperparameter_search",
+    "parameters_to_tune",
+    "rationale"
+  ],
+  "title": "RegressionRegularization",
+  "type": "object"
+}

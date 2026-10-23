@@ -1,0 +1,199 @@
+{
+  "$defs": {
+    "SelectedModel": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "enum": [
+            "ridge",
+            "elasticnet",
+            "sgd",
+            "random_forest",
+            "extra_trees",
+            "hist_gradient_boosting",
+            "lightgbm",
+            "catboost",
+            "xgboost",
+            "mlp",
+            "flaml",
+            "autogluon"
+          ],
+          "title": "Family",
+          "type": "string"
+        },
+        "rationale": {
+          "default": "",
+          "title": "Rationale",
+          "type": "string"
+        },
+        "parameters": {
+          "title": "Parameters",
+          "type": "object"
+        }
+      },
+      "required": [
+        "family"
+      ],
+      "title": "SelectedModel",
+      "type": "object"
+    },
+    "SubmissionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "filename": {
+          "default": "submission.csv",
+          "title": "Filename",
+          "type": "string"
+        },
+        "prediction_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prediction Column"
+        }
+      },
+      "title": "SubmissionSpec",
+      "type": "object"
+    },
+    "TrainingFiles": {
+      "additionalProperties": false,
+      "properties": {
+        "train": {
+          "title": "Train",
+          "type": "string"
+        },
+        "test": {
+          "title": "Test",
+          "type": "string"
+        },
+        "sample_submission": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Submission"
+        }
+      },
+      "required": [
+        "train",
+        "test"
+      ],
+      "title": "TrainingFiles",
+      "type": "object"
+    },
+    "ValidationConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "default": "random",
+          "enum": [
+            "random",
+            "group",
+            "time"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        },
+        "group_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Group Columns",
+          "type": "array"
+        },
+        "time_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Column"
+        }
+      },
+      "title": "ValidationConstraints",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "task_type": {
+      "const": "regression",
+      "default": "regression",
+      "title": "Task Type",
+      "type": "string"
+    },
+    "files": {
+      "$ref": "#/$defs/TrainingFiles"
+    },
+    "target": {
+      "title": "Target",
+      "type": "string"
+    },
+    "id_columns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Id Columns",
+      "type": "array"
+    },
+    "primary_metric": {
+      "enum": [
+        "rmse",
+        "mae",
+        "mse",
+        "r2",
+        "mape"
+      ],
+      "title": "Primary Metric",
+      "type": "string"
+    },
+    "selected_models": {
+      "items": {
+        "$ref": "#/$defs/SelectedModel"
+      },
+      "maxItems": 12,
+      "minItems": 1,
+      "title": "Selected Models",
+      "type": "array"
+    },
+    "eda": {
+      "title": "Eda",
+      "type": "object"
+    },
+    "validation_constraints": {
+      "$ref": "#/$defs/ValidationConstraints"
+    },
+    "submission": {
+      "$ref": "#/$defs/SubmissionSpec"
+    }
+  },
+  "required": [
+    "files",
+    "target",
+    "primary_metric",
+    "selected_models"
+  ],
+  "title": "TrainingInput",
+  "type": "object"
+}

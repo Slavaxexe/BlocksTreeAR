@@ -191,10 +191,10 @@ nav{flex-wrap:wrap}
 .tree-node.analyzing .box{stroke:var(--purple);stroke-width:2}
 .assembly-json{margin-top:12px}
 </style>
-<header><div><h1>Поиск ML-решений</h1><small>3 ноды: 2 улучшения + 1 исследование · до 8 агентов Qwen</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
+<header><div><h1>Поиск ML-решений · max</h1><small>По умолчанию до 4 нод и 16 обращений к Qwen · фактическая активность — в экспериментах</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel" hidden><p class="muted">Baker предлагает короткие идеи. Планировщики нод параллельно готовят сборки; каждый готовый план сразу передаётся агентам блоков. Общая подготовка фиксирует условия сравнения.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Baker, очередь идей, планировщики нод, агенты блоков и анализатор"></svg></div><p class="footnote">По умолчанию на блок: первая версия и до четырёх исправлений, включая ошибки полного запуска. Исправляется только проблемный блок. Лимит 8 общий для реализаторов, планировщиков нод, Baker, анализаторов и извлечения.</p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">После общей подготовки Python добавляет доступные FLAML, AutoGluon и Optuna-кандидаты для поддерживаемых задач. Они используют готовый код. Baker предлагает дополнительные идеи по результатам; Planner задаёт блоки, Implementer пишет их код. Все эксперименты сравниваются на одном фиксированном разбиении.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Стартовый портфель моделей, Baker, планировщики, обучение и анализатор"></svg></div><p class="footnote">Порог, калибровка и веса смешивания подбираются внутри fit. Внешняя валидация служит для сравнения. Analyzer получает диагностику по классам и ошибкам регрессии. Ошибка возвращается на исправление проблемного блока. В ZIP на 80 минут предусмотрено до трёх версий кода блока; локальные лимиты зависят от параметров запуска. Просмотр схемы не запускает обучение.</p></section>
 <section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><div id="ideas-overview" class="assembly-overview" hidden></div><p id="tree-legend" class="legend"></p><div id="assembly-overview" class="assembly-overview" hidden></div><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Основные предки и источники модулей"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранной ноды"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
@@ -226,16 +226,16 @@ function architecture(){
    ['02 Извлечение · Qwen',['Четыре запроса → факты'],'llm'],
    ['03 Подготовка · Qwen',['Общий prepare.py'],'llm'],
    ['04 Условия · Python',['Профиль, split, scorer'],'cpu'],
-   ['05 Baker · Qwen',['Короткие идеи → очередь'],'llm'],
-   ['06 Планировщики · Qwen',['Одна идея → план одной ноды'],'llm'],
-   ['07 Три параллельные ноды',['2 улучшения + 1 исследование'],''],
-   ['08 Агенты блоков · Qwen',['До 8 обращений для всех ролей'],'llm'],
+   ['05 Решения для регрессии',['Разбиение → holdout/CV','Модели → регуляризация'],'llm'],
+   ['06 Baker → Planner',['Новые идеи → план ноды'],'llm'],
+   ['07 До четырёх ML-нод',['3 improve + 1 explore'],''],
+   ['08 Код эксперимента',['Готовый адаптер / код Qwen','До 16 API-обращений'],''],
    ['09 Сборщик · Python',['Снимки блоков + интерфейсы'],''],
    ['10 Обучение и оценка',['Проверка → полный запуск'],'cpu'],
    ['11 Сравнение · Python',['Метрики + лучший submission'],'cpu'],
    ['12 Анализатор · Qwen',['Вся сборка, ошибки, идеи'],'llm'],
    ['13 Следующие гипотезы',['После нового анализа'],'llm'],
-   ['14 Лучшее решение',['best.json и файл ответа'],'']];
+   ['14 Финальный refit',['Регрессия: все строки train','Итоговый файл ответа'],'cpu']];
   cards.forEach((card,i)=>{
    const x=i%2?300:20,y=20+Math.floor(i/2)*150;
    if(i){const px=(i-1)%2?300:20,py=20+Math.floor((i-1)/2)*150;
@@ -255,15 +255,15 @@ function architecture(){
  box(c,800,30,280,90,'03  Извлечение',['extraction.json','Проверенные требования']);
  box(c,40,210,280,90,'04  Подготовка · Qwen',['Чтение, split, scorer, submission','Один общий prepare.py'],'llm');
  box(c,420,210,280,90,'05  Выполнение подготовки',['Профиль реальных данных','Фиксированный split'],'cpu');
- box(c,800,210,280,90,'06  Общие условия',['Метрика + форматы + профиль','Компактный контекст для ролей']);
- box(c,40,390,280,90,'07  Baker · Qwen',['Короткие идеи → очередь','2 улучшения + 1 исследование'],'llm');
- box(c,420,390,280,90,'08  Планировщики нод · Qwen',['Одна идея → порядок и новые блоки','Python подставляет готовые блоки'],'llm');
- box(c,800,390,280,90,'09  Агенты блоков · Qwen',['Отдельный агент на каждый блок','До 8 обращений для всех ролей'],'llm');
+ box(c,800,210,280,90,'06  Решения Qwen по очереди',['Разбиение → holdout/CV','AutoML / Optuna → регуляризация'],'llm');
+ box(c,40,390,280,90,'07  Baker · новые идеи',['По результатам и диагностике','3 improve + 1 explore'],'llm');
+ box(c,420,390,280,90,'08  План эксперимента',['Готовый план / Planner Qwen','Новые и сохранённые блоки']);
+ box(c,800,390,280,90,'09  Код эксперимента',['Готовый адаптер / Implementer Qwen','До 16 API-обращений']);
  box(c,40,570,280,90,'10  Сборщик · Python',['Копирует сохранённые версии','Проверяет порядок, входы и хеши']);
  box(c,420,570,280,90,'11  Обучение и оценка',['Короткая проверка → полный запуск','Общий scorer → finish.json'],'cpu');
  box(c,800,570,280,90,'12  Сравнение · Python',['Метрики и изменения блоков','Обновление лучшего submission'],'cpu');
- box(c,420,750,280,90,'13  Анализатор · Qwen',['Вся сборка, ошибки, сравнения','Наблюдения + идеи по блокам'],'llm');
- box(c,800,750,280,90,'Лучшее решение',['best.json + файл ответа','Худшая попытка его не заменяет']);
+ box(c,420,750,280,90,'13  Анализатор · Qwen',['Код, метрики, диагностика ошибок','Выводы → следующие идеи'],'llm');
+ box(c,800,750,280,90,'14  Финальный refit',['Регрессия: победитель на всём train','Итоговый submission.csv'],'cpu');
  edge(c,'M 420 795 H 15 V 435 H 40',true);
  edge(c,'M 560 660 V 700 H 1100 V 435 H 1080',true);
  c.append(svg('text',{x:585,y:695,class:'caption'},'Ошибка → исправление нужного блока'));

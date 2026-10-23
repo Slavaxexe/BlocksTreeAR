@@ -1,0 +1,48 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "observations": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 12,
+      "title": "Observations",
+      "type": "array"
+    },
+    "hypotheses": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 8,
+      "title": "Hypotheses",
+      "type": "array"
+    },
+    "risks": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 8,
+      "title": "Risks",
+      "type": "array"
+    },
+    "recommendation": {
+      "enum": [
+        "continue",
+        "stop",
+        "repair"
+      ],
+      "title": "Recommendation",
+      "type": "string"
+    },
+    "rationale": {
+      "title": "Rationale",
+      "type": "string"
+    }
+  },
+  "required": [
+    "recommendation",
+    "rationale"
+  ],
+  "title": "TrainingAnalysis",
+  "type": "object"
+}

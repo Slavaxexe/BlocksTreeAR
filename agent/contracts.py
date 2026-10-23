@@ -413,10 +413,43 @@ class LLMCall(Contract):
     error: str | None = None
 
 
+class FinalCodeReview(Contract):
+    accepted: bool
+    issues: list[str] = Field(default_factory=list)
+
+
+class RegressionSplit(Contract):
+    validation_fraction: float = Field(gt=0, lt=0.5)
+    strategy: Literal['random', 'group', 'time']
+    group_columns: list[str] = Field(default_factory=list)
+    time_column: str | None = None
+    seed: int = 42
+    rationale: str
+
+
+class RegressionValidation(Contract):
+    method: Literal['holdout', 'cross_validation', 'engine_managed']
+    folds: int = Field(default=3, ge=2, le=5)
+    rationale: str
+
+
+class RegressionRegularization(Contract):
+    policy: str
+    optimizer: str
+    hyperparameter_search: str
+    parameters_to_tune: list[str]
+    rationale: str
+
+
+class TrainingSelection(Contract):
+    engines: list[Literal['flaml', 'autogluon', 'optuna_lightgbm', 'optuna_catboost']] = Field(default_factory=list)
+    rationale: str
+
+
 class RunReport(Contract):
     schema_version: Literal[2] = 2
     status: Literal["running", "ready", "partial", "failed"]
-    stage: Literal["extraction", "preparation", "baseline", "search", "complete"] = "extraction"
+    stage: Literal["extraction", "preparation", "baseline", "search", "finalization", "complete"] = "extraction"
     mode: Literal["qwen"] = "qwen"
     task_sha256: SHA256
     checks: list[str] = Field(default_factory=list)
@@ -436,6 +469,7 @@ class RunReport(Contract):
     max_parallel_agents: int = 8
     active_agents: list[dict[str, Any]] = Field(default_factory=list)
     node_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    final_refit: dict[str, Any] = Field(default_factory=dict)
 
 
-SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport, Proposals, Ideas, NodePlan, Analysis, Assembly, NodeDelta, Delta)
+SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport, Proposals, Ideas, NodePlan, Analysis, Assembly, NodeDelta, Delta, TrainingSelection, RegressionSplit, RegressionValidation, RegressionRegularization, FinalCodeReview)

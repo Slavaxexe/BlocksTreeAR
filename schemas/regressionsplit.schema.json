@@ -1,0 +1,55 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "validation_fraction": {
+      "exclusiveMaximum": 0.5,
+      "exclusiveMinimum": 0.0,
+      "title": "Validation Fraction",
+      "type": "number"
+    },
+    "strategy": {
+      "enum": [
+        "random",
+        "group",
+        "time"
+      ],
+      "title": "Strategy",
+      "type": "string"
+    },
+    "group_columns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Group Columns",
+      "type": "array"
+    },
+    "time_column": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Time Column"
+    },
+    "seed": {
+      "default": 42,
+      "title": "Seed",
+      "type": "integer"
+    },
+    "rationale": {
+      "title": "Rationale",
+      "type": "string"
+    }
+  },
+  "required": [
+    "validation_fraction",
+    "strategy",
+    "rationale"
+  ],
+  "title": "RegressionSplit",
+  "type": "object"
+}

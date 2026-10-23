@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "task_type": "regression",
+  "files": {"train": "train.csv", "test": "test.csv", "sample_submission": "sample_submission.csv"},
+  "target": "y",
+  "id_columns": ["id"],
+  "primary_metric": "mae",
+  "selected_models": [
+    {"family": "ridge", "rationale": "Regularized baseline; split by customer group to prevent repeated-entity leakage.", "parameters": {}},
+    {"family": "extra_trees", "rationale": "Nonlinear feature effect with repeated entities; evaluate generalization to unseen groups.", "parameters": {}}
+  ],
+  "eda": {},
+  "validation_constraints": {"strategy": "group", "group_columns": ["group_id"], "time_column": null},
+  "submission": {"filename": "submission.csv", "prediction_column": "prediction"}
+}

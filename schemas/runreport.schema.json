@@ -102,6 +102,7 @@
         "preparation",
         "baseline",
         "search",
+        "finalization",
         "complete"
       ],
       "title": "Stage",
@@ -242,6 +243,10 @@
         "type": "object"
       },
       "title": "Node States",
+      "type": "object"
+    },
+    "final_refit": {
+      "title": "Final Refit",
       "type": "object"
     }
   },

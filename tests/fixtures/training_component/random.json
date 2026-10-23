@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "task_type": "regression",
+  "files": {"train": "train.csv", "test": "test.csv", "sample_submission": "sample_submission.csv"},
+  "target": "y",
+  "id_columns": ["id"],
+  "primary_metric": "rmse",
+  "selected_models": [
+    {"family": "ridge", "rationale": "Fast regularized linear baseline; measure whether nonlinear models improve over it.", "parameters": {}},
+    {"family": "lightgbm", "rationale": "EDA shows nonlinear relationships, interactions, a categorical feature and missing values.", "parameters": {}},
+    {"family": "random_forest", "rationale": "Alternative nonlinear tree ensemble, compared using the same external split.", "parameters": {}}
+  ],
+  "eda": {},
+  "validation_constraints": {"strategy": "random", "group_columns": [], "time_column": null},
+  "submission": {"filename": "submission.csv", "prediction_column": "prediction"}
+}

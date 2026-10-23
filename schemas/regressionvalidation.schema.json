@@ -1,0 +1,31 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "method": {
+      "enum": [
+        "holdout",
+        "cross_validation",
+        "engine_managed"
+      ],
+      "title": "Method",
+      "type": "string"
+    },
+    "folds": {
+      "default": 3,
+      "maximum": 5,
+      "minimum": 2,
+      "title": "Folds",
+      "type": "integer"
+    },
+    "rationale": {
+      "title": "Rationale",
+      "type": "string"
+    }
+  },
+  "required": [
+    "method",
+    "rationale"
+  ],
+  "title": "RegressionValidation",
+  "type": "object"
+}

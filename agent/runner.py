@@ -13,7 +13,7 @@ import time
 import traceback
 from uuid import uuid4
 
-from .agents import JSONAgents, extract_task
+from .agents import JSONAgents, extract_task, REGRESSION_MODELS
 from .assembly import BlockError, assemble, block_catalog, initialize, sources
 from .config import Settings
 from .context import execution_contract, history_view, preparation_view, requirements
@@ -34,6 +34,8 @@ class Options:
     parallel_agents: int = 16
     max_llm_calls: int = 0
     max_code_attempts: int = 0
+    automl: bool = True
+    tuning: bool = True
 
 
 def remaining_seconds(deadline):
@@ -136,13 +138,18 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
         model = start.hypothesis.pipeline.model
         engine = model.get('engine')
         if (start.hypothesis.pipeline.training.get('builtin_adapter') is True
-                and engine in {'flaml', 'autogluon'} and name == f'builtin_{engine}'):
+                and engine in {'flaml', 'autogluon', 'optuna_lightgbm', 'optuna_catboost'}
+                and name == f'builtin_{engine}'):
             if error is not None:
-                raise BlockError(name, 'Built-in AutoML adapter failed: ' + error)
+                raise BlockError(name, 'Built-in model adapter failed: ' + error)
             options = {key: model.get(key) for key in ('task_type', 'prediction_type', 'class_labels')}
-            code = ('from agent.automl import run_automl\n\n\n'
+            tuned = engine.startswith('optuna_')
+            adapter = 'run_tuned_model' if tuned else 'run_automl'
+            adapter_module = 'agent.tuning' if tuned else 'agent.automl'
+            model_engine = engine.removeprefix('optuna_') if tuned else engine
+            code = (f'from {adapter_module} import {adapter}\n\n\n'
                     'def run(state):\n'
-                    f'    return run_automl(state, engine={engine!r}, **{options!r})\n')
+                    f'    return {adapter}(state, engine={model_engine!r}, **{options!r})\n')
             attempts[name] = 1
             atomic_bytes(path, code.encode('utf-8'))
             atomic_bytes(node / 'attempts' / name / '01' / f'{name}.py', code.encode('utf-8'))
@@ -328,6 +335,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         raise ValueError('Use nonnegative limits (0 means unlimited) and positive parallelism')
     task_path = task_path.resolve()
     deadline = time.monotonic() + options.time_budget if options.time_budget else math.inf
+    overall_deadline = deadline
     agents = JSONAgents(settings, deadline, max_calls=options.max_llm_calls, parallel_agents=options.parallel_agents)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     directory = (options.output_dir or Path('artifacts') / f'{task_path.parent.name}-{stamp}-{uuid4().hex[:6]}').resolve()
@@ -429,10 +437,12 @@ async def run(task_path: Path, options: Options, settings: Settings):
     agents.on_activity = update
     try:
         extraction = load(directory / 'extraction.json', Extraction)
+        regression = 'regress' in (extraction.problem.task_type or '').lower()
         update(status='running', stage='preparation')
         context = {'task_text': task_path.read_text(encoding='utf-8'), 'task_directory': str(task_path.parent),
                    'extraction': requirements(extraction), 'inventory': inventory(task_path.parent),
-                   'installed_libraries': installed_libraries()}
+                   'installed_libraries': installed_libraries(),
+                   'allowed_requirements': (Path(__file__).resolve().parents[1] / 'requirements.txt').read_text(encoding='utf-8')}
         for attempt in count():
             draft = await agents.prepare(context)
             try:
@@ -441,13 +451,28 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     within(task_path.parent, relative)
                 within(directory / 'nodes' / 'node_000', draft.output.filename)
                 atomic_bytes(directory / 'prepare.py', draft.code.encode('utf-8'))
+                validation = dict(draft.validation)
+                if context.get('regression_steps'):
+                    split, inner = context['regression_steps'][:2]
+                    validation.update(strategy=split['strategy'], fraction=split['validation_fraction'],
+                                      seed=split['seed'], group_columns=split['group_columns'])
+                    if split['time_column']:
+                        validation['time_column'] = split['time_column']
+                    validation['inner_validation'] = {key: inner[key] for key in ('method', 'folds')}
                 preparation = Preparation(task_directory=str(task_path.parent), rationale=draft.rationale,
-                    data=draft.data, validation=draft.validation, metric=draft.metric, output=draft.output,
+                    data=draft.data, validation=validation, metric=draft.metric, output=draft.output,
                     code_sha256=file_hash(directory / 'prepare.py'))
                 save(directory / 'preparation.json', preparation)
                 await process(['-m', 'agent.worker', '--prepare', str(directory)], directory,
                               directory / 'preparation.log', deadline, options.experiment_timeout)
                 preparation = load(directory / 'preparation.json', Preparation)
+                if regression and not context.get('regression_steps'):
+                    from .regression_steps import validation_steps
+                    steps = await validation_steps(agents, directory, context, preparation)
+                    context.update(regression_steps=steps, measured_profile=preparation.profile,
+                                   previous_code=draft.code, preparation_phase='finalize_validation')
+                    save(directory / 'provisional_preparation.json', preparation)
+                    continue
                 break
             except (ValueError, OSError, TimeoutError) as error:
                 if options.max_code_attempts and attempt + 1 >= options.max_code_attempts:
@@ -456,12 +481,27 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 update(warnings=report.warnings + [f'Preparation required code repair {attempt + 1}'])
         shared = {'requirements': requirements(extraction, prepared=True), 'preparation': preparation_view(preparation),
                   'execution_contract': execution_contract(preparation),
-                  'installed_libraries': context['installed_libraries']}
+                  'installed_libraries': context['installed_libraries'],
+                  'allowed_requirements': context['allowed_requirements']}
+        if regression:
+            shared['regression_steps'] = context['regression_steps']
         delta = Delta(preparation_sha256=file_hash(directory / 'preparation.json'), metric=preparation.metric)
         save_delta()
         update(checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
 
         search = Search(agents, directory, options, shared, notify)
+        regression = 'regress' in (extraction.problem.task_type or '').lower()
+        if regression:
+            # Reserve wall-clock time for Qwen final-code preparation AND full-data training.
+            reserve = min(1200., max(0., (overall_deadline-time.monotonic()) * .2)) if math.isfinite(overall_deadline) else 1200.
+            if math.isfinite(overall_deadline):
+                deadline = overall_deadline - reserve
+                agents.deadline = deadline
+            save(directory / 'time_allocation.json', {'final_refit_reserved_seconds': reserve,
+                 'overall_budget_seconds': options.time_budget or None, 'regression_only': True})
+            await search.select_regression_portfolio()
+            from .regression_steps import regularization_step
+            await regularization_step(agents, directory, shared)
         while True:
             expired = time.monotonic() >= deadline
             if expired:
@@ -531,6 +571,54 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 checkpoint(node_id, stage='queued', blocks={
                     block.name: {'stage': 'queued' if block.name in start.assembly.write_blocks else 'reused', 'attempt': 0}
                     for block in start.assembly.blocks})
+        if regression and delta.best_node_id:
+            # All search tasks have been drained before entering this phase.
+            agents.deadline = overall_deadline
+            best = next(row for row in delta.nodes if row.node_id == delta.best_node_id)
+            node = directory / 'nodes' / best.node_id
+            final_dir = directory / 'final'
+            final_dir.mkdir(exist_ok=True)
+            update(stage='finalization', final_refit={'status': 'running', 'winner': best.node_id,
+                   'selection_score': best.result.value})
+            try:
+                context = {'winner': history_view(best), 'winner_modules': sources(node),
+                    'all_results': [{'node_id': row.node_id, 'status': row.result.status,
+                                     'score': row.result.value} for row in delta.nodes],
+                    'winner_training_diagnostics': [json.loads(path.read_text(encoding='utf-8'))
+                        for path in node.glob('*_full_diagnostics.json')],
+                    **shared, 'remaining_seconds': remaining_seconds(overall_deadline)}
+                prompt = (REGRESSION_MODELS + 'Prepare FINAL FULL-DATA REFIT of the recorded regression winner. '
+                    'Compare recorded results in your notes; the winner is frozen by the shared primary metric. '
+                    'Return Program JSON with run(state) returning {test_predictions: DataFrame}. '
+                    'state contains fit (ALL labelled training rows, including former validation), test, '
+                    'preparation and auxiliary. No validation table exists now. Use every labelled row for '
+                    'the final model fit. Preserve winner features, family, hyperparameters, target transforms '
+                    'and output column/row order. Do not start another model search or report a new score. '
+                    'Use winner_training_diagnostics for the actually selected native parameters/iterations. '
+                    'For AutoGluon, use its full-data refit mechanism (refit_full) after bounded setup as needed, '
+                    'and predict with the refitted winner/ensemble. For FLAML, refit the chosen estimator and '
+                    'configuration without a fresh broad search. For Optuna use frozen parameters and iterations '
+                    'to fit ordinary models on all rows; do not call run_tuned_model or run_automl because '
+                    'they create new holdouts. Preserve any frozen regression blend with both refitted components. '
+                    'No hyperparameter, blend or calibration selection on full training predictions. '
+                    'Use only installed libraries and stdlib, no network or installations. '
+                    'Honor preparation.runtime.deadline, num_cpus=2, reserve time for predicting/writing. '
+                    'Import at module scope, perform training only inside run. No business-model stage.\n' +
+                    json.dumps(context, ensure_ascii=False))
+                save(final_dir / 'selection.json', {'winner': best.node_id, 'selection_score': best.result.value,
+                     'metric': best.result.metric.model_dump(),
+                     'preparation_sha256': delta.preparation_sha256})
+                from .finalize import run_finalization
+                final_result = await run_finalization(directory, agents, prompt, overall_deadline, process)
+                save(directory / 'best.json', {'node_id': best.node_id, 'value': best.result.value,
+                     'score_scope': 'fixed validation before final refit', 'training_scope': 'all labelled rows',
+                     'submission_file': (Path('final') / preparation.output.filename).as_posix()})
+                update(final_refit={**final_result, 'winner': best.node_id, 'selection_score': best.result.value})
+            except Exception as error:
+                detail = {'status': 'failed', 'winner': best.node_id, 'error': str(error)[-3000:]}
+                save(final_dir / 'error.json', detail)
+                update(final_refit=detail, warnings=report.warnings + [
+                    'Final full-data refit failed; the earlier best validation submission is retained'])
         completed_checks = (['saved_starts'] if starts else [])
         completed_checks += ['assembled_modules'] if any(n.result.code_sha256 for n in delta.nodes) else []
         completed_checks += ['recorded_finishes'] if delta.nodes else []

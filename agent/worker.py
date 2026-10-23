@@ -39,6 +39,17 @@ def prepare(directory: Path):
             raise ValueError('Split contains duplicate or out-of-range rows')
     if np.intersect1d(fit, valid).size:
         raise ValueError('Fit and validation rows overlap')
+    if (config['validation'].get('strategy') == 'random'
+            and config['validation'].get('inner_validation')
+            and 'fraction' in config['validation']):
+        requested_fraction = float(config['validation']['fraction'])
+        if abs(len(valid) / len(train) - requested_fraction) > max(2 / len(train), .001):
+            raise ValueError('Generated split does not implement the selected validation fraction')
+    time_column = config['validation'].get('time_column')
+    if config['validation'].get('strategy') == 'time' and time_column:
+        times = pd.to_datetime(train[time_column], errors='raise')
+        if times.isna().any() or times.iloc[fit].max() > times.iloc[valid].min():
+            raise ValueError('Temporal validation must follow training chronologically')
     group_columns = config['validation'].get('group_columns', [])
     if group_columns:
         fit_groups = train.iloc[fit][group_columns].drop_duplicates()

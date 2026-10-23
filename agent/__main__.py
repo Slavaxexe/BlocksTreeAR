@@ -27,6 +27,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--parallel", type=int, default=4, help="Одновременных нод: по умолчанию 3 improve и 1 explore.")
     parser.add_argument("--parallel-agents", type=int, default=16, help="Одновременных обращений к Qwen для всех ролей.")
     parser.add_argument("--max-llm-calls", type=int, default=0, help="Всего запросов Qwen; 0 — без ограничения.")
+    parser.add_argument("--no-automl", dest="automl", action="store_false",
+                        help="Не добавлять FLAML/AutoGluon в стартовый портфель.")
+    parser.add_argument("--no-tuning", dest="tuning", action="store_false",
+                        help="Не добавлять обычные модели с Optuna в стартовый портфель.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
     args = parser.parse_args(argv)
     if args.command == "ask" and not args.prompt:
@@ -48,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
                 options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout,
                     output_dir=output, max_experiments=args.max_experiments if args.command == "search" else 1,
                     parallel=args.parallel, parallel_agents=args.parallel_agents, max_llm_calls=args.max_llm_calls,
-                    max_code_attempts=args.max_code_attempts)
+                    max_code_attempts=args.max_code_attempts, automl=args.automl, tuning=args.tuning)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")

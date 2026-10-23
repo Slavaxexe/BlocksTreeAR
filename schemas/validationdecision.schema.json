@@ -1,0 +1,42 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "validation_fraction": {
+      "maximum": 0.4,
+      "minimum": 0.05,
+      "title": "Validation Fraction",
+      "type": "number"
+    },
+    "inner_validation": {
+      "default": "holdout",
+      "enum": [
+        "holdout",
+        "cv"
+      ],
+      "title": "Inner Validation",
+      "type": "string"
+    },
+    "folds": {
+      "default": 3,
+      "maximum": 5,
+      "minimum": 2,
+      "title": "Folds",
+      "type": "integer"
+    },
+    "seed": {
+      "default": 42,
+      "title": "Seed",
+      "type": "integer"
+    },
+    "rationale": {
+      "title": "Rationale",
+      "type": "string"
+    }
+  },
+  "required": [
+    "validation_fraction",
+    "rationale"
+  ],
+  "title": "ValidationDecision",
+  "type": "object"
+}

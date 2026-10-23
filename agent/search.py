@@ -1,15 +1,16 @@
 """A short idea queue and independent node planners; ready plans never wait for their batch."""
 
 import asyncio
+import json
 import math
 from collections import deque
 import time
 import traceback
 
-from .agents import JSONAgents, plan_key
+from .agents import JSONAgents, plan_key, REGRESSION_MODELS
 from .assembly import block_catalog
 from .context import catalog_view, idea_history_view
-from .contracts import Assembly, Block, Hypothesis, Idea, Pipeline, Proposal
+from .contracts import Assembly, Block, Hypothesis, Idea, Pipeline, Proposal, TrainingSelection
 from .qwen import QwenTemporaryError
 from .storage import fingerprint, save
 
@@ -28,13 +29,45 @@ class Search:
         self.experiment_limit = options.max_experiments or math.inf
         explore = int(options.parallel > 1)
         self.caps = {'improve': options.parallel - explore, 'explore': explore}
-        self.seed_automl()
+        self.seed_portfolio()
 
     def remaining_seconds(self):
         return None if math.isinf(self.agents.deadline) else max(0., self.agents.deadline - time.monotonic())
 
-    def seed_automl(self):
-        """Start supported tabular tasks with real AutoML, without LLM code generation."""
+    async def select_regression_portfolio(self):
+        available = [record['builtin_engine'] for record in self.queue]
+        selection = await self.agents.ask(TrainingSelection,
+            REGRESSION_MODELS + 'Choose a SMALL ordered subset of available_engines for this regression task from the measured '
+            'profile, missingness, categorical columns, row count, metric, validation policy and remaining time. '
+            'Do not mechanically run every library. Explain each choice and omitted redundant approaches. '
+            'When available_engines contains FLAML or AutoGluon, include at least one of them to obtain '
+            'an AutoML result for subsequent Qwen analysis and improvements. '
+            'Return engines=[] if custom Qwen-generated training is more appropriate. '
+            'Choose only from available_engines. No business-model stage or invented measurements.\n' +
+            json.dumps({'available_engines': available, **self.shared,
+                                     'remaining_seconds': self.remaining_seconds()}, ensure_ascii=False),
+            'training_selector')
+        if len(set(selection.engines)) != len(selection.engines) or set(selection.engines) - set(available):
+            raise ValueError('Qwen selected duplicate or unavailable training engines')
+        if set(available) & {'flaml', 'autogluon'} and not set(selection.engines) & {'flaml', 'autogluon'}:
+            raise ValueError('Qwen must include an available AutoML baseline')
+        by_engine = {record['builtin_engine']: record for record in self.queue}
+        self.queue.clear()
+        self.records.clear()
+        self.used_ideas.clear()
+        for index, engine in enumerate(selection.engines[:self.options.max_experiments or len(selection.engines)]):
+            record = by_engine[engine]
+            record['id'] = f'idea_{index:03d}'
+            record['idea']['purpose'] = 'baseline' if index == 0 else 'explore'
+            record['idea']['change'] += '; Qwen selection: ' + selection.rationale
+            self.records.append(record)
+            self.queue.append(record)
+            self.used_ideas[fingerprint(Idea.model_validate(record['idea']).model_dump(exclude={'expected_effect'}))] = record['id']
+        self.shared['training_selection'] = selection.model_dump()
+        save(self.directory / 'training_selection.json', selection)
+
+    def seed_portfolio(self):
+        """Seed budgeted model candidates without asking Qwen to write their code."""
         preparation = self.shared['preparation']
         requirements = self.shared['requirements']
         problem = requirements.get('problem', {})
@@ -55,10 +88,17 @@ class Search:
             return
         libraries = self.shared['installed_libraries']
         engines = [engine for engine, package in (('flaml', 'flaml'), ('autogluon', 'autogluon.tabular'))
-                   if package in libraries]
-        for engine in engines[:self.options.max_experiments or len(engines)]:
+                   if self.options.automl and package in libraries]
+        if self.options.tuning and 'optuna' in libraries:
+            engines.extend(engine for engine, package in (('optuna_lightgbm', 'lightgbm'), ('optuna_catboost', 'catboost'))
+                           if package in libraries)
+        if 'regress' in task and validation.get('inner_validation', {}).get('method') == 'cross_validation':
+            # The other native adapters use holdout; never claim they performed CV.
+            engines = [engine for engine in engines if engine == 'flaml']
+        limit = len(engines) if 'regress' in task else self.options.max_experiments or len(engines)
+        for engine in engines[:limit]:
             idea = Idea(purpose='baseline' if not self.records else 'explore',
-                        change=f'Built-in {engine} fit-only AutoML portfolio',
+                        change=f'Built-in {engine} fit-only model search',
                         change_blocks=[f'builtin_{engine}'],
                         expected_effect='Compare an automatically selected tabular model on the fixed outer split')
             record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(),
@@ -71,6 +111,7 @@ class Search:
         name = f'builtin_{engine}'
         problem = self.shared['requirements']['problem']
         output = self.shared['requirements']['output']
+        method = 'Optuna with held-out postprocessing' if engine.startswith('optuna_') else 'AutoML'
         return Proposal(purpose=idea.purpose, parent_id=idea.parent_id,
             hypothesis=Hypothesis(rationale=idea.change, expected_effect=idea.expected_effect,
                 pipeline=Pipeline(data={'source': 'prepared fit only'},
@@ -78,9 +119,10 @@ class Search:
                     model={'engine': engine, 'task_type': problem.get('task_type'),
                            'prediction_type': output.get('prediction_type'),
                            'class_labels': problem.get('class_labels', [])},
-                    training={'builtin_adapter': True, 'internal_validation': 'fit only', 'cpu_limit': 2})),
+                    training={'builtin_adapter': True, 'internal_validation': 'fit only', 'cpu_limit': 2,
+                              'postprocessing': 'held-out within fit; frozen before outer predictions'})),
             assembly=Assembly(blocks=[Block(name=name,
-                description=f'Built-in {engine}: fit-only AutoML and prediction DataFrames in fixed row order',
+                description=f'Built-in {engine}: fit-only {method} and prediction DataFrames in fixed row order',
                 requires=['fit', 'validation', 'test', 'preparation', 'auxiliary'],
                 provides=['validation_predictions', 'test_predictions'])], write_blocks=[name]))
 

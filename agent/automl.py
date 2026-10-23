@@ -61,13 +61,13 @@ def _features(fit, validation, test, targets, ids):
     return frames
 
 
-def _splitter(y, classification, seed):
+def _splitter(y, classification, seed, folds=3):
     if classification:
         smallest = int(y.value_counts().min())
         if smallest < 2:
             raise ValueError('AutoML inner validation requires at least two fit rows per class')
         return StratifiedKFold(n_splits=min(3, smallest), shuffle=True, random_state=seed)
-    return KFold(n_splits=min(3, len(y)), shuffle=True, random_state=seed)
+    return KFold(n_splits=min(folds, len(y)), shuffle=True, random_state=seed)
 
 
 def _fit_flaml(x, y, metric, classification, runtime, seed):
@@ -82,6 +82,11 @@ def _fit_flaml(x, y, metric, classification, runtime, seed):
                            'retrain_full': 'budget', 'train_time_limit': min(30., budget / 3)}
                           if classification else
                           {'eval_method': 'cv', 'split_type': _splitter(y, False, seed), 'retrain_full': True})
+    inner = runtime.get('inner_validation', {})
+    if not classification and inner.get('method') == 'holdout':
+        validation_options = {'eval_method': 'holdout', 'split_ratio': .2, 'retrain_full': 'budget'}
+    elif not classification and inner.get('method') == 'cross_validation':
+        validation_options['split_type'] = _splitter(y, False, seed, folds=int(inner.get('folds', 3)))
     model.fit(X_train=x, y_train=y, task='classification' if classification else 'regression',
               metric=metric, time_budget=budget,
               estimator_list=['lgbm'] if smoke else ['lgbm', 'catboost', 'xgboost', 'extra_tree'],
@@ -156,6 +161,7 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
     if len(targets) != 1:
         raise ValueError('Built-in AutoML requires exactly one supervised target')
     validation_policy = preparation.get('validation', {})
+    runtime = {**runtime, 'inner_validation': validation_policy.get('inner_validation', {})}
     strategy = str(validation_policy.get('strategy', '')).lower()
     if validation_policy.get('group_columns') or any(word in strategy for word in ('time', 'temporal', 'group')):
         raise ValueError('Built-in AutoML is not enabled for temporal/group validation yet')

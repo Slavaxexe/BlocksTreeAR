@@ -14,11 +14,33 @@ from pydantic import ValidationError
 from .config import Settings
 from .contracts import (Analysis, DataFacts, Extraction, Ideas, LLMCall, MetricFacts, NodePlan, OutputFacts,
                         PreparationDraft, ProblemFacts, Program, RunReport)
-from .qwen import QwenError, QwenTemporaryError
+from .qwen import QwenError, QwenTemporaryError, api_error_details
 from .storage import append_event, fingerprint, save
 
 
-NODE_RULES = (
+REGRESSION_MODELS = (
+    "allowed_requirements contains the organizer's exact requirements.txt with pinned versions. "
+    "It is the dependency allowlist, not a promise that every package is installed. "
+    "installed_libraries reports actual runtime versions. Use only packages permitted by the former "
+    "and present in the latter; never install or download additional dependencies. "
+    "Available regression models (use only permitted, installed packages): "
+    "scikit-learn LinearRegression, Ridge, Lasso, ElasticNet, HuberRegressor and SGDRegressor; "
+    "DecisionTreeRegressor, RandomForestRegressor, ExtraTreesRegressor, GradientBoostingRegressor "
+    "and HistGradientBoostingRegressor; KNeighborsRegressor, SVR, LinearSVR and MLPRegressor; "
+    "LightGBM LGBMRegressor, CatBoost CatBoostRegressor, XGBoost XGBRegressor; "
+    "custom PyTorch regression networks when justified by data size and CPU/time budget. "
+    "AutoML options: FLAML AutoML(task='regression'), AutoGluon TabularPredictor(problem_type='regression') "
+    "and LightAutoML TabularAutoML with a regression Task. Built-in adapters cover only FLAML, AutoGluon "
+    "and Optuna tuning of LightGBM/CatBoost; other choices require generated code. "
+    "Do not run the entire catalog. Justify choices using row/feature counts, categorical features, "
+    "missingness, outliers, recorded validation errors and remaining CPU/time. Scale features where required "
+    "for linear, distance-based or neural models; fit every transform inside fit only. "
+    "Use regularization and a justified bounded hyperparameter search; compare against recorded baselines. "
+    "The task's primary evaluation metric remains fixed; training loss may be chosen with an explicit rationale. "
+)
+
+
+NODE_RULES = REGRESSION_MODELS + (
     "Shared preparation is ALREADY FINISHED; execution_contract describes the actual ready inputs. "
     "The worker supplies fit (with targets), validation/test (WITHOUT targets), metadata and auxiliary tables. "
     "Do not plan or implement input loading, profiling, a new outer split, a scorer or a submission writer. "
@@ -46,6 +68,17 @@ NODE_RULES = (
     "task_type=..., prediction_type=..., class_labels=...) returns prediction DataFrames in a state update dict. "
     "It handles fit-only inner validation and runtime limits. Use it for ordinary AutoML candidates; "
     "write custom model code when the hypothesis needs behavior outside its supported contract. "
+    "An ordinary-model tuning adapter is also available: from agent.tuning import run_tuned_model; "
+    "run_tuned_model(state, engine='lightgbm' or 'catboost', task_type=..., prediction_type=..., "
+    "class_labels=...) runs Optuna and fits postprocessing only on separate held-out rows WITHIN fit. "
+    "The adapter respects runtime budgets and does not need FLAML, AutoGluon or LightAutoML. "
+    "Thresholds, calibration and blending weights must never be selected using outer validation labels. "
+    "For regression justify the model family, hyperparameter search and regularization using the observed "
+    "data profile and recorded experiments. Do not exhaustively try every algorithm or optimizer. "
+    "SGD/Adam choices apply to differentiable models, not as interchangeable optimizers for tree boosting. "
+    "Search fits use only fit rows; a separate final full-data refit occurs after the winner is frozen. "
+    "regression_steps records sequential decisions: split size, internal validation, model approaches, "
+    "regularization/search policy. Follow these decisions and explain any necessary deviation. "
     "Before finalizing an assembly, trace where every supervised fitting block gets both features and targets; "
     "never describe a target as removed by its producer and present for its consumer. "
 )
@@ -82,6 +115,8 @@ class JSONAgents:
         self.root = shared.root if shared is not None else self
         self.slots = shared.slots if shared is not None else asyncio.Semaphore(parallel_agents)
         if shared is None:
+            self.api_retry_at = 0.
+            self.api_error = None
             self.active = {}
             self.on_activity = None
             self.log_directory = None
@@ -150,9 +185,20 @@ class JSONAgents:
         invalid_responses = 0
         network_retries = 0
         for attempt in (1, 2, 3):
-            remaining = self.deadline - time.monotonic()
-            if remaining <= 0 or self.remaining_calls <= 0:
-                raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
+            # All roles sharing a key observe the same provider cooldown/quota stop.
+            while True:
+                if self.root.api_error:
+                    raise QwenError(self.root.api_error)
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0 or self.remaining_calls <= 0:
+                    raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
+                delay = self.root.api_retry_at - time.monotonic()
+                if delay <= 0:
+                    break
+                if delay >= remaining:
+                    raise QwenTemporaryError(f'Qwen: роль {role}: пауза API превышает оставшееся время прогона.')
+                self.log('api_retry_wait', role=role, delay_seconds=delay)
+                await asyncio.sleep(delay)
             self.requests += 1
             self.budget['requests'] += 1
             request_id = self.budget['requests']
@@ -188,10 +234,26 @@ class JSONAgents:
                 status = error.status_code if isinstance(error, APIStatusError) else None
                 suffix = f"HTTP {status}" if status else (
                     "таймаут" if isinstance(error, (APITimeoutError, TimeoutError)) else "ошибка соединения")
+                details = api_error_details(error) if isinstance(error, APIStatusError) else {
+                    'kind': 'timeout' if isinstance(error, (APITimeoutError, TimeoutError)) else 'connection_error'}
+                if details['kind'] == 'quota_exceeded':
+                    self.root.api_error = 'Qwen API: исчерпан бюджет или квота ключа. Повторные запросы остановлены.'
+                    suffix += '; исчерпан бюджет или квота ключа'
+                elif status == 429:
+                    delay = details.setdefault('retry_after_seconds', min(60., 5. * 2 ** (attempt - 1)))
+                    self.root.api_retry_at = max(self.root.api_retry_at, time.monotonic() + delay)
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, block=self.block, attempt=attempt, status='api_error', error=suffix))
-                self.record(Path('llm') / f'{request_id:04d}.response.json', {'status': 'api_error', 'error': suffix})
+                self.record(Path('llm') / f'{request_id:04d}.response.json', {
+                    'status': 'api_error', 'role': role, 'node_id': self.node_id, 'block': self.block,
+                    'attempt': attempt, 'error': suffix, **details})
                 self.log('api_failed', role=role, request_id=request_id, error=suffix,
-                         duration_seconds=time.monotonic() - started)
+                         duration_seconds=time.monotonic() - started, **details)
+                if self.root.api_error:
+                    raise QwenError(self.root.api_error) from None
+                if status == 429:
+                    if attempt < 3 and self.remaining_calls > 0:
+                        continue
+                    raise QwenTemporaryError(f'Qwen: роль {role}: HTTP 429; попытки после пауз исчерпаны.') from None
                 if status == 400 and json_mode and network_retries == 0 and attempt < 3:
                     network_retries += 1
                     json_mode = False
@@ -324,6 +386,10 @@ class JSONAgents:
             "make_split as needed to avoid leakage and account for class balance. Choose the outer split "
             "once before experiments. When repairing previous_code, fix the reported error without "
             "changing the chosen split strategy, seed or validation size. "
+              "If preparation_phase=finalize_validation, the earlier code/split was PROVISIONAL and no "
+              "models have been compared. Implement regression_steps decisions now, using config.validation "
+              "for fraction, seed, strategy, group_columns and time_column, not hardcoded old split values. "
+              "After this final preparation the outer split is frozen. Inner cross-validation stays inside fit. "
             "Return configuration and a complete prepare.py with these functions:\n"
             "load_data(task_directory: pathlib.Path, config: dict) -> dict[str, pandas.DataFrame]: "
             "read the supplied files using the actual formats/options; train and test roles are required, sample is optional. "
