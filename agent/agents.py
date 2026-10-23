@@ -292,8 +292,6 @@ class JSONAgents:
                          duration_seconds=time.monotonic() - started)
                 if invalid_responses == 2 or attempt == 3:
                     raise QwenError(f"Qwen: роль {role} дважды нарушила JSON-контракт. {reason}") from None
-                if code:
-                    thinking, reasoning_effort = True, 'medium'
                 if not document or finish_reason == 'length':
                     # An empty/truncated answer is not a JSON document that can be repaired.
                     # Regenerate from the original task, leaving room for provider reasoning.
@@ -375,6 +373,9 @@ class JSONAgents:
         if errors:
             raise QwenError("; ".join(errors))
         return Extraction(**dict(zip((r[0] for r in roles), results)))
+
+    async def plan_baseline(self, context: dict):
+        return await self.ask(Program, json.dumps(context, ensure_ascii=False), 'baker', code=True)
 
     async def prepare(self, context: dict):
         prompt = (
@@ -537,6 +538,56 @@ class JSONAgents:
             "Keep the summary brief. Do not write code or alter the metric, split or task.\n"
             + json.dumps(context, ensure_ascii=False), "analyzer")
 
+
+
+    async def propose(self, context: dict, *, log_directory: Path | None = None):
+        from .contracts import Proposals, Proposal
+        from types import SimpleNamespace
+        used = context.pop('used', {})
+        accepted, error_text, rejected_plans = [], None, []
+        purposes = list(context['purposes'])
+        remaining_purposes = list(purposes)
+        for attempt in range(2):
+            if not remaining_purposes or self.remaining_calls <= 0:
+                break
+            request = {**context, 'count': len(remaining_purposes), 'purposes': remaining_purposes}
+            if accepted:
+                request['accepted_proposals'] = [p.model_dump(mode='json') for p in accepted]
+            if rejected_plans:
+                request['rejected_plans'] = rejected_plans
+            try:
+                result = await self.ask(Proposals, REGRESSION_MODELS +
+                    "Return exactly the requested count of proposals, one per purpose, in order.\n" +
+                    json.dumps(request, ensure_ascii=False), 'proposer',
+                    validation={'count': len(remaining_purposes), 'purposes': remaining_purposes,
+                                'parents': context['available_parents'], 'leader': context['leader_id'],
+                                'catalog': context.get('module_catalog', {})})
+            except Exception as exc:
+                error_text = str(exc)
+                if log_directory is not None:
+                    save(log_directory / f'propose_{attempt:02d}.json', {'error': str(exc)})
+                break
+            log_entry = {'proposals': [p.model_dump(mode='json') for p in result.proposals], 'rejected': []}
+            new_remaining = []
+            for proposal in result.proposals:
+                key = plan_key(proposal)
+                duplicate_of = used.get(key)
+                if duplicate_of is None:
+                    existing_keys = {plan_key(p): f'accepted_proposal_{purposes.index(p.purpose)+1}' for p in accepted}
+                    duplicate_of = existing_keys.get(key)
+                if duplicate_of is not None:
+                    rejected = {'proposal': proposal.model_dump(mode='json'), 'duplicate_of': duplicate_of}
+                    log_entry['rejected'].append(rejected)
+                    rejected_plans.append(rejected)
+                    new_remaining.append(proposal.purpose)
+                else:
+                    accepted.append(proposal)
+            if log_directory is not None:
+                save(log_directory / f'propose_{attempt:02d}.json', log_entry)
+            remaining_purposes = new_remaining
+            if not remaining_purposes:
+                break
+        return SimpleNamespace(proposals=accepted, error=error_text)
 
 
 async def extract_task(task_path: Path, output: Path, settings: Settings, *, agents: JSONAgents | None = None):

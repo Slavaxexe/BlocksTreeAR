@@ -96,6 +96,13 @@ def fixture(directory):
             'metric': {'name': 'custom absolute error + seven', 'direction': 'minimize',
                        'definition': 'mean(abs(y_true-y_pred)) + 7', 'status': 'ready'},
             'output': {'filename': 'result.tsv', 'format': 'TSV', 'columns': ['record', 'estimate', 'comment']}, 'code': PREPARE},
+        'RegressionSplit': {'validation_fraction': 0.2, 'strategy': 'random', 'group_columns': [],
+                            'time_column': None, 'seed': 42, 'rationale': 'Random split for regression baseline'},
+        'RegressionValidation': {'method': 'holdout', 'folds': 3, 'rationale': 'Holdout for fast iteration'},
+        'TrainingSelection': {'engines': [], 'rationale': 'Custom metric requires Qwen-generated training'},
+        'RegressionRegularization': {'policy': 'none', 'optimizer': 'not_applicable',
+                                     'hyperparameter_search': 'none', 'parameters_to_tune': [],
+                                     'rationale': 'No regularization needed for constant baseline'},
     }
 
 
@@ -198,6 +205,18 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(context['failed_stage'], 'execution')
                     self.assertIn('full-only failure', context['execution_error'])
                 answer = {'blocked_reason': 'Cannot implement the saved plan'} if blocked else {'code': code}
+            elif title == 'Ideas':
+                purposes = context.get('purposes', ['baseline'])
+                answer = {'ideas': [{'purpose': p, 'parent_id': context.get('leader_id'),
+                    'change': f'Constant mean baseline {i}', 'change_blocks': ['predict'],
+                    'expected_effect': 'Measure constant prediction'} for i, p in enumerate(purposes)]}
+            elif title == 'NodePlan':
+                answer = {'hypothesis': {'rationale': 'Constant baseline', 'expected_effect': 'Measure',
+                    'pipeline': {'data': {}, 'preprocessing': {}, 'model': {'family': 'constant'}, 'training': {}}},
+                    'order': ['predict'],
+                    'write': [{'name': 'predict', 'description': 'Predict constant',
+                        'requires': ['fit', 'validation', 'test', 'preparation'],
+                        'provides': ['validation_predictions', 'test_predictions']}]}
             elif title == 'Analysis':
                 if context['experiment']['result']['stage'] != 'implementation':
                     self.assertTrue(context['modules'])
