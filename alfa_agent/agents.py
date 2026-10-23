@@ -1,6 +1,7 @@
 """Stateless Qwen roles with bounded repair and locally validated JSON."""
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import random
@@ -91,9 +92,12 @@ def baker_context(context):
 
 
 class JSONAgents:
-    def __init__(self, settings: Settings, deadline: float, max_calls: int = 20, *, shared=None, node_id=None):
+    def __init__(self, settings: Settings, deadline: float, max_calls: int = 20, *, shared=None, node_id=None,
+                 concurrency: int = 0):
         settings.validate()
         self.settings, self.deadline, self.max_calls = settings, deadline, max_calls
+        # One gate per run bounds simultaneous requests to a shared model server; 0 means unbounded.
+        self.gate = shared.gate if shared is not None else asyncio.Semaphore(concurrency) if concurrency else None
         self.calls: list[LLMCall] = shared.calls if shared is not None else []
         self.budget = shared.budget if shared is not None else {'requests': 0, 'limit': max_calls}
         self.node_id = node_id
@@ -130,13 +134,17 @@ class JSONAgents:
             self.requests += 1
             self.budget['requests'] += 1
             try:
-                async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
-                                       max_retries=0, timeout=min(self.settings.timeout_seconds, remaining)) as client:
-                    response = await client.chat.completions.create(
-                        model=self.settings.model, messages=messages, temperature=temperature,
-                        max_tokens=min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens,
-                        extra_body={"reasoning_effort": "none",
-                            "chat_template_kwargs": {"enable_thinking": False}})
+                async with self.gate or contextlib.nullcontext():
+                    remaining = self.deadline - time.monotonic()  # waiting for the gate is not request time
+                    if remaining <= 0:
+                        raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
+                    async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
+                                           max_retries=0, timeout=min(self.settings.timeout_seconds, remaining)) as client:
+                        response = await client.chat.completions.create(
+                            model=self.settings.model, messages=messages, temperature=temperature,
+                            max_tokens=min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens,
+                            extra_body={"reasoning_effort": "none",
+                                "chat_template_kwargs": {"enable_thinking": False}})
             except asyncio.CancelledError:
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
                 raise

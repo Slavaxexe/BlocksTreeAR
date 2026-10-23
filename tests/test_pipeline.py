@@ -116,6 +116,24 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(seen), 2)
             self.assertEqual(agents.calls[0].status, 'invalid_json')
 
+    async def test_llm_concurrency_gate_serializes_requests_of_one_run(self):
+        active, peak = 0, 0
+        async def handler(request):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(.05)
+            active -= 1
+            return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': json.dumps({'code': PROGRAM})}}]})
+        def client(**kwargs):
+            return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        agents = JSONAgents(Settings('fake', 'http://proxy/v1', 'model'), time.monotonic() + 10, concurrency=1)
+        nodes = [JSONAgents(agents.settings, agents.deadline, shared=agents, node_id=f'node_00{i}') for i in range(3)]
+        with patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+            await asyncio.gather(*(node.ask(Program, 'Write code', 'implementer', code=True) for node in nodes))
+        self.assertEqual(peak, 1)
+
     async def exercise(self, directory, *, repair=False, missing_metric=False, blocked=False, broken_metric=False,
                        invalid_program=False, broken_code=False, execution_timeout=False, full_repair=False,
                        json_failure=False, network_failure=False, ast_failure=False, refused_once=False,

@@ -71,6 +71,7 @@ class Options:
     autopilot: bool = False
     executors: int = 2  # concurrent experiment processes
     threads: int | None = None  # library threads per process; default 4 with autopilot, else 2
+    llm_concurrency: int = 0  # simultaneous LLM requests per run; 0 = unbounded
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -271,7 +272,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
     reserve = min(options.time_budget * .15, options.experiment_timeout + (300 if options.autopilot else 0),
                   1500 if options.autopilot else 1200) if options.final_refit else 0
     deadline = final_deadline - reserve
-    agents = JSONAgents(settings, deadline, max_calls=12 + (IMPLEMENTATION_CALLS + BAKER_ATTEMPTS) * options.max_nodes)
+    agents = JSONAgents(settings, deadline, max_calls=12 + (IMPLEMENTATION_CALLS + BAKER_ATTEMPTS) * options.max_nodes,
+                        concurrency=options.llm_concurrency)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     directory = (options.output_dir or Path('artifacts') / f'{task_path.parent.name}-{stamp}-{uuid4().hex[:6]}').resolve()
     report = await extract_task(task_path, directory, settings, agents=agents)
