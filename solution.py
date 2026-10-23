@@ -1,7 +1,7 @@
 """Platform entry: python solution.py path/to/task.md [--max-experiments 10]."""
 
 import sys
-from agent.__main__ import main as cli
+from agent_main import main as cli
 
 
 def main(argv=None):
