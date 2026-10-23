@@ -3,6 +3,7 @@
 import ast
 import hashlib
 import importlib.util
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -53,12 +54,15 @@ def input_hashes(directory: Path, files: dict[str, str]) -> dict[str, str]:
     return result
 
 
-def inventory(directory: Path, limit: int = 150) -> list[dict]:
+def inventory(directory: Path, limit: int | None = None, *, exclude: tuple[Path, ...] = ()) -> list[dict]:
     """Send filenames and sizes, never raw dataset rows or hidden settings, to Qwen."""
     files = []
+    excluded = tuple(path.resolve() for path in exclude)
     for path in sorted(directory.rglob('*')):
         relative = path.relative_to(directory)
-        if any(p.startswith('.') or p in {'artifacts', 'outputs', '__pycache__', 'tmp'} for p in relative.parts):
+        if any(p.startswith('.') or p == '__pycache__' for p in relative.parts):
+            continue
+        if any(path.resolve().is_relative_to(root) for root in excluded):
             continue
         if path.is_file() and path.resolve().is_relative_to(directory.resolve()):
             files.append({'path': relative.as_posix(), 'bytes': path.stat().st_size})
@@ -99,7 +103,7 @@ def check_code(code: str, functions: tuple[str, ...]):
         raise ValueError('Missing required functions: ' + ', '.join(sorted(set(functions) - names)))
     allowed = {'math', 'statistics', 'collections', 'itertools', 'functools', 'pathlib', 'csv', 'json',
                're', 'datetime', 'typing', 'io', 'zipfile', 'gzip', 'random', 'copy', 'time', 'tempfile',
-               'warnings', 'contextlib', 'operator', 'dataclasses', 'enum', '__future__'} | set(LIBRARIES.values())
+               'warnings', 'contextlib', 'operator', 'dataclasses', 'enum', '__future__', 'os'} | set(LIBRARIES.values())
     for node in ast.walk(tree):
         imports = [a.name for a in node.names] if isinstance(node, ast.Import) else (
             [node.module or ''] if isinstance(node, ast.ImportFrom) else [])
@@ -125,7 +129,16 @@ def check_code(code: str, functions: tuple[str, ...]):
 def module(path: Path, expected_hash: str):
     if file_hash(path) != expected_hash:
         raise ValueError('Generated source changed after it was recorded')
-    spec = importlib.util.spec_from_file_location('generated_' + path.stem, path)
+    spec = importlib.util.spec_from_file_location('generated_' + path.stem + '_' + expected_hash[:12], path)
     result = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(result)
+    previous = sys.modules.get(spec.name)
+    sys.modules[spec.name] = result
+    try:
+        exec(compile(path.read_bytes(), str(path), 'exec'), result.__dict__)
+    except BaseException:
+        if previous is None:
+            sys.modules.pop(spec.name, None)
+        else:
+            sys.modules[spec.name] = previous
+        raise
     return result

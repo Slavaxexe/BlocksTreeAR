@@ -44,13 +44,14 @@ def runtime_contract(preparation):
 
 def implementation_context(context):
     """Keep the current plan authoritative; ancestor refusals are not execution facts."""
-    keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error',
+    threads = context.get('runtime_limits', {}).get('threads_per_executor', 2)
+    keys = ('task_text', 'preparation', 'runtime_limits', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error',
             'error_location', 'api_reference', 'repair_mode', 'failed_stage',
             'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
     result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
-              'toolkit': TOOLKIT_GUIDE,
+              'toolkit': {**TOOLKIT_GUIDE, 'example': TOOLKIT_GUIDE['example'].replace('thread_count=4', f'thread_count={threads}')},
               # Notes only for libraries the error or plan mentions (error first), so the context stays small.
-              'library_notes': library_notes(str(context.get('execution_error', '')) + json.dumps(context['start']['hypothesis'])),
+              'library_notes': library_notes(str(context.get('execution_error', '')) + json.dumps(context['start']['hypothesis']), threads=threads),
               **{key: context[key] for key in keys if key in context}}
     if context.get('repair_mode') == 'edits' and context.get('previous_code'):  # numbered lines for line edits
         result['previous_code'] = '\n'.join(f'{i:4d} | {line}' for i, line in enumerate(context['previous_code'].split('\n'), 1))
@@ -109,7 +110,7 @@ def baker_context(context):
             'error_source': ('model_request' if result.get('replan') else 'model_claim' if error.startswith('Implementation blocked:') else
                              'review' if result.get('stage') == 'review' else
                              'runtime' if result.get('stage') in ('check', 'execution') else 'controller') if error else None}
-    keys = ('task_text', 'preparation', 'installed_libraries', 'allowed_libraries', 'remaining_nodes', 'remaining_seconds',
+    keys = ('task_text', 'preparation', 'runtime_limits', 'installed_libraries', 'allowed_libraries', 'remaining_nodes', 'remaining_seconds',
             'experiment_timeout_seconds', 'available_parents')
     def brief(node):
         measured = node['result'].get('diagnostics', {})
@@ -122,7 +123,9 @@ def baker_context(context):
     leader = next((n for n in measured if n['node_id'] == parent['start']['node_id']), None)
     recent = ([leader] if leader else []) + [n for n in measured if n is not leader][-2:]
     return {**{k: context[k] for k in keys if k in context}, 'runtime_contract': runtime_contract(context['preparation']),
-        'toolkit': TOOLKIT_GUIDE, 'library_notes_available': sorted(DOCS), 'tried': tried_directions(context),
+        'toolkit': {**TOOLKIT_GUIDE, 'example': TOOLKIT_GUIDE['example'].replace(
+            'thread_count=4', 'thread_count=' + str(context.get('runtime_limits', {}).get('threads_per_executor', 2)))},
+        'library_notes_available': sorted(DOCS), 'tried': tried_directions(context),
         'explore_parent': explore_parent(context, parent['start']['node_id']),
         'parent': {'node_id': parent['start']['node_id'], 'pipeline': base, 'code': parent['code'],
                    'score': parent['finish']['value']},
@@ -170,6 +173,9 @@ class JSONAgents:
         invalid, feedback = 0, None
         # Provider JSON-mode for every role that returns plain JSON; code roles keep free text inside their schema.
         json_mode = not code
+        initial_tokens = min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens
+        token_limit = initial_tokens
+        token_growth_rejected = False
         limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
         attempt = 0
         while attempt < attempts:  # 429 waits may extend attempts
@@ -194,7 +200,7 @@ class JSONAgents:
                                            timeout=min(self.settings.timeout_seconds or remaining, remaining)) as client:
                         response = await client.chat.completions.create(
                             model=self.settings.model, messages=messages, temperature=temperature,
-                            max_tokens=min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens,
+                            max_tokens=token_limit,
                             **({'response_format': {'type': 'json_object'}} if json_mode else {}),
                             extra_body={"reasoning_effort": "none",
                                 "chat_template_kwargs": {"enable_thinking": False}})
@@ -210,6 +216,9 @@ class JSONAgents:
                 self.record(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
                 if status == 400 and json_mode and attempt < attempts:  # a proxy may reject JSON-mode: ask again without it
                     json_mode = False
+                    continue
+                if status == 400 and token_limit != initial_tokens and attempt < attempts:
+                    token_limit, token_growth_rejected = initial_tokens, True
                     continue
                 if status == 429 and self.deadline - time.monotonic() > 30:
                     # A shared server may refuse while its owner has priority: wait while the run budget allows,
@@ -235,8 +244,9 @@ class JSONAgents:
             usage = getattr(response, 'usage', None)
             stats = dict(role=role, node_id=self.node_id, attempt=attempt, prompt_tokens=getattr(usage, 'prompt_tokens', 0) or 0,
                          completion_tokens=getattr(usage, 'completion_tokens', 0) or 0)
+            truncated = getattr((getattr(response, 'choices', None) or [None])[0], 'finish_reason', None) == 'length'
             try:
-                if getattr((getattr(response, 'choices', None) or [None])[0], 'finish_reason', None) == 'length':
+                if truncated:
                     raise ValueError('Response truncated by token limit')
                 json.dumps(json.loads(content or ''), allow_nan=False)
                 result = schema.model_validate_json(content or "", context={"source": source, **(validation or {})})
@@ -250,6 +260,14 @@ class JSONAgents:
                 invalid += 1
                 if invalid > repairs or attempt == attempts:
                     raise QwenError(f"Qwen: роль {role} не вернула валидный JSON-контракт. {feedback}") from None
+                if not content or truncated:
+                    json_mode = False
+                    if truncated and not token_growth_rejected:
+                        token_limit = max(initial_tokens, min(token_limit * 2, 65536))
+                    messages[2:] = [{"role": "user", "content":
+                        "The previous answer was empty or truncated. Regenerate the complete schema object "
+                        "from the original task. Keep values, evidence and code concise; omit extra commentary."}]
+                    continue
                 # Keep the last rejected answer and specific error; retries must not inflate the context.
                 messages[2:] = [{"role": "assistant", "content": (content or "")[:20000]},
                                 {"role": "user", "content": "Correct this JSON using the latest context above. Validation errors: " + feedback}]
@@ -385,11 +403,12 @@ class JSONAgents:
             "Handle unseen categories and degenerate smoke samples within the saved plan when possible. "
             "Do not load files or change split/metric. Predictions must suit the common scorer and submission writer. "
             "Implement exactly the model stated in start, whether constant or learned. History cannot override this node's plan. "
-            "Do not report a score yourself. Use n_jobs/thread_count 4. "
+            "Do not report a score yourself. Set library threads from runtime_limits.threads_per_executor "
+            "when supplied; otherwise use 2. "
             "CatBoost: pass cat_features for EVERY non-numeric column, including derived string features, after converting "
             "them with .astype(str) (NaN -> 'nan'); XGBoost needs numeric codes or enable_categorical with category dtype. "
             "At MODULE scope return only imports, function/class definitions and literal constants. "
-            "Inside fit_predict and helper functions, normal assignments, computed column lists and comprehensions ARE allowed. "
+            "Inside fit_model and helper functions, normal assignments, computed column lists and comprehensions ARE allowed. "
             "Move computed globals inside those functions; this never requires changing the planned preprocessing or model. "
             "Do not add a main block; "
             "the controller appends the common entry point handling --start, data, evaluation and output files. "
@@ -447,7 +466,7 @@ class JSONAgents:
             "The executor receives labeled fit rows and UNLABELED validation/test rows; do not require refitting on full labeled train. "
             "Train fit_model on fit and return a reusable predictor for both validation and test. Early stopping/thresholds/calibration "
             "must use an inner split of fit. Separate finalization refits the selected source on all train rows without a new validation score. "
-            "At most one other experiment runs concurrently. "
+            "runtime_limits.executors is the maximum number of concurrent experiments, including this one. "
             "Algorithms, features and parameters are arbitrary within installed dependencies and task constraints. "
             "allowed_libraries maps all permitted distributions to import names; installed_libraries gives local versions. "
             "Choose from installed permitted libraries, including boosting, neural networks and AutoML; missing locally "
@@ -473,7 +492,7 @@ class JSONAgents:
             "AutoGluon, LightAutoML and FLAML are permitted tools: controller reference nodes may already "
             "run them; you may improve from such a parent, run AutoML on engineered features, or blend AutoML with other "
             "models in one node when the measured history suggests complementary errors. "
-            "Libraries may use 4 threads.\n"
+            "Set library threads from runtime_limits.threads_per_executor when supplied; otherwise use 2.\n"
             "Diversity: `tried` lists every model family with its node count and best score. The two proposals must "
             "change different things — one of: features/data, learner, loss or class treatment, ensemble. A family with "
             "3 or more completed nodes that never beat the leader is exhausted: propose it again only with a genuinely new "

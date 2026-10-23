@@ -354,7 +354,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
         extraction = load(directory / 'extraction.json', Extraction)
         update(status='running', stage='preparation')
         context = {'task_text': task_path.read_text(encoding='utf-8'),
-                   'extraction': extraction.model_dump(mode='json'), 'inventory': inventory(task_path.parent),
+                   'extraction': extraction.model_dump(mode='json'), 'inventory': inventory(task_path.parent, exclude=(directory,)),
+                   'runtime_limits': {'executors': options.executors, 'threads_per_executor': CHILD['threads']},
                    **library_context()}
         if options.platform_output:
             context['platform_output'] = {'filename': 'submission.csv', 'format': 'CSV',
@@ -380,11 +381,18 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 await process(['-m', 'alfa_agent.worker', '--prepare', str(directory)], directory,
                               directory / 'preparation.log', deadline, options.experiment_timeout)
                 preparation = load(directory / 'preparation.json', Preparation)
-                review = await review_source(agents, directory / 'preparation_review.json', directory / 'prepare.py',
-                    {'kind': 'preparation', 'code': draft.code, 'contract': review_contract(preparation.model_dump(mode='json')),
-                     'requirements': {k: {field: value for field, value in block.items() if field != 'evidence'}
-                                      for k, block in extraction.model_dump(mode='json').items() if isinstance(block, dict)},
-                     'execution': {'status': 'passed', 'checks': ['loaded_tables', 'measured_profile', 'disjoint_split']}})
+                try:
+                    # Review is optional when the service is unavailable; keep time for a first prediction.
+                    async with asyncio.timeout(min(60., max(0., deadline - time.monotonic()) * .1)):
+                        review = await review_source(agents, directory / 'preparation_review.json', directory / 'prepare.py',
+                            {'kind': 'preparation', 'code': draft.code, 'contract': review_contract(preparation.model_dump(mode='json')),
+                             'requirements': {k: {field: value for field, value in block.items() if field != 'evidence'}
+                                              for k, block in extraction.model_dump(mode='json').items() if isinstance(block, dict)},
+                             'execution': {'status': 'passed', 'checks': ['loaded_tables', 'measured_profile', 'disjoint_split']}})
+                except (QwenError, TimeoutError) as error:
+                    message = (str(error) or 'Review time limit reached').replace(settings.api_key, '[REDACTED]')
+                    update(warnings=report.warnings + ['Preparation review unavailable; runtime checks passed: ' + message])
+                    break
                 context['review_findings'] = [f.model_dump() for f in review.findings]
                 if review.status == 'revise':
                     raise ValueError('Preparation reviewer requested correction: ' + canonical(context['review_findings']))
@@ -402,6 +410,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 update(warnings=report.warnings + ['Preparation required one code repair'])
         update(stage='baseline', checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
         shared = {'task_text': task_path.read_text(encoding='utf-8'),
+                  'runtime_limits': context['runtime_limits'],
                   'extraction': extraction.model_dump(mode='json'), 'preparation': preparation.model_dump(mode='json'),
                   **library_context()}
         delta = Delta(preparation_sha256=file_hash(directory / 'preparation.json'), metric=preparation.metric)
@@ -586,7 +595,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     plan = json.loads((directory / 'blend.json').read_text())
                     output = within(directory, plan['submission_file'])
                     from .worker import validate_submission
-                    validate_submission(output, preparation.output, preparation.profile['test']['rows'])
+                    validate_submission(output, preparation.output, preparation.profile['test']['rows'],
+                                        id_columns=preparation.data.id_columns)
                     atomic_bytes(within(task_path.parent, preparation.output.filename), output.read_bytes())
                     blended = True
                     update(checks=report.checks + ['validated_blend', 'final_submission_validated'],
@@ -610,7 +620,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     raise ValueError('Final refit does not match the selected source and preparation')
                 output = within(directory, final.submission_file)
                 from .worker import validate_submission
-                validate_submission(output, preparation.output, preparation.profile['test']['rows'])
+                validate_submission(output, preparation.output, preparation.profile['test']['rows'],
+                                        id_columns=preparation.data.id_columns)
                 atomic_bytes(within(task_path.parent, preparation.output.filename), output.read_bytes())
                 if (directory / 'best.json').exists():
                     best = json.loads((directory / 'best.json').read_text())

@@ -29,8 +29,9 @@ DOCS = {
                "on fit only; sklearn.metrics f1_score(average='macro') etc. SVC/KNN scale badly above ~20k rows.",
     'autogluon': "AutoGluon 1.3.1: from autogluon.tabular import TabularPredictor; TabularPredictor(label=target, "
                  "problem_type='regression'|'binary'|'multiclass', eval_metric='root_mean_squared_error'|'f1_macro'|..., "
-                 "path=tempdir, verbosity=0).fit(df_with_target, time_limit=T, presets='best_quality', num_cpus=4, "
-                 "num_gpus=0, dynamic_stacking=False, sample_weight='balance_weight' for imbalanced labels, tuning_data="
+                 "path=tempdir, verbosity=0, sample_weight='balance_weight' for imbalanced labels).fit(df_with_target, "
+                 "time_limit=T, presets='best_quality', num_cpus=4, "
+                 "num_gpus=0, dynamic_stacking=False, tuning_data="
                  "optional own holdout); predict(df) / predict_proba(df)[label]. Drop id columns. Keep the tempdir alive "
                  "with the predictor. FastAI is not installed. Toolkit: automl(fit, preparation, 'autogluon', T).",
     'lightautoml': "LightAutoML 0.4.2: from lightautoml.automl.presets.tabular_presets import TabularAutoML; "
@@ -71,13 +72,18 @@ ALIASES = {  # plan/error wording → note
 }
 
 
-def library_notes(text: str, limit: int = 2) -> dict[str, str]:
+def library_notes(text: str, limit: int = 2, *, threads: int = 4) -> dict[str, str]:
     """Notes for the first `limit` libraries mentioned in text (plan, error, previous imports)."""
     text = text.casefold()
     found = sorted((match.start(), library) for alias, library in ALIASES.items()
                    for match in [re.search(re.escape(alias), text)] if match)
     names = list(dict.fromkeys(library for _, library in found))[:limit]
-    return {name: DOCS[name] for name in names}
+    result = {name: DOCS[name] for name in names}
+    for name, note in result.items():
+        for parameter in ('n_jobs=', 'thread_count=', 'num_cpus=', 'cpu_limit=', 'set_num_threads(', "'n_jobs': "):
+            note = note.replace(parameter + '4', parameter + str(threads))
+        result[name] = note
+    return result
 
 
 def api_reference(code: str, error: str = '', limit: int = 4000) -> dict[str, str]:

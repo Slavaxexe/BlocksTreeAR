@@ -25,7 +25,7 @@ THREADS = int(os.environ.get('ALFA_THREADS', '2'))
 SHIFT_CHECK = os.environ.get('ALFA_SHIFT_CHECK') == '1'
 
 
-def validate_submission(path: Path, output, expected_rows: int):
+def validate_submission(path: Path, output, expected_rows: int, *, test=None, id_columns=()):
     if not path.is_file() or not path.stat().st_size:
         raise ValueError('Submission writer produced no nonempty output file')
     if (output.format or '').upper() not in {'CSV', 'TSV'}:
@@ -35,10 +35,20 @@ def validate_submission(path: Path, output, expected_rows: int):
         header = next(rows, [])
         if not header or (output.columns and header != output.columns):
             raise ValueError('Submission columns or column order differ from preparation.output.columns')
+        identifiers = {header.index(column): column for column in id_columns if column in header}
+        if test is not None and (len(test) != expected_rows or any(column not in test for column in identifiers.values())):
+            raise ValueError('Submission identifier reference does not match the test table')
         count = 0
         for row in rows:
             if len(row) != len(header):
                 raise ValueError('Submission contains a row with the wrong number of columns')
+            for index, value in enumerate(row):
+                if not value.strip():
+                    raise ValueError(f'Submission contains an empty value in {header[index]}')
+                if index in identifiers and test is not None:
+                    column = identifiers[index]
+                    if count >= len(test) or value != str(test[column].iloc[count]):
+                        raise ValueError(f'Submission identifier/order differs from test in {column} at row {count + 1}')
             count += 1
         if count != expected_rows:
             raise ValueError(f'Submission row count {count} differs from test row count {expected_rows}')
@@ -300,7 +310,8 @@ def smoke(directory: Path, preparation_path: Path):
         destination = within(Path(temporary), preparation.output.filename)
         destination.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(tables['test'], predictions, tables, config, destination)
-        validate_submission(destination, preparation.output, len(tables['test']))
+        validate_submission(destination, preparation.output, len(tables['test']),
+                            test=tables['test'], id_columns=preparation.data.id_columns)
     atomic_bytes(directory / 'smoke.json', json.dumps({'status': 'passed',
         'prediction_rows': len(predictions), 'prediction_columns': list(predictions.columns),
         'checks': ['prediction_frames', 'prediction_row_counts', 'finite_predictions', 'input_immutability', 'submission_format'] +
@@ -334,7 +345,8 @@ def evaluate(start_path: Path, fit_model, *, start_sha256=None, code_sha256=None
         submission_file = within(directory, start.outputs['submission'])
         submission_file.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(tables['test'], test_predictions, tables, config, submission_file)
-        validate_submission(submission_file, preparation.output, len(tables['test']))
+        validate_submission(submission_file, preparation.output, len(tables['test']),
+                            test=tables['test'], id_columns=preparation.data.id_columns)
         value, evaluation, error = None, 'unavailable', None
         if preparation.metric.status == 'ready':
             try:
@@ -392,7 +404,7 @@ def refit(start_path: Path, member: bool = False):
         destination = within(root / 'final', preparation.output.filename)
         destination.parent.mkdir(parents=True, exist_ok=True)
         reader.write_submission(test, predictions, tables, config, destination)
-        validate_submission(destination, preparation.output, len(test))
+        validate_submission(destination, preparation.output, len(test), test=test, id_columns=preparation.data.id_columns)
         result = result.model_copy(update={'status': 'completed', 'fit_input_rows': len(train),
                                            'submission_file': destination.relative_to(root).as_posix()})
     except Exception as error:
@@ -482,7 +494,8 @@ def blend_final(root: Path):
     destination = within(root / 'final', preparation.output.filename)
     destination.parent.mkdir(parents=True, exist_ok=True)
     reader.write_submission(tables['test'], predictions, tables, config, destination)
-    validate_submission(destination, preparation.output, len(tables['test']))
+    validate_submission(destination, preparation.output, len(tables['test']),
+                        test=tables['test'], id_columns=preparation.data.id_columns)
     plan.update(sources=sources, submission_file=destination.relative_to(root).as_posix())
     atomic_bytes(root / 'blend.json', json.dumps(plan, indent=1).encode())
 
