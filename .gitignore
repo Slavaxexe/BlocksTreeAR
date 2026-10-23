@@ -15,3 +15,5 @@ logs/
 artifacts/
 outputs/
 *.zip
+catboost_info/
+model_selection/tests/out/
