@@ -1,33 +1,13 @@
-# Local caches and temporary output
-__pycache__/
-*.py[cod]
-.venv/
 .env
 .env.*
 !.env.example
-tmp/
-
-# Local logs
+.venv/
+__pycache__/
+*.py[cod]
+artifacts/
+data/
+outputs/
 logs/
 *.log
-
-# Generated model artifacts
-artifacts/
-outputs/
-evaluation/smoke_report.json
-data/**/submission.csv
 *.zip
-.playwright-cli/
-output/playwright/
-
-# Local datasets and organizer/reference materials are not source code.
-data/
-baseline/
-evaluation/
-Info/assignment.pdf
-Info/datasets.md
-Info/sources.json
-Info/task.md
-Info/api_parallelism.md
-tools/check_api_parallelism.py
-tests/test_practice.py
+submission.csv
