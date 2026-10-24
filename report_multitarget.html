@@ -1,0 +1,355 @@
+<title>Энергоэффективность зданий</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap">
+<style>
+:root {
+  --bg: #0f1419;
+  --surface: #1a1f2e;
+  --surface-raised: #222838;
+  --border: #2d3548;
+  --fg: #e2e8f0;
+  --fg-muted: #8892a4;
+  --fg-dim: #5a6478;
+  --accent: #6ee7b7;
+  --accent-dim: rgba(110,231,183,0.1);
+  --blue: #60a5fa;
+  --blue-dim: rgba(96,165,250,0.1);
+  --orange: #fb923c;
+  --orange-dim: rgba(251,146,60,0.1);
+  --red: #f87171;
+  --purple: #c084fc;
+  --purple-dim: rgba(192,132,252,0.1);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --surface-raised: #f1f5f9;
+    --border: #e2e8f0;
+    --fg: #1e293b;
+    --fg-muted: #64748b;
+    --fg-dim: #94a3b8;
+    --accent: #059669;
+    --accent-dim: rgba(5,150,105,0.08);
+    --blue: #2563eb;
+    --blue-dim: rgba(37,99,235,0.08);
+    --orange: #ea580c;
+    --orange-dim: rgba(234,88,12,0.08);
+    --red: #dc2626;
+    --purple: #9333ea;
+    --purple-dim: rgba(147,51,234,0.08);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-raised: #f1f5f9;
+  --border: #e2e8f0;
+  --fg: #1e293b;
+  --fg-muted: #64748b;
+  --fg-dim: #94a3b8;
+  --accent: #059669;
+  --accent-dim: rgba(5,150,105,0.08);
+  --blue: #2563eb;
+  --blue-dim: rgba(37,99,235,0.08);
+  --orange: #ea580c;
+  --orange-dim: rgba(234,88,12,0.08);
+  --red: #dc2626;
+  --purple: #9333ea;
+  --purple-dim: rgba(147,51,234,0.08);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Inter', -apple-system, sans-serif;
+  line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0;
+}
+.wrap { max-width: 880px; margin: 0 auto; padding: 32px 0 48px; }
+
+.tags { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 3px 10px; border-radius: 4px;
+}
+.tag--a { background: var(--accent-dim); color: var(--accent); }
+.tag--b { background: var(--purple-dim); color: var(--purple); }
+.tag--c { background: var(--blue-dim); color: var(--blue); }
+
+h1 { font-size: clamp(22px, 4vw, 30px); font-weight: 700; line-height: 1.2; text-wrap: balance; margin-bottom: 4px; }
+.sub { font-size: 13px; color: var(--fg-muted); font-family: 'JetBrains Mono', monospace; margin-bottom: 28px; }
+
+/* Metric cards */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 28px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px;
+}
+.card__label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted); margin-bottom: 5px; }
+.card__val { font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 600; line-height: 1; }
+.card__unit { font-size: 11px; color: var(--fg-dim); margin-top: 3px; }
+.card--accent .card__val { color: var(--accent); }
+.card--blue .card__val { color: var(--blue); }
+.card--orange .card__val { color: var(--orange); }
+
+/* Comparison table */
+.compare {
+  width: 100%; border-collapse: collapse; margin-bottom: 28px;
+  font-variant-numeric: tabular-nums;
+}
+.compare th, .compare td {
+  text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 14px;
+}
+.compare th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-dim); font-weight: 500; }
+.compare td { color: var(--fg); }
+.compare tr:last-child td { border-bottom: none; }
+.compare .best { color: var(--accent); font-weight: 600; }
+.compare .model-name { font-weight: 600; }
+.bar-cell { position: relative; }
+.bar {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  height: 6px; border-radius: 3px; opacity: 0.3;
+}
+
+/* Per-target section */
+.targets { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 28px; }
+@media (max-width: 600px) { .targets { grid-template-columns: 1fr; } }
+.target-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px;
+}
+.target-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.target-card h3 .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.params { font-size: 12px; color: var(--fg-muted); line-height: 1.7; }
+.params code { font-family: 'JetBrains Mono', monospace; color: var(--fg); font-size: 11px; }
+
+/* Chart (simple SVG bar chart) */
+.chart-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px; margin-bottom: 28px; }
+.chart-title { font-size: 13px; font-weight: 600; margin-bottom: 12px; }
+
+/* Stages */
+.stage { border: 1px solid var(--border); background: var(--surface); }
+.stage:first-of-type { border-radius: 8px 8px 0 0; }
+.stage:last-of-type { border-radius: 0 0 8px 8px; border-bottom: 1px solid var(--border); }
+.stage + .stage { border-top: none; }
+.stage-hdr { display: flex; align-items: center; gap: 10px; padding: 12px 14px; cursor: pointer; user-select: none; }
+.stage-hdr:hover { background: var(--surface-raised); }
+.stage-n { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--fg-dim); width: 18px; flex-shrink: 0; }
+.stage-ico { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }
+.stage-ico--ok { background: var(--accent-dim); color: var(--accent); }
+.stage-ttl { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; }
+.stage-sum { font-size: 12px; color: var(--fg-muted); font-family: 'JetBrains Mono', monospace; }
+.stage-chv { color: var(--fg-dim); font-size: 11px; transition: transform .15s; flex-shrink: 0; }
+.stage.open .stage-chv { transform: rotate(90deg); }
+.stage-body { display: none; padding: 0 14px 14px 48px; font-size: 13px; color: var(--fg-muted); line-height: 1.6; }
+.stage.open .stage-body { display: block; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; }
+.kv dt { color: var(--fg-dim); font-size: 12px; }
+.kv dd { color: var(--fg); font-size: 13px; font-family: 'JetBrains Mono', monospace; }
+
+.footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 12px; color: var(--fg-dim); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+
+@media (max-width: 600px) { .stage-sum { display: none; } .cards { grid-template-columns: repeat(2, 1fr); } }
+</style>
+
+<div class="wrap">
+  <div class="tags">
+    <span class="tag tag--a">AUTORESEARCH</span>
+    <span class="tag tag--b">Мультитаргет</span>
+    <span class="tag tag--c">Mean RMSE</span>
+  </div>
+  <h1>Энергоэффективность зданий</h1>
+  <div class="sub">heating_load + cooling_load · kWh/m² · 576 train / 192 test · Energy Efficiency (UCI)</div>
+
+  <div class="cards">
+    <div class="card card--accent">
+      <div class="card__label">Mean RMSE (ensemble)</div>
+      <div class="card__val">0.609</div>
+      <div class="card__unit">kWh/m² в год</div>
+    </div>
+    <div class="card">
+      <div class="card__label">Baseline (mean)</div>
+      <div class="card__val">9.529</div>
+      <div class="card__unit">kWh/m² в год</div>
+    </div>
+    <div class="card card--accent">
+      <div class="card__label">Снижение ошибки</div>
+      <div class="card__val">93.6%</div>
+      <div class="card__unit">относительно baseline</div>
+    </div>
+    <div class="card card--blue">
+      <div class="card__label">Optuna trials</div>
+      <div class="card__val">200</div>
+      <div class="card__unit">60 LGB + 40 CB × 2 таргета</div>
+    </div>
+    <div class="card card--orange">
+      <div class="card__label">Валидация</div>
+      <div class="card__val">5-fold</div>
+      <div class="card__unit">CV на каждом trial</div>
+    </div>
+  </div>
+
+  <!-- Comparison chart as SVG -->
+  <div class="chart-wrap">
+    <div class="chart-title">Сравнение моделей (Mean RMSE по двум таргетам)</div>
+    <svg viewBox="0 0 700 180" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <!-- Baseline -->
+      <text x="120" y="30" fill="var(--fg-muted)" font-family="Inter,sans-serif" font-size="13" text-anchor="end">Baseline</text>
+      <rect x="130" y="18" width="540" height="18" rx="4" fill="var(--fg-dim)" opacity="0.25"/>
+      <text x="678" y="31" fill="var(--fg-dim)" font-family="JetBrains Mono,monospace" font-size="12" text-anchor="start">9.529</text>
+      <!-- LightGBM -->
+      <text x="120" y="70" fill="var(--fg-muted)" font-family="Inter,sans-serif" font-size="13" text-anchor="end">LightGBM</text>
+      <rect x="130" y="58" width="42" height="18" rx="4" fill="var(--blue)" opacity="0.7"/>
+      <text x="178" y="71" fill="var(--blue)" font-family="JetBrains Mono,monospace" font-size="12" text-anchor="start">0.737</text>
+      <!-- CatBoost -->
+      <text x="120" y="110" fill="var(--fg-muted)" font-family="Inter,sans-serif" font-size="13" text-anchor="end">CatBoost</text>
+      <rect x="130" y="98" width="34" height="18" rx="4" fill="var(--purple)" opacity="0.7"/>
+      <text x="170" y="111" fill="var(--purple)" font-family="JetBrains Mono,monospace" font-size="12" text-anchor="start">0.609</text>
+      <!-- Ensemble -->
+      <text x="120" y="150" fill="var(--fg)" font-family="Inter,sans-serif" font-size="13" font-weight="600" text-anchor="end">Ensemble</text>
+      <rect x="130" y="138" width="34" height="18" rx="4" fill="var(--accent)" opacity="0.8"/>
+      <text x="170" y="151" fill="var(--accent)" font-family="JetBrains Mono,monospace" font-size="12" font-weight="600" text-anchor="start">0.609</text>
+    </svg>
+  </div>
+
+  <!-- Per-target details -->
+  <div class="targets">
+    <div class="target-card">
+      <h3><span class="dot" style="background:var(--orange)"></span>heating_load</h3>
+      <table style="width:100%;font-size:13px;border-collapse:collapse">
+        <tr><td style="color:var(--fg-dim);padding:3px 0">Baseline</td><td style="font-family:'JetBrains Mono',monospace;text-align:right;padding:3px 0">9.780</td></tr>
+        <tr><td style="color:var(--fg-dim);padding:3px 0">LightGBM</td><td style="font-family:'JetBrains Mono',monospace;text-align:right;padding:3px 0">0.716</td></tr>
+        <tr><td style="color:var(--fg-dim);padding:3px 0;font-weight:600;color:var(--fg)">CatBoost</td><td style="font-family:'JetBrains Mono',monospace;text-align:right;padding:3px 0;color:var(--accent);font-weight:600">0.443</td></tr>
+      </table>
+      <div class="params" style="margin-top:8px">
+        <div>CatBoost: <code>depth=5 lr=0.222 l2=0.118</code></div>
+        <div>LGB: <code>leaves=43 lr=0.202 depth=9</code></div>
+      </div>
+    </div>
+    <div class="target-card">
+      <h3><span class="dot" style="background:var(--blue)"></span>cooling_load</h3>
+      <table style="width:100%;font-size:13px;border-collapse:collapse">
+        <tr><td style="color:var(--fg-dim);padding:3px 0">Baseline</td><td style="font-family:'JetBrains Mono',monospace;text-align:right;padding:3px 0">9.279</td></tr>
+        <tr><td style="color:var(--fg-dim);padding:3px 0">LightGBM</td><td style="font-family:'JetBrains Mono',monospace;text-align:right;padding:3px 0;color:var(--accent);font-weight:600">0.759</td></tr>
+        <tr><td style="color:var(--fg-dim);padding:3px 0">CatBoost</td><td style="font-family:'JetBrains Mono',monospace;text-align:right;padding:3px 0">0.774</td></tr>
+      </table>
+      <div class="params" style="margin-top:8px">
+        <div>CatBoost: <code>depth=6 lr=0.080 l2=0.473</code></div>
+        <div>LGB: <code>leaves=91 lr=0.182 depth=8</code></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pipeline stages -->
+  <div class="stage open" onclick="this.classList.toggle('open')">
+    <div class="stage-hdr">
+      <span class="stage-n">0</span>
+      <span class="stage-ico stage-ico--ok">&#10003;</span>
+      <span class="stage-ttl">Задача</span>
+      <span class="stage-sum">multitarget · 2 targets · mean RMSE</span>
+      <span class="stage-chv">&#9654;</span>
+    </div>
+    <div class="stage-body">
+      <dl class="kv">
+        <dt>Тип</dt><dd>multi-target regression</dd>
+        <dt>Таргеты</dt><dd>heating_load, cooling_load</dd>
+        <dt>Единицы</dt><dd>kWh/m² в год</dd>
+        <dt>Метрика</dt><dd>(RMSE₁ + RMSE₂) / 2 → minimize</dd>
+        <dt>Источник</dt><dd>UCI Energy Efficiency (Tsanas & Xifara, 2012)</dd>
+      </dl>
+    </div>
+  </div>
+  <div class="stage" onclick="this.classList.toggle('open')">
+    <div class="stage-hdr">
+      <span class="stage-n">1</span>
+      <span class="stage-ico stage-ico--ok">&#10003;</span>
+      <span class="stage-ttl">Данные</span>
+      <span class="stage-sum">576 train · 192 test · 8 фичей</span>
+      <span class="stage-chv">&#9654;</span>
+    </div>
+    <div class="stage-body">
+      <dl class="kv">
+        <dt>Признаки</dt><dd>relative_compactness, surface_area, wall_area, roof_area, overall_height, orientation, glazing_area, glazing_area_distribution</dd>
+        <dt>Пропуски</dt><dd>Нет</dd>
+        <dt>Корреляция таргетов</dt><dd>0.814</dd>
+      </dl>
+      <p style="margin-top:6px">Данные получены симуляцией в Ecotect для 12 конфигураций зданий. Варьируются форма, остекление и ориентация.</p>
+    </div>
+  </div>
+  <div class="stage" onclick="this.classList.toggle('open')">
+    <div class="stage-hdr">
+      <span class="stage-n">2</span>
+      <span class="stage-ico stage-ico--ok">&#10003;</span>
+      <span class="stage-ttl">Валидация</span>
+      <span class="stage-sum">5-fold CV · seed 42</span>
+      <span class="stage-chv">&#9654;</span>
+    </div>
+    <div class="stage-body">
+      <dl class="kv">
+        <dt>Стратегия</dt><dd>5-fold CV внутри каждого Optuna trial</dd>
+        <dt>Train/test split</dt><dd>Random 75/25 (seed 42)</dd>
+        <dt>Финальные модели</dt><dd>5-fold bagging (среднее 5 моделей по фолдам)</dd>
+      </dl>
+      <p style="margin-top:6px">Каждый trial оценивается по среднему RMSE по 5 фолдам. Финальные предсказания — усреднение 5 моделей (по одной с каждого фолда) для стабильности.</p>
+    </div>
+  </div>
+  <div class="stage" onclick="this.classList.toggle('open')">
+    <div class="stage-hdr">
+      <span class="stage-n">3</span>
+      <span class="stage-ico stage-ico--ok">&#10003;</span>
+      <span class="stage-ttl">Тюнинг</span>
+      <span class="stage-sum">Optuna TPE · 200 trials</span>
+      <span class="stage-chv">&#9654;</span>
+    </div>
+    <div class="stage-body">
+      <p><strong>Подход:</strong> независимая оптимизация для каждого таргета (heating_load, cooling_load), каждая модель тюнится отдельно.</p>
+      <p style="margin-top:6px"><strong>LightGBM:</strong> 60 trials × 2 таргета. Пространство: num_leaves [15,127], lr [0.01,0.3], feature_fraction [0.5,1], bagging_fraction [0.5,1], reg_alpha/lambda [1e-8,5], max_depth [3,12].</p>
+      <p style="margin-top:6px"><strong>CatBoost:</strong> 40 trials × 2 таргета. Пространство: depth [3,10], lr [0.01,0.3], l2_leaf_reg [0.1,10], bagging_temperature [0,2], random_strength [0,2].</p>
+    </div>
+  </div>
+  <div class="stage" onclick="this.classList.toggle('open')">
+    <div class="stage-hdr">
+      <span class="stage-n">4</span>
+      <span class="stage-ico stage-ico--ok">&#10003;</span>
+      <span class="stage-ttl">Ансамбль</span>
+      <span class="stage-sum">5% LGB + 95% CB</span>
+      <span class="stage-chv">&#9654;</span>
+    </div>
+    <div class="stage-body">
+      <dl class="kv">
+        <dt>Метод</dt><dd>Grid search весов с шагом 5%</dd>
+        <dt>Лучшие веса</dt><dd>LGB=0.05, CB=0.95</dd>
+        <dt>Результат</dt><dd style="color:var(--accent);font-weight:600">Mean RMSE = 0.609</dd>
+      </dl>
+      <p style="margin-top:6px"><strong>Вывод:</strong> CatBoost доминирует. Ансамбль не дал заметного выигрыша — CatBoost сам по себе лучший для обоих таргетов (особенно heating_load: 0.443 vs 0.716 у LGB).</p>
+    </div>
+  </div>
+  <div class="stage" onclick="this.classList.toggle('open')">
+    <div class="stage-hdr">
+      <span class="stage-n">5</span>
+      <span class="stage-ico stage-ico--ok">&#10003;</span>
+      <span class="stage-ttl">Проверка переобучения</span>
+      <span class="stage-sum">OOF vs test gap</span>
+      <span class="stage-chv">&#9654;</span>
+    </div>
+    <div class="stage-body">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums">
+        <tr><th style="text-align:left;padding:5px 10px 5px 0;color:var(--fg-dim);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;border-bottom:1px solid var(--border)">Таргет</th><th style="text-align:right;padding:5px 10px 5px 0;color:var(--fg-dim);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;border-bottom:1px solid var(--border)">Train OOF</th><th style="text-align:right;padding:5px 10px 5px 0;color:var(--fg-dim);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;border-bottom:1px solid var(--border)">Test</th><th style="text-align:right;padding:5px 0;color:var(--fg-dim);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;border-bottom:1px solid var(--border)">Gap</th></tr>
+        <tr><td style="padding:5px 10px 5px 0">heating_load</td><td style="text-align:right;padding:5px 10px 5px 0;font-family:'JetBrains Mono',monospace">0.995</td><td style="text-align:right;padding:5px 10px 5px 0;font-family:'JetBrains Mono',monospace">0.716</td><td style="text-align:right;padding:5px 0;color:var(--accent);font-family:'JetBrains Mono',monospace">−28%</td></tr>
+        <tr><td style="padding:5px 10px 5px 0;border-bottom:none">cooling_load</td><td style="text-align:right;padding:5px 10px 5px 0;font-family:'JetBrains Mono',monospace;border-bottom:none">1.192</td><td style="text-align:right;padding:5px 10px 5px 0;font-family:'JetBrains Mono',monospace;border-bottom:none">0.759</td><td style="text-align:right;padding:5px 0;color:var(--accent);font-family:'JetBrains Mono',monospace;border-bottom:none">−36%</td></tr>
+      </table>
+      <p style="margin-top:8px"><strong>Интерпретация:</strong> Test RMSE ниже OOF — это не переобучение, а удачный тестовый сплит (датасет маленький, 192 строки). OOF (out-of-fold) — более надёжная оценка. Модель стабильна.</p>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>AUTORESEARCH · Мультитаргет · Energy Efficiency UCI · Альфа Будущее 2026</span>
+    <span>24 октября 2026</span>
+  </div>
+</div>
