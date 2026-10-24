@@ -53,6 +53,25 @@ def source_node(root, node_id, preparation_sha256):
     return directory, finish
 
 
+def read_frames(directory, record):
+    frames = {}
+    for scope, specification in record['frames'].items():
+        path = within(directory, specification['file'])
+        if file_hash(path) != specification['sha256']:
+            raise ValueError(f'{directory.name}: saved predictions changed')
+        frames[scope] = pd.read_csv(path, dtype=specification['dtypes'], keep_default_na=False)
+    if record['probabilities']:
+        path = directory / 'probabilities.npz'
+        if file_hash(path) != record['probability_sha256']:
+            raise ValueError(f'{directory.name}: saved probabilities changed')
+        with np.load(path, allow_pickle=False) as values:
+            for scope, frame in frames.items():
+                attach_probabilities(frame, values[scope], record['classes'])
+    for frame in frames.values():
+        frame.attrs['meta_held_out'] = record.get('meta_held_out', False)
+    return frames
+
+
 def load_pair(root, node_id, preparation_sha256, defaults=None, metric=None):
     directory, finish = source_node(root, node_id, preparation_sha256)
     header = directory / 'predictions.json'
@@ -61,21 +80,15 @@ def load_pair(root, node_id, preparation_sha256, defaults=None, metric=None):
         record = json.loads(header.read_text(encoding='utf-8'))
         if (record['preparation_sha256'], record['code_sha256']) != (preparation_sha256, finish['code_sha256']):
             raise ValueError(f'{node_id}: prediction metadata differs from the executed node')
-        for scope, specification in record['frames'].items():
-            path = within(directory, specification['file'])
-            if file_hash(path) != specification['sha256']:
-                raise ValueError(f'{node_id}: saved predictions changed')
-            frames[scope] = pd.read_csv(path, dtype=specification['dtypes'], keep_default_na=False)
-        if record['probabilities']:
-            path = directory / 'probabilities.npz'
-            if file_hash(path) != record['probability_sha256']:
-                raise ValueError(f'{node_id}: saved probabilities changed')
-            with np.load(path, allow_pickle=False) as values:
-                for scope, frame in frames.items():
-                    attach_probabilities(frame, values[scope], record['classes'])
-        for frame in frames.values():
-            frame.attrs['meta_held_out'] = record.get('meta_held_out', False)
+        frames = read_frames(directory, record)
+        meta_header = directory / 'meta_fit' / 'predictions.json'
+        if 'meta' not in frames and meta_header.exists():
+            meta_record = json.loads(meta_header.read_text(encoding='utf-8'))
+            if (meta_record['preparation_sha256'], meta_record['code_sha256']) != (preparation_sha256, finish['code_sha256']):
+                raise ValueError(f'{node_id}: cached meta predictions belong to another source')
+            frames['meta'] = read_frames(meta_header.parent, meta_record)['validation']
         return frames
+
     # Older runs saved label/value CSVs without an extra prediction manifest.
     labels = (defaults or {}).get('class_labels') or []
     name = ''.join(c for c in (metric or '').lower() if c.isalnum())
@@ -88,6 +101,10 @@ def load_pair(root, node_id, preparation_sha256, defaults=None, metric=None):
 
 def prediction_catalog(root, rows, leader_id, cache, defaults=None, metric=None):
     candidates = []
+    from .meta_predictions import available
+    meta_recipes = {}
+    preparation_path = root / 'preparation.json'
+    meta_enabled = preparation_path.exists() and bool(json.loads(preparation_path.read_text(encoding='utf-8')).get('validation', {}).get('ensemble_split_file'))
     for row in rows:
         if row.result.status != 'completed' or row.result.value is None:
             continue
@@ -96,7 +113,7 @@ def prediction_catalog(root, rows, leader_id, cache, defaults=None, metric=None)
             if not (directory / 'assembly.json').exists() or not (directory / 'finish.json').exists():
                 continue
             key = (row.node_id, row.result.code_sha256)
-            if key not in cache:
+            if key not in cache or (not cache[key]['meta_ready'] and (directory / 'meta_fit' / 'predictions.json').exists()):
                 frames = load_pair(root, row.node_id, row.result.preparation_sha256, defaults, metric)
                 probabilities = all('probabilities' in frame.attrs for frame in frames.values())
                 # Baker needs only a compact comparison; do not retain test/probability matrices here.
@@ -106,7 +123,8 @@ def prediction_catalog(root, rows, leader_id, cache, defaults=None, metric=None)
                               'meta_ready': 'meta' in frames and frames['meta'].attrs.get('meta_held_out', False)}
             candidates.append({'node_id': row.node_id, 'value': row.result.value,
                 'probabilities': cache[key]['probabilities'],
-                'oof_recipe': cache[key]['meta_ready'], 'meta_ready': cache[key]['meta_ready']})
+                'oof_recipe': cache[key]['meta_ready'], 'meta_ready': cache[key]['meta_ready'],
+                'meta_available': meta_enabled and available(root, row.node_id, meta_recipes)})
         except (OSError, ValueError, KeyError):
             continue
     leader = next((row for row in rows if row.node_id == leader_id), None)

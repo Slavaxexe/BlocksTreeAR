@@ -8,6 +8,42 @@ class Plan(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, allow_inf_nan=False, frozen=True)
 
 
+class SplitPlan(Plan):
+    strategy: Literal['random', 'stratified', 'group', 'stratified_group', 'time', 'group_time', 'ordered'] = 'random'
+    fraction: float = Field(default=.2, gt=0, lt=1, description='Validation fraction; time uses complete periods')
+    seed: int = 42
+    validation_rows: int | None = Field(default=None, ge=1, description='Explicit validation size; time may include extra tied rows')
+    time_column: str | None = None
+    group_columns: list[str] = Field(default_factory=list)
+    stratify_columns: list[str] = Field(default_factory=list, description='Default: task targets when stratification is requested')
+    stratify_bins: int | None = Field(default=None, ge=2, description='Optional quantile bins for one numeric stratification column')
+    validation_periods: int | None = Field(default=None, ge=1, description='Hold out this many latest distinct time values')
+    cutoff: float | int | str | None = Field(default=None, description='Validation starts at this numeric period or ISO timestamp, inclusive')
+    gap_periods: int = Field(default=0, ge=0, description='Exclude this many distinct periods immediately before validation')
+    gap_rows: int = Field(default=0, ge=0, description='Ordered split only: exclude rows immediately before validation')
+    rare_class_policy: Literal['error', 'train_only'] = 'error'
+
+    @model_validator(mode='after')
+    def supported_parameters(self):
+        timed = self.strategy in {'time', 'group_time'}
+        grouped = self.strategy in {'group', 'stratified_group', 'group_time'}
+        if timed and not self.time_column:
+            raise ValueError('Time split requires time_column')
+        if grouped and not self.group_columns:
+            raise ValueError('Group split requires group_columns')
+        if not grouped and self.group_columns:
+            raise ValueError('group_columns requires group, stratified_group or group_time strategy')
+        if self.strategy not in {'stratified', 'stratified_group'} and (self.stratify_columns or self.stratify_bins is not None):
+            raise ValueError('Stratification settings require stratified or stratified_group strategy')
+        if not timed and (self.cutoff is not None or self.validation_periods is not None or self.gap_periods):
+            raise ValueError('cutoff, validation_periods and gap_periods require a time strategy')
+        if self.cutoff is not None and self.validation_periods is not None:
+            raise ValueError('Choose cutoff or validation_periods, not both')
+        if self.gap_rows and self.strategy != 'ordered':
+            raise ValueError('gap_rows is available for ordered strategy')
+        return self
+
+
 class FeatureSpec(Plan):
     name: str = Field(min_length=1)
     operation: Literal['sum', 'mean', 'product', 'difference', 'ratio', 'signed_log',
@@ -97,7 +133,10 @@ class AutoMLPlan(Plan):
         return normalize_models(value)
 
     @model_validator(mode='after')
-    def supported_combination(self):
+    def supported_combination(self, info: ValidationInfo):
+        required = (info.context or {}).get('requested_engine')
+        if required and self.engine != required:
+            raise ValueError(f'This reserved experiment must configure engine={required}')
         if (self.features or self.row_weights) and (self.validation == 'cv' or self.bag_folds or self.stack_levels):
             raise ValueError('Feature recipes require validation=holdout with bag_folds=stack_levels=0; the adapter rebuilds recipes on its explicit inner train')
         if self.engine == 'flaml' and (self.features or self.row_weights) and self.ensemble:
@@ -243,14 +282,15 @@ class AnalysisRequest(Plan):
     name: str = Field(pattern=r'^[a-z][a-z0-9_]{0,63}$')
     kind: Literal['quality', 'association', 'correlation', 'shift', 'groups', 'redundancy',
                   'missingness', 'interactions', 'predictive', 'permutation', 'ablation', 'feature', 'stability', 'entities']
-    columns: list[str] = Field(default_factory=list)
+    columns: list[str] = Field(default_factory=list, description='Raw model inputs for predictive/feature/permutation/interactions. For ablation ONLY the final input columns to remove, not the retained columns.')
     target: str | None = None
     dataset: Literal['fit', 'validation', 'test'] = Field(default='fit', description='Actual table for descriptive analyses; supervised analyses use fit only')
     compare: Literal['validation', 'test'] = Field(default='test', description='Other table for shift only; does not select the table for other analyses')
     group_by: str | None = None
-    baseline_columns: list[str] = Field(default_factory=list)
-    features: list[FeatureSpec] = Field(default_factory=list)
-    sample_rows: int | None = Field(default=5000, ge=20)
+    baseline_columns: list[str] = Field(default_factory=list, description='Original raw model inputs. For ablation set this explicitly; columns is the subset removed from this model.')
+    baseline_features: list[FeatureSpec] = Field(default_factory=list, description='Existing engineered recipes kept in the feature comparison baseline; features adds or replaces recipes by name in the candidate.')
+    features: list[FeatureSpec] = Field(default_factory=list, description='Engineered recipes applied to predictive/permutation/interactions and BOTH ablation models. For kind=feature these are additions/replacements relative to baseline_features.')
+    sample_rows: int | None = Field(default=5000, ge=20, description='Proxy model fit+evaluation row budget. For history/target_encoding the complete inner training table remains the statistics source; held-out labels stay excluded. null removes sampling.')
     top_k: int | None = Field(default=10, ge=1)
     seed: int = 42
     estimator: Literal['extra_trees', 'hist_gradient_boosting', 'linear'] = 'extra_trees'
@@ -261,3 +301,22 @@ class AnalysisRequest(Plan):
     key_candidates: list[list[str]] = Field(default_factory=list, description='For entities: proposed single/composite keys; [] uses columns as one key. No target access required.')
     filters: list[RowFilter] = Field(default_factory=list)
     comparison_filters: list[RowFilter] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def executable_comparison(self):
+        if self.kind == 'groups' and not self.group_by:
+            raise ValueError('groups requires an explicit group_by column')
+        model_kinds = {'predictive', 'permutation', 'interactions', 'ablation', 'feature'}
+        if (self.features or self.baseline_features) and self.kind not in model_kinds:
+            raise ValueError('Feature recipes require a model-based analysis kind')
+        for recipes in (self.features, self.baseline_features):
+            names = [recipe.name for recipe in recipes]
+            if len(names) != len(set(names)):
+                raise ValueError('Recipe names must be unique within each feature list')
+        if self.kind == 'ablation' and self.baseline_columns:
+            available = set(self.baseline_columns) | {recipe.name for recipe in [*self.baseline_features, *self.features]}
+            if not self.columns or not set(self.columns) <= available:
+                raise ValueError('Ablation columns must name inputs removed from the baseline model')
+            if not available - set(self.columns):
+                raise ValueError('Ablation removes every model input; retain at least one feature')
+        return self

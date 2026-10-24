@@ -27,13 +27,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--parallel", type=int, default=6, help="Одновременных нод основного дерева: по умолчанию 6.")
     parser.add_argument("--research-parallel", type=int, default=2, help="Одновременных нод исследования данных; по умолчанию 2, 0 отключает.")
     parser.add_argument("--eda-fraction", type=float, default=.15, help="Доля общего времени для начального EDA после сохранения baseline; по умолчанию 0.15.")
-    parser.add_argument("--research-unlimited", action="store_true", help="Убрать отдельные лимиты EDA по нодам, времени, вызовам и последовательным ошибкам; общий бюджет прогона и таймауты API остаются.")
+    parser.add_argument("--eda-seconds", type=float, help="Явный лимит начального EDA в секундах; действует и с --research-unlimited. Затем запускаются эксперименты.")
+    parser.add_argument("--research-call-fraction", type=float, default=.3, help="Доля всех API-вызовов для EDA, включая повторы; по умолчанию 0.3. Остальное остаётся моделям и подготовке.")
+    parser.add_argument("--research-unlimited", action="store_true", help="Убрать отдельные лимиты EDA по нодам, времени и последовательным ошибкам; квота API, явное окно EDA и общий бюджет остаются.")
     parser.add_argument("--max-research-nodes", type=int, default=12, help="Всего исследовательских нод на запуск.")
     parser.add_argument("--research-timeout", type=float, default=60, help="Лимит выполнения одного исследования, секунд.")
     parser.add_argument("--parallel-agents", type=int, default=8, help="Одновременных обращений к Qwen для всех ролей.")
     parser.add_argument("--max-llm-calls", type=int, default=80, help="Лимит всех запросов Qwen, включая повторы.")
     parser.add_argument("--automl", action=argparse.BooleanOptionalAction, default=True,
-                        help="Готовые FLAML/AutoGluon-кандидаты после первого baseline; отключение: --no-automl.")
+                        help="Выделенные FLAML/AutoGluon-эксперименты после EDA; настройки выбирает Qwen; отключение: --no-automl.")
     parser.add_argument("--max-code-attempts", "--max-config-attempts", type=int, default=5,
                         help="Версий конфигурации блока: первая и исправления; по умолчанию 5.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
@@ -60,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
                     max_code_attempts=args.max_code_attempts, research_parallel=args.research_parallel,
                     max_research_nodes=args.max_research_nodes, research_timeout=args.research_timeout, automl=args.automl,
                     final_refit_seconds=args.final_refit_seconds, eda_fraction=args.eda_fraction,
+                    eda_seconds=args.eda_seconds,
+                    research_call_fraction=args.research_call_fraction,
                     research_unlimited=args.research_unlimited)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))

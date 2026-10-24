@@ -51,7 +51,10 @@ def prepare(directory: Path):
     train, test = tables['train'], tables['test']
     if any(column not in train for column in preparation.data.target_columns):
         raise ValueError('Prepared target columns are absent from the loaded training table')
-    fit, valid = (np.asarray(indices) for indices in reader.make_split(train, config))
+    from .validation import split_plan, split_rows, strategy
+    plan = split_plan(config['validation'], preparation.data.target_columns)
+    config['validation'] = {**config['validation'], **plan.model_dump(exclude_none=True)}
+    fit, valid = split_rows(train, plan, preparation.data.target_columns)
     for indices in (fit, valid):
         if indices.ndim != 1 or not len(indices) or indices.dtype.kind not in 'iu':
             raise ValueError('Split must contain nonempty one-dimensional integer row positions')
@@ -59,6 +62,14 @@ def prepare(directory: Path):
             raise ValueError('Split contains duplicate or out-of-range rows')
     if np.intersect1d(fit, valid).size:
         raise ValueError('Fit and validation rows overlap')
+    if strategy(config['validation']) in {'time', 'group_time'} or config['validation'].get('deployment_scenario') == 'future_period':
+        from .supervised_features import ordered_time
+        column = config['validation'].get('time_column')
+        if not column or column not in train:
+            raise ValueError('Temporal validation needs an actual time_column')
+        times = ordered_time(train[column])
+        if times[fit].max() >= times[valid].min():
+            raise ValueError('Temporal validation must contain strictly later periods than fit')
     group_columns = config['validation'].get('group_columns', [])
     if group_columns:
         fit_groups = train.iloc[fit][group_columns].drop_duplicates()
@@ -80,15 +91,16 @@ def prepare(directory: Path):
         classification = family == 'classification' or (family is None and
             any(not pd.api.types.is_numeric_dtype(train[column]) for column in preparation.data.target_columns))
     validation = {key: value for key, value in config['validation'].items()
-                  if not key.startswith('ensemble_') and key not in {'model_fit_rows', 'meta_rows'}}
+                  if not key.startswith('ensemble_') and key not in {'model_fit_rows', 'meta_fit_rows', 'meta_rows'}}
     validation.update(split_file='split.npz', fit_rows=len(fit), validation_rows=len(valid),
-                      split_sha256=file_hash(directory / 'split.npz'))
+                      split_sha256=file_hash(directory / 'split.npz'), split_executor='builtin',
+                      split_plan=plan.model_dump(exclude_none=True))
     ensemble_issue = None
     try:
         save_split(directory / 'ensemble_split.npz', fit, train, preparation.data.target_columns,
                    config['validation'], classification)
         with np.load(directory / 'ensemble_split.npz', allow_pickle=False) as inner:
-            validation.update(model_fit_rows=len(inner['train']), meta_rows=len(inner['meta']))
+            validation.update(model_fit_rows=len(fit), meta_fit_rows=len(inner['train']), meta_rows=len(inner['meta']))
         validation.update(ensemble_split_file='ensemble_split.npz',
                           ensemble_split_sha256=file_hash(directory / 'ensemble_split.npz'))
     except (ValueError, KeyError) as error:
@@ -102,6 +114,29 @@ def prepare(directory: Path):
     prepared = preparation.model_copy(update={'status': 'ready' if metric_ready else 'partial',
         'profile': measured, 'source_hashes': hashes, 'validation': validation, 'metric': metric, 'issues': issues})
     save(path, prepared)
+
+
+def smoke_rows(train, indices, limit, validation, targets=()):
+    """Keep periods/groups/target variation in small checks instead of taking a sorted prefix."""
+    if len(indices) <= limit:
+        return indices
+    from .validation import metadata
+    policy = metadata(validation)
+    columns = list(dict.fromkeys([policy.get('time_column'), *targets, *policy.get('group_columns', [])]))
+    columns = [column for column in columns if column in train]
+    frame = train.iloc[indices].reset_index(drop=True)
+    selected = set()
+    per_column = max(2, limit // max(1, len(columns)))
+    for column in columns:
+        representatives = frame[column].drop_duplicates().index.to_numpy()
+        positions = np.linspace(0, len(representatives) - 1, min(per_column, len(representatives)), dtype=int)
+        selected.update(representatives[positions])
+    selected = sorted(selected)[:limit]
+    remaining = np.setdiff1d(np.arange(len(indices)), selected)
+    count = min(limit - len(selected), len(remaining))
+    if count:
+        selected += list(remaining[np.linspace(0, len(remaining) - 1, count, dtype=int)])
+    return indices[np.sort(selected)]
 
 
 def predict(preparation: Preparation, root: Path, fit_predict, *, small=False, time_budget=240, facts_path=None):
@@ -124,20 +159,23 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False, t
         if file_hash(inner_path) != preparation.validation['ensemble_split_sha256']:
             raise ValueError('Ensemble holdout changed after preparation')
         with np.load(inner_path, allow_pickle=False) as inner:
-            fit, meta = inner['train'], inner['meta']
+            meta = inner['meta']
     if small:
-        meta = meta[:50]
-        fit, valid = fit[:200], valid[:50]
+        fit = smoke_rows(train, fit, 200, preparation.validation, preparation.data.target_columns)
+        meta = smoke_rows(train, meta, 50, preparation.validation)
+        valid = smoke_rows(train, valid, 50, preparation.validation)
         tables = {key: frame.iloc[:50].copy() if key != 'train' and len(frame) == len(test) else frame
                   for key, frame in tables.items()}
         test = tables['test']
     reference = train.iloc[valid].reset_index(drop=True)
     meta_frame = train.iloc[meta].reset_index(drop=True)
-    validation_input = pd.concat([reference, meta_frame], ignore_index=True).drop(columns=preparation.data.target_columns)
+    validation_input = reference.drop(columns=preparation.data.target_columns)
     if facts_path is not None:
         # These are measured input facts, separate for smoke and full execution.
         save(facts_path, {'code_sha256': implementation_hash(facts_path.parent),
              'fit_rows': len(fit), 'validation_rows': len(valid), 'test_rows': len(test),
+             'fit_time_unique_counts': {column: int(train[column].iloc[fit].nunique())
+                 for column in [preparation.validation.get('time_column')] if column in train},
              'fit_target_unique_counts': {column: int(train[column].iloc[fit].nunique())
                                           for column in preparation.data.target_columns}})
     metadata = preparation_view(preparation)
@@ -147,7 +185,7 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False, t
                            'num_cpus': 1, 'num_gpus': 0, 'is_smoke_check': small,
                            'work_directory': str(Path.cwd()), 'run_directory': str(root.resolve()),
                            'preparation_sha256': file_hash(root / 'preparation.json'),
-                           'meta_rows': len(meta), 'outer_validation_rows': len(valid), 'fit_row_positions': fit}
+                           'meta_rows': 0, 'outer_validation_rows': len(valid), 'fit_row_positions': fit}
     with threadpool_limits(limits=1):
         auxiliary = {role: frame.copy() for role, frame in tables.items() if role not in {'train', 'test'}}
         auxiliary['ensemble_meta'] = meta_frame
@@ -155,11 +193,11 @@ def predict(preparation: Preparation, root: Path, fit_predict, *, small=False, t
                                                          metadata, auxiliary)
     if any(not isinstance(frame, pd.DataFrame) for frame in (valid_predictions, test_predictions)):
         raise ValueError('fit_predict must return two DataFrames')
-    if len(valid_predictions) != len(valid) + len(meta) or len(test_predictions) != len(test):
+    if len(valid_predictions) != len(valid) or len(test_predictions) != len(test):
         raise ValueError('Prediction row count differs from validation or test')
     from .ensemble_data import subset
     held_out = valid_predictions.attrs.get('meta_held_out', True)
-    meta_predictions = subset(valid_predictions, np.arange(len(valid), len(valid) + len(meta)))
+    meta_predictions = subset(valid_predictions, np.array([], dtype=int))
     valid_predictions = subset(valid_predictions, np.arange(len(valid)))
     valid_predictions.attrs.update(meta_predictions=meta_predictions, meta_held_out=held_out)
     return reader, config, tables, reference, valid_predictions, test_predictions.reset_index(drop=True)

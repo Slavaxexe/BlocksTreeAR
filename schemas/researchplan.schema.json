@@ -29,6 +29,7 @@
           "type": "string"
         },
         "columns": {
+          "description": "Raw model inputs for predictive/feature/permutation/interactions. For ablation ONLY the final input columns to remove, not the retained columns.",
           "items": {
             "type": "string"
           },
@@ -81,13 +82,23 @@
           "title": "Group By"
         },
         "baseline_columns": {
+          "description": "Original raw model inputs. For ablation set this explicitly; columns is the subset removed from this model.",
           "items": {
             "type": "string"
           },
           "title": "Baseline Columns",
           "type": "array"
         },
+        "baseline_features": {
+          "description": "Existing engineered recipes kept in the feature comparison baseline; features adds or replaces recipes by name in the candidate.",
+          "items": {
+            "$ref": "#/$defs/FeatureSpec"
+          },
+          "title": "Baseline Features",
+          "type": "array"
+        },
         "features": {
+          "description": "Engineered recipes applied to predictive/permutation/interactions and BOTH ablation models. For kind=feature these are additions/replacements relative to baseline_features.",
           "items": {
             "$ref": "#/$defs/FeatureSpec"
           },
@@ -105,6 +116,7 @@
             }
           ],
           "default": 5000,
+          "description": "Proxy model fit+evaluation row budget. For history/target_encoding the complete inner training table remains the statistics source; held-out labels stay excluded. null removes sampling.",
           "title": "Sample Rows"
         },
         "top_k": {

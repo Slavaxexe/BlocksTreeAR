@@ -47,7 +47,9 @@ def inspect(root):
     train, test = tables['train'], tables['test']
     targets, ids = preparation.data.target_columns, preparation.data.id_columns
     features = [c for c in train if c not in targets + ids]
+    from .validation import query_range_evidence
     result = {'tables': {role: describe(frame) for role, frame in tables.items()},
+              'ordered_query_ranges': query_range_evidence(train, test, targets + ids),
               'target_counts': {name: {str(k): int(v) for k, v in train[name].value_counts().items()}
                                 for name in targets if train[name].nunique() <= 100},
               'duplicate_feature_rows': int(train[features].duplicated().sum()) if features else 0,
@@ -77,12 +79,6 @@ def execute(root, node):
         with np.load(split_path, allow_pickle=False) as split:
             fit = train.iloc[split['fit']].copy()
             validation = train.iloc[split['valid']].drop(columns=targets).copy()
-        if preparation.validation.get('ensemble_split_file'):
-            inner_path = within(root, preparation.validation['ensemble_split_file'])
-            if file_hash(inner_path) != preparation.validation['ensemble_split_sha256']:
-                raise ValueError('Research ensemble split changed after preparation')
-            with np.load(inner_path, allow_pickle=False) as inner:
-                fit = train.iloc[inner['train']].copy()
     state = {'fit': fit, 'validation': validation, 'test': tables['test'].drop(columns=targets, errors='ignore'),
              'auxiliary': {role: frame for role, frame in tables.items() if role not in {'train', 'test'}},
              'preparation': preparation.model_dump(mode='json'),
@@ -92,23 +88,25 @@ def execute(root, node):
     values, cache, hits = {}, {}, []
     destination = root / 'research' / 'cache'
     for value in start['analyses']:
-        request = AnalysisRequest.model_validate(value)
-        key = fingerprint({'request': analysis_key(request), 'preparation': start['preparation_sha256'],
-                           'phase': start['phase'], 'task_type': start.get('task_type')})
-        cached = destination / (key + '.json')
-        if cached.exists():
-            result = json.loads(cached.read_text(encoding='utf-8'))
-            hits.append(request.name)
-        else:
-            try:
+        try:
+            request = AnalysisRequest.model_validate(value)
+            key = fingerprint({'request': analysis_key(request), 'preparation': start['preparation_sha256'],
+                               'phase': start['phase'], 'task_type': start.get('task_type')})
+            cached = destination / (key + '.json')
+            if cached.exists():
+                result = json.loads(cached.read_text(encoding='utf-8'))
+                hits.append(request.name)
+            else:
                 with threadpool_limits(limits=1):
                     result = analyze_features(state, request, task_type=start.get('task_type'), cache=cache)
                 save(cached, result)
-            except Exception as error:
-                result = {'kind': request.kind, 'status': 'failed', 'error': str(error)}
-        values[request.name] = result
+        except Exception as error:
+            result = {'kind': value['kind'], 'status': 'failed', 'error': str(error)}
+        values[value['name']] = result
+        statuses = [result.get('status', 'completed') for result in values.values()]
         measured = {'values': values, 'phase': start['phase'], 'analysis_sha256': start['analysis_sha256'],
                     'preparation_sha256': start['preparation_sha256'], 'cache_hits': hits,
+                    'execution': {status: statuses.count(status) for status in ('completed', 'failed', 'unavailable')},
                     'target_access': {'fit': start['phase'] == 'fit', 'validation': False, 'test': False},
                     'fit_rows': len(fit), 'validation_rows': len(validation), 'test_rows': len(tables['test'])}
         if len(canonical(measured).encode('utf-8')) > 64000:

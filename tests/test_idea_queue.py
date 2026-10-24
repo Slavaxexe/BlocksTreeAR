@@ -80,9 +80,24 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
                 search.fill(history, [], 1)
                 self.assertEqual(search.parallel_limit, 3)
                 rows.append(SimpleNamespace(node_id='node_001', result=SimpleNamespace(status='completed', value=9),
-                                            analysis_status='completed'))
+                                            analysis_status='running'))
                 search.fill(history, [], 2)
                 self.assertEqual(search.parallel_limit, 6)
+                self.assertEqual(search.leader, 'node_001')
+                self.assertIn('node_001', search.parents)
+
+    async def test_baker_contract_failure_allows_a_fresh_request(self):
+        from agent.qwen import QwenError
+        with tempfile.TemporaryDirectory() as temporary:
+            search = self.make_search(temporary)
+            async def fail():
+                raise QwenError('Invalid parent in model response')
+            task = search.baker = asyncio.create_task(fail())
+            await asyncio.gather(task, return_exceptions=True)
+            search.collect({task})
+            self.assertFalse(search.failed)
+            self.assertEqual(search.failures, 1)
+            self.assertIn('Invalid parent', search.last_planning_error)
 
     async def test_fresh_research_keeps_queued_ideas(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -258,9 +273,9 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
 class AutoMLQueueTests(unittest.IsolatedAsyncioTestCase):
     make_search = QueueTests.make_search
 
-    async def test_portfolio_uses_native_plans_without_llm_and_seeds_only_once(self):
+    async def test_portfolio_configures_both_adapters_after_eda_and_seeds_once(self):
         with tempfile.TemporaryDirectory() as temporary:
-            shared = {'preparation': {'data': {'target_columns': ['target']},
+            shared = {'initial_eda': True, 'preparation': {'data': {'target_columns': ['target']},
                                      'metric': {'name': 'RMSE'}, 'validation': {'strategy': 'random'}},
                       'requirements': {'problem': {'task_type': 'regression'}, 'output': {}},
                       'installed_libraries': {'flaml': '2.3.6', 'autogluon.tabular': '1.3.1'}}
@@ -269,14 +284,21 @@ class AutoMLQueueTests(unittest.IsolatedAsyncioTestCase):
             search.next_node, search.leader = 1, 'node_000'
             search.seed_automl()
             self.assertEqual([r['builtin_engine'] for r in search.queue], ['flaml', 'autogluon'])
-            with patch.object(JSONAgents, 'plan_node', side_effect=AssertionError('LLM planner called')):
+            from agent.plans import AutoMLPlan
+            configure = AsyncMock(return_value=AutoMLPlan(engine='flaml', models=['lgbm']))
+            with patch.object(JSONAgents, 'configure_automl', new=configure), \
+                    patch.object(JSONAgents, 'plan_node', side_effect=AssertionError('General planner called')):
                 search.dispatch([])
                 tasks = search.tasks
                 await asyncio.gather(*tasks)
                 ready = search.collect(set(tasks))
             self.assertEqual(len(ready), 1)  # One improve slot; the other engine stays queued.
             self.assertEqual(search.agents.budget['requests'], 0)
+            configure.assert_awaited_once()
             self.assertEqual(ready[0][1].hypothesis.pipeline.model['engine'], 'flaml')
+            self.assertEqual(ready[0][1].assembly.blocks[0].operation.parameters['models'], ['lgbm'])
+            search.seed_automl()
+            search.apply_updates([IdeaUpdate(idea_id=search.queue[0]['id'], action='remove', reason='Skip')])
             self.assertEqual(search.agents.root.call_reservations, {'node_001': 2})
             search.leader = 'node_001'
             with patch('agent.search.block_catalog', return_value={}), patch.object(search, 'request_ideas'):
@@ -284,7 +306,21 @@ class AutoMLQueueTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(search.records), 2)
             self.assertEqual(search.queue[0]['builtin_engine'], 'autogluon')
 
-    async def test_time_group_and_unknown_metric_do_not_use_random_inner_validation(self):
+    async def test_auto_configuration_failure_preserves_the_reserved_trial(self):
+        from agent.plans import AutoMLPlan
+        from agent.qwen import QwenError
+        with tempfile.TemporaryDirectory() as temporary:
+            shared = {'requirements': {'problem': {'task_type':'regression'}, 'output':{}},
+                      'data_research': {'feature_candidates':[]}}
+            search = self.make_search(temporary, shared)
+            with patch.object(JSONAgents, 'configure_automl', side_effect=QwenError('Bad reply')):
+                proposal = await search.dedicated_automl_plan(idea(), 'autogluon', {}, 'node_001')
+            self.assertEqual(proposal.assembly.blocks[0].operation.parameters['engine'], 'autogluon')
+            self.assertFalse(proposal.assembly.blocks[0].operation.parameters['ensemble'])
+            with self.assertRaises(ValidationError):
+                AutoMLPlan.model_validate({'engine':'flaml'},context={'requested_engine':'autogluon'})
+
+    async def test_structured_policies_allow_native_adapters_but_unknown_metric_does_not(self):
         with tempfile.TemporaryDirectory() as temporary:
             for validation, metric in [({'strategy': 'time_based'}, 'RMSE'),
                                        ({'group_columns': ['subject']}, 'RMSE'), ({}, 'custom')]:
@@ -295,7 +331,8 @@ class AutoMLQueueTests(unittest.IsolatedAsyncioTestCase):
                 search = self.make_search(temporary, shared)
                 search.options = Options(max_experiments=3)
                 search.seed_automl()
-                self.assertEqual(list(search.queue), [])
+                self.assertEqual(len(search.queue), 0 if metric == 'custom' else 1)
+                self.assertEqual(shared['preparation']['validation'], validation)
 
 class ContractTests(unittest.TestCase):
     def test_fewer_ideas_and_updates_only_are_valid_but_unknown_ids_are_not(self):

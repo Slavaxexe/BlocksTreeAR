@@ -3,7 +3,7 @@
 from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-from .plans import AutoMLPlan, AnalysisRequest, ToolCall, EnsemblePlan
+from .plans import AutoMLPlan, AnalysisRequest, ToolCall, EnsemblePlan, SplitPlan
 from .validation import metadata
 
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
@@ -132,6 +132,23 @@ class PreparationDraft(Contract):
 
     normalize_validation = field_validator('validation')(metadata)
 
+    @model_validator(mode='after')
+    def deployment_matches_validation(self, info: ValidationInfo):
+        from .validation import split_plan, strategy
+        split_plan(self.validation, self.data.target_columns)
+        context = info.context or {}
+        scenario = self.validation.get('deployment_scenario')
+        if context.get('require_deployment_assessment'):
+            if scenario not in {'future_period', 'unseen_groups', 'exchangeable', 'uncertain'}:
+                raise ValueError('Assess deployment_scenario from task semantics and ordered_query_ranges before fixing validation')
+            if not str(self.validation.get('deployment_reason', '')).strip():
+                raise ValueError('deployment_reason must explain the measured separation and the chosen prediction scenario')
+        if scenario == 'future_period' and (not self.validation.get('time_column') or strategy(self.validation) == 'random'):
+            raise ValueError('future_period needs an ordered time_column and a non-random outer split')
+        if scenario == 'unseen_groups' and not self.validation.get('group_columns'):
+            raise ValueError('unseen_groups needs explicit group_columns')
+        return self
+
 
 class Preparation(Contract):
     schema_version: Literal[2] = 2
@@ -238,6 +255,7 @@ class Idea(Contract):
     expected_effect: str = Field(min_length=1)
     automl: AutoMLPlan | None = Field(default=None, description='Executable AutoML configuration; null for composed trusted operations')
     ensemble: EnsemblePlan | None = Field(default=None, description='Combine completed prediction sources; compiled without a node-planner call')
+    feature_candidate_ids: list[str] = Field(default_factory=list, description='Exact measured feature candidates selected for this experiment; planner must include their recipes')
     priority: int = Field(default=50, ge=0, le=100, description='Queue priority; higher runs first, not an expected score')
     research_ids: list[str] = Field(default_factory=list, description='IDs of only the research insights needed for this change; empty when unrelated')
 
@@ -249,9 +267,16 @@ class IdeaUpdate(Contract):
     reason: str = Field(min_length=1)
 
 
+class FeatureDecision(Contract):
+    candidate_id: str
+    action: Literal['test', 'defer', 'reject']
+    reason: str = Field(min_length=1)
+
+
 class Ideas(Contract):
     ideas: list[Idea] = Field(default_factory=list)
     updates: list[IdeaUpdate] = Field(default_factory=list)
+    feature_decisions: list[FeatureDecision] = Field(default_factory=list)
 
     @model_validator(mode='before')
     @classmethod
@@ -285,7 +310,12 @@ class Ideas(Contract):
             return self
         if len(self.ideas) > context.get('max_new_ideas', len(context['purposes'])):
             raise ValueError('Too many new ideas for this request')
+        candidates = context.get('feature_candidates', [])
+        from .feature_trials import candidate_id, selected_candidates
         for idea in self.ideas:
+            selected_candidates(candidates, idea.feature_candidate_ids)
+            if idea.feature_candidate_ids and idea.ensemble is not None:
+                raise ValueError('Feature candidates require a model experiment, not a saved-prediction ensemble')
             if idea.ensemble is not None:
                 if idea.purpose == 'baseline' or idea.automl is not None:
                     raise ValueError('An ensemble is a separate non-baseline hypothesis')
@@ -294,7 +324,7 @@ class Ideas(Contract):
                     if not set(idea.ensemble.source_nodes) <= sources.keys():
                         raise ValueError('Select completed sources from prediction_sources')
                     selected = [sources[node] for node in idea.ensemble.source_nodes]
-                    if (idea.ensemble.method in {'stacking', 'gating'} or idea.ensemble.optimize_weights) and not all(item.get('meta_ready', item.get('oof_recipe', False)) for item in selected):
+                    if (idea.ensemble.method in {'stacking', 'gating'} or idea.ensemble.optimize_weights) and not all(item.get('meta_ready', item.get('oof_recipe', False)) or item.get('meta_available', False) for item in selected):
                         raise ValueError('Learned ensembles need meta_ready sources with saved held-out predictions; sources are not retrained')
                     if (idea.ensemble.method == 'probabilities' or idea.ensemble.combine == 'probabilities') and not all(
                             item['probabilities'] for item in selected):
@@ -316,6 +346,15 @@ class Ideas(Contract):
                 raise ValueError('Choose an available parent')
             elif idea.purpose == 'improve' and idea.parent_id != context['leader']:
                 raise ValueError('Improve must extend the current leader')
+        if 'feature_candidates' in context:
+            pending = {candidate_id(item) for item in candidates if item.get('trial_status') == 'untested'}
+            addressed = {identity for idea in self.ideas for identity in idea.feature_candidate_ids}
+            for decision in self.feature_decisions:
+                if decision.action == 'test' and decision.candidate_id not in addressed:
+                    raise ValueError('A test decision needs an idea selecting that feature_candidate_id')
+            addressed.update(decision.candidate_id for decision in self.feature_decisions)
+            if pending - addressed:
+                raise ValueError(f'Decide test/defer/reject for untested feature candidates: {sorted(pending - addressed)}')
         ids = [update.idea_id for update in self.updates]
         if len(ids) != len(set(ids)) or not set(ids).issubset(context.get('idea_ids', [])):
             raise ValueError('Update each supplied idea ID at most once')
@@ -422,6 +461,8 @@ class NodePlan(Contract):
             if missing:
                 raise ValueError(f'Write every block requested by the idea: {sorted(missing)}')
             proposal = self.proposal(context['idea'], context['catalog'])
+            from .feature_trials import check_recipes
+            check_recipes(proposal, context.get('selected_feature_candidates', []))
             Proposals.model_validate({'proposals': [proposal]}, context={**context, 'count': 1,
                 'baseline': proposal.purpose == 'baseline', 'purposes': [proposal.purpose]})
         return self
@@ -458,15 +499,10 @@ class ResearchPlan(Contract):
     alternative_reason: str | None = Field(default=None, description='Required if the assigned research direction cannot be tested: explain the data limitation and why the alternative is new')
 
     @model_validator(mode='after')
-    def unique_requests(self, info: ValidationInfo):
+    def unique_requests(self):
         names = [item.name for item in self.analyses]
         if len(names) != len(set(names)):
             raise ValueError('Analysis result names must be unique')
-        assigned = (info.context or {}).get('assigned_direction')
-        if assigned:
-            from .research_policy import directions
-            if assigned not in directions(self.analyses) and not self.alternative_reason:
-                raise ValueError('Test the assigned direction or give alternative_reason explaining why the data cannot support it')
         return self
 
 
@@ -503,8 +539,12 @@ class ResearchReview(Contract):
             raise ValueError('Only existing insights can be superseded')
         if self.supersedes and not self.insights:
             raise ValueError('Superseding an insight requires a replacement')
-        if 'open_questions' in context and not set(self.resolves).issubset(context['open_questions']):
-            raise ValueError('Resolved questions must come from the current research context')
+        if 'open_questions' in context:
+            known = {' '.join(question.split()).casefold(): question for question in context['open_questions']}
+            resolves = list(dict.fromkeys(known[' '.join(question.split()).casefold()]
+                for question in self.resolves if ' '.join(question.split()).casefold() in known))
+            if resolves != self.resolves:
+                return self.model_copy(update={'resolves': resolves})
         return self
 
 class Start(Contract):
@@ -631,4 +671,4 @@ class RunReport(Contract):
 
 
 SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport, Proposals, Ideas, NodePlan, Analysis, Assembly,
-           NodeDelta, Delta, ResearchPlan, ResearchReview)
+           NodeDelta, Delta, ResearchPlan, ResearchReview, SplitPlan)

@@ -13,6 +13,30 @@ from agent.contracts import Ideas
 
 
 class ContextTests(unittest.TestCase):
+    def test_guidance_is_selected_by_actual_work_not_the_whole_catalog(self):
+        from agent.guidance import augment_prompt, observed_rules
+        prompt = 'Plan.\n' + json.dumps({'idea': {'change': 'Train CatBoostRegressor'},
+            'operations': {'ablation': {}, 'history': {}}})
+        updated, ids = augment_prompt(prompt, 'node_planner', {})
+        self.assertEqual(ids, ['catboost_class'])
+        self.assertIn('execution_guidance', json.loads(updated.rsplit('\n', 1)[1]))
+        self.assertEqual(observed_rules("CatBoost.__init__() got an unexpected keyword argument"), ['catboost_class'])
+        self.assertEqual(augment_prompt(prompt, 'metric', {}), (prompt, []))
+
+    def test_compact_research_retains_claims_and_recipes_without_duplicate_evidence(self):
+        from agent.context import research_memory_view
+        text = 'A complete measured statement ' * 100
+        memory = {'insights': [{'id': 'r1', 'statement': text, 'evidence': {'large': list(range(100)),
+                               'score': {'kind': 'feature', 'baseline': {'value': 50}, 'candidate': {'value': 45}}},
+                               'implication': 'Try this recipe'}], 'feature_candidates': [{'features': ['recipe']}],
+                  'open_questions': ['Literal question']}
+        view = research_memory_view(memory, review=True)
+        self.assertEqual(view['insights'][0]['statement'], text)
+        self.assertEqual(view['open_questions'], ['Literal question'])
+        self.assertNotIn('evidence', view['insights'][0])
+        self.assertNotIn('feature_candidates', view)
+        self.assertEqual(view['insights'][0]['measured'][0]['candidate']['value'], 45)
+
     def test_long_history_keeps_leader_diversity_recent_failure_and_complete_index(self):
         cards = [{'node_id': f'node_{n:03d}', 'parent_id': 'node_000',
                   'hypothesis': {'pipeline': {'model': {'name': 'forest' if n != 1 else 'linear'}}},

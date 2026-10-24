@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import math
 import os
+import signal
 from pathlib import Path
 import sys
 import time
@@ -35,7 +36,7 @@ class Options:
     max_experiments: int = 1
     parallel: int = 6
     parallel_agents: int = 8
-    max_llm_calls: int = 80
+    max_llm_calls: int | None = 80
     max_code_attempts: int = 5
     automl: bool = True
     research_parallel: int = 2
@@ -43,6 +44,8 @@ class Options:
     research_timeout: float = 60
     final_refit_seconds: float = 300
     eda_fraction: float = .15
+    eda_seconds: float | None = None
+    research_call_fraction: float = .3
     research_unlimited: bool = False
 
 
@@ -64,12 +67,32 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open('wb') as stream:
         child = await asyncio.create_subprocess_exec(sys.executable, *arguments, cwd=cwd, env=env,
-                                                     stdout=stream, stderr=asyncio.subprocess.STDOUT)
+                                                     stdout=stream, stderr=asyncio.subprocess.STDOUT, start_new_session=os.name != 'nt')
         try:
             code = await asyncio.wait_for(child.wait(), remaining)
         except (TimeoutError, asyncio.CancelledError) as error:
             if child.returncode is None:
-                child.kill()
+                # AutoML can start its own workers; cancel the whole experiment tree.
+                if os.name == 'nt':
+                    import psutil
+                    try:
+                        descendants = psutil.Process(child.pid).children(recursive=True)
+                    except psutil.NoSuchProcess:
+                        descendants = []
+                    for descendant in reversed(descendants):
+                        try:
+                            descendant.kill()
+                        except psutil.NoSuchProcess:
+                            pass
+                    try:
+                        child.kill()
+                    except ProcessLookupError:
+                        pass
+                else:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             await child.wait()
             if isinstance(error, TimeoutError):
                 raise TimeoutError(f'Process exceeded its {remaining:.1f}s time limit') from None
@@ -138,6 +161,8 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
     async def write_block_source(name, error=None, failed_stage=None):
         from .operations import CATALOG
         from .plans import ToolCall
+        if error is not None:
+            agents.observe_error('configuration_repair', error)
 
         spec = next(block for block in start.assembly.blocks if block.name == name)
         operation = spec.operation
@@ -309,13 +334,18 @@ async def run(task_path: Path, options: Options, settings: Settings):
     if not 0 < options.research_timeout <= 10800 or not 0 <= options.max_research_nodes <= 1000 or options.research_parallel < 0:
         raise ValueError('Research needs a positive timeout and nonnegative node/parallel limits')
     if (not 1 <= options.max_experiments <= 1000 or options.parallel < 1
-            or options.parallel_agents < 1 or options.max_llm_calls < 1 or options.max_code_attempts < 1):
+            or options.parallel_agents < 1 or (options.max_llm_calls is not None and options.max_llm_calls < 1)
+            or options.max_code_attempts < 1):
         raise ValueError('Use 1..1000 experiments and positive parallel, LLM call and code attempt limits')
     task_path = task_path.resolve()
     if not math.isfinite(options.final_refit_seconds) or options.final_refit_seconds < 0:
         raise ValueError('Final refit reserve must be finite and nonnegative')
     if not 0 <= options.eda_fraction < 1:
         raise ValueError('EDA fraction must be between 0 (disabled) and 1 (exclusive)')
+    if options.eda_seconds is not None and (not math.isfinite(options.eda_seconds) or options.eda_seconds < 0):
+        raise ValueError('EDA seconds must be finite and nonnegative')
+    if not 0 <= options.research_call_fraction <= 1:
+        raise ValueError('Research call fraction must be between 0 and 1')
     overall_deadline = time.monotonic() + options.time_budget
     final_reserve = min(options.final_refit_seconds, options.time_budget * .2) if options.time_budget >= 60 else 0.
     deadline = overall_deadline - final_reserve
@@ -381,6 +411,20 @@ async def run(task_path: Path, options: Options, settings: Settings):
                      'submission_file': source.relative_to(directory).as_posix()})
             published = selected
 
+    def result_or_failure(task, start):
+        # A task cancelled before its coroutine starts has no Finish of its own.
+        try:
+            return task.result()
+        except (Exception, asyncio.CancelledError) as error:
+            node = directory / 'nodes' / start.node_id
+            finish = Finish(node_id=start.node_id, status='timeout' if time.monotonic() >= deadline else 'failed',
+                stage='implementation', metric=preparation.metric, duration_seconds=0.,
+                preparation_sha256=start.preparation_sha256, start_sha256=file_hash(node / 'start.json'),
+                error=(str(error) or 'Experiment cancelled').replace(settings.api_key, '[REDACTED]')[-5000:])
+            save(node / 'finish.json', finish)
+            agents.log('node_task_failed', node_id=start.node_id, error_type=type(error).__name__)
+            return finish
+
     def launch(node_id, proposal):
         catalog = block_catalog(directory, delta.nodes)
         hashes = {block.name: next(item['sha256'] for item in catalog[block.source_node] if item['name'] == block.name)
@@ -433,7 +477,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 facts = json.loads(path.read_text(encoding='utf-8'))
                 if facts['code_sha256'] == row.result.code_sha256:
                     context['input_facts'][phase] = {k: v for k, v in facts.items() if k != 'code_sha256'}
-        local = JSONAgents(settings, deadline, 3 + MAX_REFERENCE_ROUNDS, shared=agents, node_id=row.node_id)
+        local = JSONAgents(settings, deadline, 8 + MAX_REFERENCE_ROUNDS, shared=agents, node_id=row.node_id)
         return await local.analyze(context)
 
     agents.on_activity = update
@@ -447,7 +491,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
             for attempt in range(3):
                 draft = await agents.prepare(context)
                 try:
-                    check_code(draft.code, ('load_data', 'make_split', 'score', 'write_submission'))
+                    check_code(draft.code, ('load_data', 'score', 'write_submission'))
                     for relative in draft.data.files.values():
                         within(task_path.parent, relative)
                     within(directory / 'nodes' / 'node_000', draft.output.filename)
@@ -475,17 +519,20 @@ async def run(task_path: Path, options: Options, settings: Settings):
                       directory / 'baseline' / 'baseline.log', deadline, options.experiment_timeout)
         published = 'safety_baseline'
         update(checks=report.checks + ['published_cheap_baseline'])
-        eda_deadline = deadline if options.research_unlimited else min(deadline, time.monotonic() + options.time_budget * options.eda_fraction)
+        eda_budget = options.eda_seconds
+        if eda_budget is None and not options.research_unlimited:
+            eda_budget = options.time_budget * options.eda_fraction
+        eda_deadline = deadline if eda_budget is None else min(deadline, time.monotonic() + eda_budget)
         if (options.research_parallel and options.max_experiments > 1 and
-                (options.research_unlimited or options.max_research_nodes and options.eda_fraction)):
+                eda_budget != 0 and (options.research_unlimited or options.max_research_nodes)):
             shared['preparation'] = preparation_view(preparation)
             save(directory / 'research' / 'structure_preparation.json', preparation)
             atomic_bytes(directory / 'research' / 'structure_prepare.py', (directory / 'prepare.py').read_bytes())
             research = Research(agents, directory, options, shared, process, notify, update)
             update(stage='data_research')
-            agents.log('initial_eda_started', budget_seconds=None if options.research_unlimited else options.time_budget * options.eda_fraction,
+            agents.log('initial_eda_started', budget_seconds=eda_budget,
                        research_unlimited=options.research_unlimited)
-            structure_deadline = eda_deadline if options.research_unlimited else min(eda_deadline, time.monotonic() + options.time_budget * options.eda_fraction * .4)
+            structure_deadline = eda_deadline if options.research_unlimited else min(eda_deadline, time.monotonic() + eda_budget * .4)
             await research.window('structure', structure_deadline,
                                   limit=options.research_parallel)
             context.update(data_research=research.view(), preparation_phase='finalize_validation',
@@ -516,7 +563,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 provides=['validation_predictions', 'test_predictions'])], write_blocks=['constant']))
         update(stage='baseline')
         baseline_task = launch('node_000', baseline_plan)
-        baseline_finish = await baseline_task
+        await asyncio.gather(baseline_task, return_exceptions=True)
+        baseline_finish = result_or_failure(baseline_task, starts['node_000'])
         baseline_start = active.pop(baseline_task)
         record(baseline_start, baseline_finish)
         delta = delta.model_copy(update={'nodes': [row.model_copy(update={'analysis_status': 'skipped'}) for row in delta.nodes]})
@@ -554,7 +602,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
             for task in [task for task in done if task in active]:
                 start = active.pop(task)
                 search.complete(start)
-                record(start, task.result())
+                record(start, result_or_failure(task, start))
+                revision += 1  # New measured models are usable before their prose analysis finishes.
                 row = next(row for row in delta.nodes if row.node_id == start.node_id)
                 if not expired and agents.remaining_calls:
                     row = row.model_copy(update={'analysis_status': 'running'})
@@ -593,7 +642,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                checks=report.checks + completed_checks)
         agents.log('search_finished', status=report.status, stop_reason=stop_reason,
                    requests=agents.budget['requests'], experiments=len(starts), best_node=delta.best_node_id)
-    except Exception as error:
+    except (Exception, asyncio.CancelledError) as error:
         agents.log('controller_failed', error_type=type(error).__name__, traceback=traceback.format_exc())
         update(status='ready' if delta and delta.best_node_id else 'partial' if published else 'failed',
                stage='complete', stop_reason='error', errors=report.errors + [str(error).replace(settings.api_key, '[REDACTED]')[-5000:]])
@@ -603,10 +652,37 @@ async def run(task_path: Path, options: Options, settings: Settings):
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for task, start in list(active.items()):
+            active.pop(task)
+            try:
+                record(start, result_or_failure(task, start))
+            except Exception as error:
+                notify(f'{start.node_id} cleanup: {error}')
+        if analyses:
+            cancelled = set(analyses.values())
+            delta = delta.model_copy(update={'nodes': [row.model_copy(update={'analysis_status': 'skipped'})
+                if row.node_id in cancelled else row for row in delta.nodes]})
+            analyses.clear()
+            save_delta()
+        if search:
+            try:
+                search.collect(set(search.tasks))
+            except (Exception, asyncio.CancelledError) as error:
+                notify(f'Planning cleanup failed: {error}')
         if research:
-            await research.close(stop_reason)
+            try:
+                await research.close(stop_reason)
+            except (Exception, asyncio.CancelledError) as error:
+                notify(f'Research cleanup failed: {type(error).__name__}: {error}')
         for node_id in list(agents.root.call_reservations):
             agents.release_calls(node_id)
+        update()
+    # Re-publish the last completed winner even when planning or cleanup failed.
+    if published and published != 'safety_baseline':
+        selected = delta.best_node_id or published
+        result = next(row.result for row in delta.nodes if row.node_id == selected)
+        source = within(directory / 'nodes' / selected, result.submission_file)
+        atomic_bytes(within(task_path.parent, preparation.output.filename), source.read_bytes())
     if final_reserve and delta and delta.best_node_id and time.monotonic() < overall_deadline:
         selected = delta.best_node_id
         remaining = min(options.final_refit_seconds, overall_deadline - time.monotonic())

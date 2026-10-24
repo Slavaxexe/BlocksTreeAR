@@ -31,9 +31,6 @@ def load_data(task_directory, config):
     return {'train': pd.read_csv(task_directory / files['train'], sep='|', dtype={'record': str}),
             'test': pd.read_json(task_directory / files['test'], lines=True, dtype={'record': str})}
 
-def make_split(train, config):
-    return np.arange(len(train) - 8), np.arange(len(train) - 8, len(train))
-
 def score(reference, predictions, config):
     column = config['data']['target_columns'][0]
     return float(np.mean(np.abs(reference[column].to_numpy() - predictions[column].to_numpy())) + 7)

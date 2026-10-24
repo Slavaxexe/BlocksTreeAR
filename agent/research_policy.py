@@ -30,7 +30,7 @@ def directions(requests):
     for request in requests:
         value = request.model_dump() if hasattr(request, 'model_dump') else request
         if value['kind'] == 'feature':
-            for feature in value.get('features', []):
+            for feature in [*value.get('baseline_features', []), *value.get('features', [])]:
                 result.add({'history': 'history', 'target_encoding': 'encoding'}.get(feature['operation'], 'transformations'))
         else:
             result.add(kinds[value['kind']])
@@ -42,14 +42,19 @@ def measurement_key(request):
     value = {key: item for key, item in value.items() if key not in {'name', 'top_k'}}
     for key in ('columns', 'baseline_columns'):
         value[key] = sorted(value.get(key, []))
-    names, recipes = {}, []
-    for index, feature in enumerate(value.get('features', [])):
-        recipe = dict(feature)
-        recipe['columns'] = [names.get(column, column) for column in recipe['columns']]
-        names[recipe['name']] = f'feature_{index}'
-        recipe.pop('name')
-        recipes.append(recipe)
-    value['features'] = recipes
+    if value['kind'] == 'entities':
+        value['key_candidates'] = sorted(sorted(key) for key in (value.get('key_candidates') or [value['columns']]))
+        return fingerprint({key: value.get(key) for key in ('kind', 'dataset', 'compare', 'key_candidates',
+            'split_column', 'filters', 'comparison_filters')})
+    names = {}
+    for field in ('baseline_features', 'features'):
+        recipes = []
+        for feature in value.get(field, []):
+            recipe = dict(feature)
+            recipe['columns'] = [names.get(column, column) for column in recipe['columns']]
+            recipe['output'] = names.setdefault(recipe.pop('name'), f'feature_{len(names)}')
+            recipes.append(recipe)
+        value[field] = recipes
     return fingerprint(value)
 
 
@@ -147,9 +152,16 @@ def evidence_summary(value):
     if not isinstance(value, dict):
         return {'value': value}
     result = {key: value[key] for key in ('kind', 'scope', 'status', 'rows_used', 'rows_available',
-        'target_available', 'improvement') if key in value}
+        'target_available', 'improvement', 'absolute_improvement', 'improvement_percent') if key in value}
     for key in ('baseline', 'candidate'):
         if key in value:
             result[key] = {name: value[key][name] for name in ('metric', 'value', 'estimator',
-                'inner_train_rows', 'inner_validation_rows') if name in value[key]}
+                'inner_train_rows', 'inner_validation_rows', 'inner_reference_rows', 'feature_count', 'recipe_names') if name in value[key]}
+    if 'comparison' in value:
+        result['comparison'] = value['comparison']
+    if 'candidates' in value:
+        result['candidates'] = [{key: candidate[key] for key in ('key', 'unique_keys', 'keys_in_multiple_periods',
+            'comparison_rows', 'comparison_key_coverage', 'comparison_strict_past_coverage',
+            'within_period_ambiguity_fraction', 'within_period_ambiguous_rows', 'source_rows',
+            'duplicate_key_period_row_fraction') if key in candidate} for candidate in value['candidates']]
     return result

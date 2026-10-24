@@ -1,5 +1,6 @@
-"""Combine saved predictions; learned combiners never retrain their sources."""
+"""Combine saved predictions, preparing reusable held-out source predictions on demand."""
 from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
@@ -158,7 +159,8 @@ def learned(pairs, state, defaults, plan, classes):
         frame.attrs['meta_held_out'] = False
     save(Path(runtime['work_directory']) / 'ensemble_full_diagnostics.json', {
         'method': plan.method, 'source_nodes': plan.source_nodes, 'oof_rows': int(covered.sum()),
-        'fit_rows': len(state['fit']), 'source_retraining': False, 'meta_method': 'shared_holdout', 'estimator': factory,
+        'fit_rows': len(state['fit']), 'source_retraining': bool(runtime.get('prepared_meta_sources')),
+        'prepared_meta_sources': runtime.get('prepared_meta_sources', []), 'meta_method': 'shared_holdout', 'estimator': factory,
         'meta_training_scope': 'Saved predictions on a shared inner holdout; outer labels unavailable',
         'gate_loss': ('per-row log loss' if encoder is not None else 'per-row absolute/squared error') if plan.method == 'gating' else None,
         'passthrough': plan.passthrough, 'feature_columns': features['transformer'].diagnostics_['selected_columns'] if features else []})
@@ -172,6 +174,26 @@ def run_saved_ensemble(state, value, defaults):
     root = Path(runtime['run_directory']).resolve()
     pairs = [load_pair(root, source, runtime['preparation_sha256'], defaults,
                       state['preparation']['metric']['name']) for source in plan.source_nodes]
+    prepared_meta_sources = []
+    need_meta = runtime.get('is_meta_fit') or plan.method in {'stacking', 'gating'} or plan.optimize_weights
+    if need_meta and not runtime.get('is_smoke_check'):
+        from .meta_predictions import ensure
+        missing = sum('meta' not in pair for pair in pairs)
+        for index, source in enumerate(plan.source_nodes):
+            if 'meta' not in pairs[index]:
+                remaining = max(0., runtime['deadline'] - time.monotonic())
+                meta_deadline = time.monotonic() + remaining * .9 / missing
+                ensure(root, source, runtime['preparation_sha256'], meta_deadline)
+                missing -= 1
+                prepared_meta_sources.append(source)
+                pairs[index] = load_pair(root, source, runtime['preparation_sha256'], defaults,
+                                         state['preparation']['metric']['name'])
+    if prepared_meta_sources:
+        save(Path(runtime['work_directory']) / 'meta_preparation.json', {'sources': prepared_meta_sources,
+            'scope': 'Separate inner-train fit; cached meta predictions reused on later requests'})
+    runtime['prepared_meta_sources'] = prepared_meta_sources
+    if runtime.get('is_meta_fit'):
+        pairs = [{'validation': pair['meta'], 'test': pair['meta']} for pair in pairs]
     for pair in pairs:
         if runtime.get('meta_rows'):
             if 'meta' not in pair:

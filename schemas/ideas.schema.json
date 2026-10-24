@@ -302,6 +302,36 @@
       "title": "EnsemblePlan",
       "type": "object"
     },
+    "FeatureDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "test",
+            "defer",
+            "reject"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "action",
+        "reason"
+      ],
+      "title": "FeatureDecision",
+      "type": "object"
+    },
     "FeatureSpec": {
       "additionalProperties": false,
       "properties": {
@@ -419,6 +449,14 @@
           ],
           "default": null,
           "description": "Combine completed prediction sources; compiled without a node-planner call"
+        },
+        "feature_candidate_ids": {
+          "description": "Exact measured feature candidates selected for this experiment; planner must include their recipes",
+          "items": {
+            "type": "string"
+          },
+          "title": "Feature Candidate Ids",
+          "type": "array"
         },
         "priority": {
           "default": 50,
@@ -610,6 +648,13 @@
         "$ref": "#/$defs/IdeaUpdate"
       },
       "title": "Updates",
+      "type": "array"
+    },
+    "feature_decisions": {
+      "items": {
+        "$ref": "#/$defs/FeatureDecision"
+      },
+      "title": "Feature Decisions",
       "type": "array"
     }
   },

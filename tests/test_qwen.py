@@ -192,8 +192,9 @@ class ReferenceRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         with self.assertRaises(QwenError):
                             await agents.ask(Program, 'original task', 'implementer', code=True, reference=True)
-                self.assertEqual(len(requests), 3)
-                final = requests[-1]
+                expected_calls = 3 if succeeds else 5  # One tool reply and up to four invalid final replies.
+                self.assertEqual(len(requests), expected_calls)
+                final = requests[2]
                 self.assertNotIn('tools', final)
                 self.assertNotIn('tool_choice', final)
                 self.assertEqual([m['role'] for m in final['messages']], ['system', 'user', 'user'])
@@ -201,7 +202,7 @@ class ReferenceRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('example.API', final['messages'][2]['content'])
                 self.assertNotIn('prior reasoning', json.dumps(final['messages']))
                 self.assertEqual(agents.reference_rounds[('node_001', 'fit')], 1)
-                self.assertEqual(agents.budget['requests'], 3)
+                self.assertEqual(agents.budget['requests'], expected_calls)
 
 
 if __name__ == "__main__":

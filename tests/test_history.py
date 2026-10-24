@@ -12,6 +12,37 @@ from tests import test_operations
 
 
 class HistoryTests(unittest.TestCase):
+    def test_sampled_proxy_keeps_all_inner_history_without_holdout_target_leakage(self):
+        from agent.eda import _predictive
+        from agent.plans import AnalysisRequest
+        frame = pd.DataFrame({'entity': np.tile(np.arange(200), 3), 'period': np.repeat([1, 2, 3], 200),
+                              'x': np.tile(np.random.default_rng(42).normal(size=200), 3)})
+        frame['target'] = frame.entity.astype(float)
+        policy = {'strategy': 'time', 'time_column': 'period'}
+        request = AnalysisRequest(name='history', kind='feature', columns=['x'], sample_rows=60,
+            features=[{'name': 'past', 'operation': 'history', 'columns': ['entity'],
+                       'parameters': {'time_column': 'period', 'value_column': 'target'}}])
+        measured, fitted = _predictive(frame, ['x'], 'target', False, request, 'RMSE', {},
+                                       recipes=request.features, policy=policy)
+        self.assertEqual(measured['inner_reference_rows'], 400)
+        self.assertLessEqual(measured['inner_train_rows'] + measured['inner_validation_rows'], 60)
+        self.assertEqual(measured['history_slices']['past']['coverage'], 1.)
+        before = fitted[0].predict(fitted[1])
+        changed = frame.copy()
+        changed.loc[changed.period == 3, 'target'] = 999999.
+        repeated, fitted = _predictive(changed, ['x'], 'target', False, request, 'RMSE', {},
+                                      recipes=request.features, policy=policy)
+        np.testing.assert_allclose(fitted[0].predict(fitted[1]), before)
+        self.assertEqual(measured['inner_split_sha256'], repeated['inner_split_sha256'])
+
+    def test_smoke_sample_preserves_periods_and_rare_labels(self):
+        from agent.worker import smoke_rows
+        frame = pd.DataFrame({'period': np.repeat([1, 2, 3], 300), 'target': ['common'] * 899 + ['rare']})
+        rows = smoke_rows(frame, np.arange(len(frame)), 200, {'strategy': 'time', 'time_column': 'period'}, ['target'])
+        self.assertEqual(len(rows), 200)
+        self.assertEqual(frame.iloc[rows].period.nunique(), 3)
+        self.assertEqual(frame.iloc[rows].target.nunique(), 2)
+
     def test_automl_recipes_are_selected_on_inner_train_then_refitted(self):
         from tempfile import TemporaryDirectory
         import time
@@ -87,6 +118,8 @@ class HistoryTests(unittest.TestCase):
         result = analyze_features(state, {'name': 'keys', 'kind': 'entities',
             'key_candidates': [['kind', 'area']], 'split_column': 'period'}, task_type='regression')
         self.assertEqual(result['candidates'][0]['comparison_strict_past_coverage'], 2 / 3)
+        self.assertEqual(result['candidates'][0]['repeated_fit_row_fraction'], 2 / 3)
+        self.assertEqual(result['candidates'][0]['within_period_ambiguity_fraction'], 0.)
         self.assertFalse(result['target_available'])
 
     def test_weighted_gamma_and_seed_average_use_the_ordinary_route(self):
@@ -120,6 +153,13 @@ class HistoryTests(unittest.TestCase):
         slices = result['candidate']['history_slices']['past']
         self.assertEqual(slices['coverage'], 1.)
         self.assertEqual(slices['with_history']['rows'], 60)
+        missing = analyze_features(state, {'name': 'no_matches', 'kind': 'feature', 'columns': ['a'],
+            'estimator': 'linear', 'features': [{'name': 'past', 'operation': 'history', 'columns': ['id'],
+                'parameters': {'value_column': 'target', 'time_column': 'period', 'fallback': 'global'}}]},
+            task_type='regression')
+        slices = missing['candidate']['history_slices']['past']
+        self.assertEqual(slices['coverage'], 0.)
+        self.assertEqual(slices['without_history']['rows'], 60)
 
 
 if __name__ == '__main__':

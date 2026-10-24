@@ -1,6 +1,8 @@
 """Feature measurements and trusted experiments, without external API calls."""
 import time
 import unittest
+import json
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -47,6 +49,43 @@ class OperationTests(unittest.TestCase):
             'baseline_columns': ['a'], 'features': [{'name': 'ratio', 'operation': 'ratio', 'columns': ['a', 'b']}]},
             task_type='regression')
         self.assertEqual(measured['candidate']['feature_count'], 2)
+
+    def test_research_recipes_are_applied_to_model_checks_and_kept_in_comparisons(self):
+        state = self.state()
+        recipe = {'name': 'sum_ab', 'operation': 'sum', 'columns': ['a', 'b']}
+        for kind in ('predictive', 'permutation', 'interactions'):
+            measured = analyze_features(state, {'name': 'check', 'kind': kind, 'columns': ['a', 'b'],
+                'features': [recipe], 'repeats': 1}, task_type='regression')
+            self.assertEqual(measured['baseline']['feature_columns'], ['a', 'b', 'sum_ab'])
+        comparison = analyze_features(state, {'name': 'addition', 'kind': 'feature', 'columns': ['a', 'b'],
+            'baseline_features': [recipe], 'features': [
+                {'name': 'delta', 'operation': 'difference', 'columns': ['a', 'b']}]}, task_type='regression')
+        self.assertEqual(comparison['baseline']['recipe_names'], ['sum_ab'])
+        self.assertEqual(comparison['candidate']['recipe_names'], ['sum_ab', 'delta'])
+        self.assertEqual(comparison['baseline']['inner_split_sha256'], comparison['candidate']['inner_split_sha256'])
+        removed = analyze_features(state, {'name': 'remove_b', 'kind': 'ablation', 'columns': ['b'],
+            'baseline_columns': ['a', 'b'], 'features': [recipe]}, task_type='regression')
+        self.assertEqual(removed['candidate']['feature_columns'], ['a', 'sum_ab'])
+        with patch('agent.eda._model', side_effect=AssertionError('Should not train')):
+            with self.assertRaisesRegex(ValueError, 'every model input'):
+                analyze_features(state, {'name': 'empty', 'kind': 'ablation',
+                    'columns': ['a', 'b'], 'baseline_columns': ['a', 'b']})
+
+    def test_empty_populations_and_target_summaries_do_not_produce_nan_or_leak_labels(self):
+        state = self.state()
+        for field in ('filters', 'comparison_filters'):
+            measured = analyze_features(state, {'name': 'empty', 'kind': 'shift', 'columns': ['a'],
+                field: [{'column': 'group', 'operation': 'eq', 'value': 'absent'}]})
+            self.assertEqual(measured['status'], 'unavailable')
+            json.dumps(measured, allow_nan=False)
+        summary = analyze_features(state, {'name': 'summary', 'kind': 'groups', 'group_by': 'group',
+            'columns': ['a', 'target']}, task_type='regression')
+        self.assertIn('std', summary['groups'][0]['target_distribution'])
+        stability = analyze_features(state, {'name': 'stable', 'kind': 'stability',
+            'columns': ['a', 'target'], 'target': 'target'}, task_type='regression')
+        self.assertNotIn('target', stability['features'])
+        hidden = analyze_features(state, {'name': 'hidden', 'kind': 'shift', 'columns': ['target']})
+        self.assertEqual(hidden['status'], 'unavailable')
 
     def test_recipes_learn_from_fit_and_reject_targets(self):
         state = self.state()
@@ -112,6 +151,11 @@ class OperationTests(unittest.TestCase):
         model = _estimator('catboost.CatBoostClassifier', {'random_seed': 7}, {'num_cpus': 1})
         self.assertEqual(model.get_params()['random_seed'], 7)
         self.assertNotIn('random_state', model.get_params())
+        state = self.state()
+        state.update(run_operation(state, {'kind': 'preprocess'}))
+        state.update(run_operation(state, {'kind': 'fit', 'parameters': {'estimator': 'catboost.CatBoost',
+            'parameters': {'iterations': 2, 'verbose': False, 'allow_writing_files': False}}}))
+        self.assertEqual(type(state['model']['estimator']).__name__, 'CatBoostRegressor')
 
     def test_flaml_fixed_replay_keeps_selected_parameters(self):
         from agent.auto_settings import model_settings

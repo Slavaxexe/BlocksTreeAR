@@ -12,7 +12,7 @@ from .context import (catalog_view, compact, experiment_index, idea_history_view
                       operation_view, select_experiments)
 from .contracts import Assembly, Block, Hypothesis, Idea, Ideas, Pipeline, Proposal
 from .plans import AutoMLPlan, ToolCall
-from .qwen import QwenTemporaryError
+from .qwen import QwenError
 from .storage import fingerprint, save
 
 
@@ -34,13 +34,18 @@ class Search:
         self.budget_wait = None
         self.automl_seeded = False
         self.prediction_cache = {}
+        self.feature_decisions = {}
+        self.last_planning_error = None
+        self.baker_candidates = []
         explore = int(options.parallel > 1)
         self.caps = {'improve': options.parallel - explore, 'explore': explore}
 
     def seed_automl(self):
-        """Queue the fixed portfolio once, after a working initial predictor exists."""
+        """Reserve one configured experiment per installed adapter after initial EDA."""
+        if self.automl_seeded:
+            return
         self.automl_seeded = True
-        if not self.options.automl or self.shared.get('initial_eda'):
+        if not self.options.automl:
             return
         preparation = self.shared['preparation']
         requirements = self.shared['requirements']
@@ -60,23 +65,44 @@ class Search:
         remaining = self.options.max_experiments - self.next_node
         for engine in engines[:remaining]:
             idea = Idea(purpose='improve', parent_id=self.leader,
-                        change=f'Built-in {engine} fit-only AutoML portfolio',
+                        change=f'Dedicated {engine} search using EDA and selected feature recipes',
                         change_blocks=[f'builtin_{engine}'], priority=100,
                         expected_effect='Compare an automatically selected tabular model on the fixed outer split')
             record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(),
-                      'status': 'queued', 'builtin_engine': engine, 'research_revision': 0}
+                      'status': 'queued', 'builtin_engine': engine, 'dedicated_automl': True,
+                      'research_revision': self.shared.get('data_research', {}).get('revision', 0)}
             self.records.append(record)
             self.queue.append(record)
             self.used_ideas[fingerprint(idea.model_dump(exclude={'expected_effect'}))] = record['id']
 
         self.save()
 
-    async def builtin_plan(self, idea, engine):
+    async def dedicated_automl_plan(self, idea, engine, context, node_id):
+        client = JSONAgents(self.agents.settings, self.agents.deadline, 6,
+                            shared=self.agents, node_id=node_id)
+        try:
+            plan = await client.configure_automl(context, engine)
+        except QwenError as error:
+            # A broken planning reply must not silently remove the reserved adapter trial.
+            self.notify(f'{node_id}: AutoML configuration failed; using {engine} defaults: {error}')
+            self.agents.log('automl_configuration_fallback', node_id=node_id, engine=engine, error=str(error))
+            plan = AutoMLPlan(engine=engine, ensemble=False)
+        configured = idea.model_copy(update={'automl': plan})
+        return await self.builtin_plan(configured, engine)
+
+    async def builtin_plan(self, idea, engine, candidates=None):
         name = f'builtin_{engine}'
         plan = idea.automl or AutoMLPlan(engine=engine)
+        from .feature_trials import selected_candidates
+        from .plans import FeatureSpec
+        selected = selected_candidates(candidates if candidates is not None else self.shared.get('data_research', {}).get('feature_candidates', []), idea.feature_candidate_ids)
+        recipes = {feature.name: feature for feature in plan.features}
+        for candidate in selected:
+            recipes.update({feature['name']: FeatureSpec.model_validate(feature) for feature in candidate['features']})
+        plan = plan.model_copy(update={'features': list(recipes.values())})
         problem = self.shared['requirements']['problem']
         output = self.shared['requirements']['output']
-        return Proposal(purpose=idea.purpose, parent_id=idea.parent_id,
+        proposal = Proposal(purpose=idea.purpose, parent_id=idea.parent_id,
             hypothesis=Hypothesis(rationale=idea.change, expected_effect=idea.expected_effect, research_ids=idea.research_ids,
                 pipeline=Pipeline(data={'source': 'prepared fit only'},
                     preprocessing={'owner': engine, 'fit_only': True},
@@ -89,6 +115,9 @@ class Search:
                 description=f'Built-in {engine}: fit-only AutoML and prediction DataFrames in fixed row order',
                 requires=['fit', 'validation', 'test', 'preparation', 'auxiliary'],
                 provides=['validation_predictions', 'test_predictions'])], write_blocks=[name]))
+        from .feature_trials import check_recipes
+        check_recipes(proposal, selected)
+        return proposal
 
     async def ensemble_plan(self, idea):
         plan = idea.ensemble
@@ -149,8 +178,7 @@ class Search:
             self.misses, self.revision = 0, revision
             if self.stop_reason == 'planning_stalled':
                 self.stop_reason = 'max_experiments'
-        rows = [row for row in delta.nodes if row.result.status == 'completed'
-                and row.analysis_status in {'completed', 'failed', 'skipped'}]
+        rows = [row for row in delta.nodes if row.result.status == 'completed']
         self.parents = [row.node_id for row in rows]
         eligible = [row for row in rows if row.result.value is not None]
         if eligible and delta.metric.direction:
@@ -191,12 +219,15 @@ class Search:
             record = max((record for record in self.queue
                 if record['idea']['purpose'] == 'baseline'
                 or occupied.count(record['idea']['purpose']) < caps[record['idea']['purpose']]),
-                key=lambda row: row['idea'].get('priority', 50), default=None)
+                key=lambda row: (row.get('dedicated_automl', False), row['idea'].get('priority', 50)), default=None)
             if record is None:
                 break
+            if record.get('dedicated_automl'):
+                record['idea']['parent_id'] = self.leader
             idea = Idea.model_validate(record['idea'])
             blocks = max(1, len(idea.change_blocks))
-            calls = 2 if record.get('builtin_engine') or record.get('builtin_ensemble') else self.estimate_calls(blocks)
+            calls = (8 if record.get('dedicated_automl') else 2
+                     if record.get('builtin_engine') or record.get('builtin_ensemble') else self.estimate_calls(blocks))
             node_id = f'node_{self.next_node:03d}'
             if not self.agents.reserve_calls(node_id, calls):
                 self.wait_for_budget(calls)
@@ -213,17 +244,23 @@ class Search:
                 parent_context.pop('analysis')
             context = {**self.shared,
                 'parent': parent_context,
+                'parent_operations': [operation_view(block.get('operation')) for block in self.catalog.get(idea.parent_id, [])],
                 'module_catalog': catalog_view(self.catalog),
                 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
                 'experiment_timeout_seconds': self.options.experiment_timeout,
                 'idea': record['idea']}
+            if record.get('feature_candidates'):
+                context['data_research'] = {**context.get('data_research', {}),
+                    'feature_candidates': record['feature_candidates']}
             save(self.directory / 'planning' / node_id / 'idea.json', record)
-            if record.get('builtin_ensemble'):
+            if record.get('dedicated_automl'):
+                task = asyncio.create_task(self.dedicated_automl_plan(idea, record['builtin_engine'], context, node_id))
+            elif record.get('builtin_ensemble'):
                 task = asyncio.create_task(self.ensemble_plan(idea))
             elif record.get('builtin_engine'):
-                task = asyncio.create_task(self.builtin_plan(idea, record['builtin_engine']))
+                task = asyncio.create_task(self.builtin_plan(idea, record['builtin_engine'], record.get('feature_candidates')))
             else:
-                client = JSONAgents(self.agents.settings, self.agents.deadline, 3, shared=self.agents, node_id=node_id)
+                client = JSONAgents(self.agents.settings, self.agents.deadline, 8, shared=self.agents, node_id=node_id)
                 task = asyncio.create_task(client.plan_node(context, idea, self.catalog))
             self.planners[task] = record
             occupied.append(idea.purpose)
@@ -311,7 +348,12 @@ class Search:
             self.shared.get('preparation', {}).get('metric', {}).get('name'))
         experiments, index = self.experiment_history()
         selected = {item['node_id'] for item in experiments}
-        return {**self.shared, 'purposes': ['baseline'] if self.next_node == 0 else
+        from .feature_trials import candidate_view
+        research = dict(self.shared.get('data_research', {}))
+        if research.get('feature_candidates'):
+            research['feature_candidates'] = candidate_view(research['feature_candidates'],
+                self.directory, self.rows, self.records, self.feature_decisions)
+        return {**self.shared, 'data_research': research, 'purposes': ['baseline'] if self.next_node == 0 else
                 [purpose for purpose, cap in self.caps.items() if cap],
             'max_new_ideas': min(1 if self.next_node == 0 else 3, remaining,
                                  max(0, self.parallel_limit - sum(self.occupied.values()) - len(self.queue))),
@@ -319,7 +361,7 @@ class Search:
             'slot_limits': self.slot_limits(), 'occupied_slots': self.occupied,
             'api_budget': self.agents.budget_view(),
             'automl_portfolio': [{'engine': record['builtin_engine'], 'status': record['status'],
-                                 'node_id': record.get('node_id')}
+                                 'node_id': record.get('node_id'), 'dedicated': record.get('dedicated_automl', False)}
                                 for record in self.records if record.get('builtin_engine')],
             'prediction_sources': prediction_sources,
             'queued_ideas': self.queued_view(), 'leader_id': self.leader,
@@ -339,10 +381,13 @@ class Search:
             await asyncio.sleep(min(5., max(0., self.agents.deadline - time.monotonic())))
         context = {**self.baker_context(), 'trigger': trigger}
         self.baker_research_revision = context.get('data_research', {}).get('revision', 0)
+        self.baker_candidates = context.get('data_research', {}).get('feature_candidates', [])
         self.baker_feedback = (context['feedback_revision']['experiments'], self.baker_research_revision)
         save(self.directory / 'planning' / f'batch_{self.round:03d}' / 'request.json', context)
         if context['remaining_experiments'] <= 0:
             return Ideas()
+        if self.failures:
+            context['planning_error'] = self.last_planning_error
         return await self.agents.propose_ideas(context)
 
     def apply_updates(self, updates):
@@ -353,6 +398,9 @@ class Search:
                 self.agents.log('idea_update_skipped', idea_id=update.idea_id, reason='Already dispatched or removed')
                 continue
             record['decision'] = update.model_dump()
+            if record.get('dedicated_automl') and update.action == 'remove':
+                self.agents.log('idea_update_skipped', idea_id=record['id'], reason='Reserved AutoML experiment')
+                continue
             if update.action == 'remove':
                 record['status'] = 'removed'
                 self.queue.remove(record)
@@ -369,6 +417,9 @@ class Search:
                 self.failures = 0
                 save(self.directory / 'planning' / f'batch_{self.round:03d}' / 'response.json', response)
                 self.apply_updates(response.updates)
+                for decision in response.feature_decisions:
+                    self.feature_decisions[decision.candidate_id] = decision.model_dump()
+                save(self.directory / 'feature_decisions.json', self.feature_decisions)
                 accepted = 0
                 for idea in response.ideas:
                     if len(self.queue) >= min(self.parallel_limit, self.options.max_experiments - self.next_node):
@@ -383,6 +434,8 @@ class Search:
                         continue
                     record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(), 'status': 'queued',
                               'research_revision': self.baker_research_revision}
+                    from .feature_trials import selected_candidates
+                    record['feature_candidates'] = selected_candidates(self.baker_candidates, idea.feature_candidate_ids)
                     if idea.automl is not None:
                         record['builtin_engine'] = idea.automl.engine
                     if idea.ensemble is not None:
@@ -403,8 +456,10 @@ class Search:
                 raise
             except Exception as error:
                 self.failures += 1
+                self.last_planning_error = str(error)
                 self.agents.log('idea_generation_failed', traceback=traceback.format_exc())
-                temporary = isinstance(error, QwenTemporaryError) and self.failures < 3
+                temporary = (not self.agents.root.api_error and self.failures < 3
+                             and time.monotonic() < self.agents.deadline)
                 self.failed = not temporary
                 self.stop_reason = 'llm_error'
                 self.notify(f'Baker: {error}', fatal=not temporary)

@@ -32,8 +32,15 @@ def inspect_entities(fit, query, request, targets):
             row.update(keys_in_multiple_periods=int((distinct > 1).sum()),
                 duplicate_key_period_row_fraction=float(periods.duplicated(['key', 'time'], keep=False).mean()),
                 comparison_strict_past_coverage=float(prior.mean()) if len(query) else None)
+            row['within_period_ambiguous_rows'] = int(periods.duplicated(['key', 'time'], keep=False).sum())
+            row['within_period_ambiguity_fraction'] = row['duplicate_key_period_row_fraction']
+            row['source_rows'] = len(fit)
         rows.append(row)
     result = {'candidates': rows, 'comparison': request.compare,
+              'definitions': {
+                  'repeated_fit_row_fraction': 'Source rows whose key occurs more than once ACROSS ALL periods. Repetition is not within-period ambiguity and can enable history.',
+                  'within_period_ambiguity_fraction': 'Source rows with duplicate (key, time), divided by source_rows. This is the measured within-period ambiguity.',
+                  'comparison_strict_past_coverage': 'Fraction of comparison rows with a matching source key at a strictly earlier time. Not proof of real-world identity.'},
               'qualification': 'Candidate keys are unverified: matches and history coverage do not prove the same real-world object.'}
     if time:
         def summary(frame):

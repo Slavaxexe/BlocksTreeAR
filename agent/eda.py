@@ -30,12 +30,15 @@ CATALOG = {
     'interactions': 'Joint predictive score versus each individual feature on the same internal holdout.',
     'predictive': 'A reproducible proxy model on selected features, using an internal fit-only holdout.',
     'permutation': 'Permutation importance on internal holdout, not training importance.',
-    'ablation': 'Retrain with/without selected features or groups on the same internal holdout.',
-    'feature': 'Create proposed feature recipes; compare baseline and augmented proxy models on internal holdout.',
+    'ablation': 'Compare the same pipeline before/after removing columns. baseline_columns is the original raw input set; columns lists ONLY removed model inputs. features/baseline_features are applied in both models. At least one input must remain.',
+    'feature': 'Compare baseline_columns + baseline_features against the same raw columns + baseline_features + features. Candidate recipes replace matching baseline recipe names. Keep existing encodings in baseline_features to isolate the new change.',
     'stability': 'Association stability across specified groups, or two disjoint seeded fit subsets.',
     'entities': 'Test proposed key_candidates (lists of columns), or columns as one composite key. Reports repeats, duplicate key/period ambiguity, comparison-table overlap and strictly earlier-history coverage. split_column supplies ordered time. Full filtered tables, no target access needed; overlap is not proof of entity identity.',
 }
 CATALOG['feature'] += ' ' + SUPERVISED_GUIDE
+CATALOG['feature'] += ' For supervised recipes sample_rows caps proxy model fitting/scoring, not the available inner-training history or encoding source.'
+for kind in ('predictive', 'permutation', 'interactions'):
+    CATALOG[kind] += ' Applies all supplied features/baseline_features, fitted only on the inner training rows; reports actual model inputs.'
 
 SCORERS = {
     'rmse': 'neg_root_mean_squared_error', 'rootmeansquarederror': 'neg_root_mean_squared_error',
@@ -53,7 +56,7 @@ def analysis_key(request):
     value = request.model_dump(exclude={'name'})
     value['columns'] = sorted(value['columns'])
     value['baseline_columns'] = sorted(value['baseline_columns'])
-    return fingerprint(value)
+    return fingerprint({'implementation': 3, 'request': value})
 
 
 def _number(value):
@@ -108,6 +111,8 @@ def _association(frame, columns, target, classification, top_k, seed):
         return {'status': 'completed', 'ranking': [], 'constant_features': columns}
     y = LabelEncoder().fit_transform(clean[target]) if classification else clean[target].to_numpy(dtype=float)
     finite = np.isfinite(y)
+    if finite.sum() < 4:
+        return {'status': 'unavailable', 'reason': 'Insufficient finite target rows'}
     function = mutual_info_classif if classification else mutual_info_regression
     scores = function(pd.DataFrame(data).to_numpy()[finite], y[finite], discrete_features=discrete,
                       random_state=seed, n_neighbors=min(3, int(finite.sum()) - 1), n_jobs=1)
@@ -149,23 +154,35 @@ def _inner_split(data, y, request, policy, classification):
                             random_state=request.seed, stratify=y if classification else None)
 
 
-def _predictive(frame, columns, target, classification, request, metric, cache, recipes=(), policy=None):
+def _predictive(frame, columns, target, classification, request, metric, cache, recipes=(), policy=None, removed=()):
     from .validation import metadata
     policy = metadata(policy)
     scorer_name = SCORERS.get(''.join(c for c in metric.lower() if c.isalnum()))
     if scorer_name is None:
         raise ValueError(f'No verified proxy scorer for {metric!r}; choose a descriptive analysis')
-    if not columns:
+    model_columns = list(dict.fromkeys([*columns, *(recipe.name for recipe in recipes)]))
+    model_columns = [column for column in model_columns if column not in removed]
+    if not model_columns:
         raise ValueError('A proxy model needs at least one input feature')
     key = (tuple(frame.index), tuple(columns), target, request.estimator, request.seed, request.validation,
-           request.validation_fraction, request.group_by, request.split_column,
-           tuple(recipe.model_dump_json() for recipe in recipes))
+           request.validation_fraction, request.group_by, request.split_column, request.sample_rows,
+           tuple(recipe.model_dump_json() for recipe in recipes), tuple(removed),
+           tuple(sorted((str(key), str(value)) for key, value in policy.items())))
     if key not in cache:
         data = frame.dropna(subset=[target]).reset_index(drop=True)
         y = LabelEncoder().fit_transform(data[target]) if classification else data[target].to_numpy(dtype=float)
         finite = np.isfinite(y)
         data, y = data.loc[finite].reset_index(drop=True), y[finite]
         train, valid = _inner_split(data, y, request, policy or {}, classification)
+        reference_rows = len(train)
+        model_rows = np.arange(len(train))
+        if request.sample_rows and len(train) + len(valid) > request.sample_rows:
+            # The complete inner train remains the statistics source. Only model fitting/scoring is sampled.
+            train_budget = min(len(train), max(2, int(request.sample_rows * len(train) / (len(train) + len(valid)))))
+            valid_budget = min(len(valid), max(2, request.sample_rows - train_budget))
+            rng = np.random.default_rng(request.seed)
+            model_rows = np.sort(rng.choice(len(train), train_budget, replace=False))
+            valid = np.sort(rng.choice(valid, valid_budget, replace=False))
         # Recipe statistics are learned on the inner training rows, not on its holdout.
         # Recipe inputs may be needed for calculation without being model features.
         dependencies = [column for recipe in recipes for column in [*recipe.columns,
@@ -184,18 +201,19 @@ def _predictive(frame, columns, target, classification, request, metric, cache, 
                 recipe_policy['time_column'] = request.split_column
         x_train, x_valid = create_features([training, data.iloc[valid][raw_columns]],
                                           recipes, forbidden=[target], policy=recipe_policy)
-        history_masks = {recipe.name: x_valid[recipe.name].notna().to_numpy()
-                         for recipe in recipes if recipe.operation == 'history'}
-        all_columns = list(dict.fromkeys([*columns, *(recipe.name for recipe in recipes)]))
-        x_train, x_valid = _matrix(x_train, all_columns), _matrix(x_valid, all_columns)
+        from .supervised_features import history
+        history_masks = {recipe.name: np.isfinite(history([x_train, x_valid], recipe.columns,
+            {**recipe.parameters, 'fallback': 'missing'})[1]) for recipe in recipes
+            if recipe.operation == 'history' and recipe.name in model_columns}
+        x_train, x_valid = _matrix(x_train.iloc[model_rows], model_columns), _matrix(x_valid, model_columns)
         model = _model(x_train, classification, request.estimator, request.seed)
-        model.fit(x_train, y[train])
+        model.fit(x_train, y[train][model_rows])
         scorer = get_scorer(scorer_name)
         score = float(scorer(model, x_valid, y[valid]))
         slices = {}
         for name, covered in history_masks.items():
             slices[name] = {'coverage': float(covered.mean()),
-                'coverage_definition': 'Finite feature after configured fallback; entities measures key-specific strict-past coverage before fallback'}
+                'coverage_definition': 'Key-specific strictly earlier source values, before any global fallback'}
             for scope, mask in [('with_history', covered), ('without_history', ~covered)]:
                 subset_score = None
                 if mask.any():
@@ -205,13 +223,19 @@ def _predictive(frame, columns, target, classification, request, metric, cache, 
                     except ValueError:
                         pass  # Some classification metrics need classes absent from a small slice.
                 slices[name][scope] = {'rows': int(mask.sum()), 'value': subset_score}
-        cache[key] = (model, x_valid, y[valid], scorer, score, len(train), slices)
-    model, valid, y_valid, scorer, score, train_rows, slices = cache[key]
+        from .storage import fingerprint
+        split_hash = fingerprint({'reference': train.tolist(), 'train': train[model_rows].tolist(), 'validation': valid.tolist()})
+        cache[key] = (model, x_valid, y[valid], scorer, score, len(model_rows), slices, split_hash, reference_rows)
+    model, valid, y_valid, scorer, score, train_rows, slices, split_hash, reference_rows = cache[key]
     negative = scorer_name.startswith('neg_')
     result = {'metric': metric, 'value': -score if negative else score,
               'direction': 'minimize' if negative else 'maximize', 'estimator': request.estimator,
               'inner_train_rows': train_rows, 'inner_validation_rows': len(valid),
-              'feature_count': valid.shape[1], 'comparison_score': score,
+              'inner_reference_rows': reference_rows,
+              'feature_count': valid.shape[1], 'feature_columns': list(valid.columns),
+              'recipe_names': [recipe.name for recipe in recipes if recipe.name in valid.columns],
+              'inner_split_sha256': split_hash,
+              'comparison_score': score,
               'scope': 'Proxy evaluation inside fit only; not the experiment outer-validation score'}
     if slices:
         result['history_slices'] = slices
@@ -228,24 +252,34 @@ def analyze_features(state, value, *, task_type=None, cache=None):
     preparation = state['preparation']
     targets = preparation['data']['target_columns']
     ids = preparation['data'].get('id_columns', [])
+    recipes = list({recipe.name: recipe for recipe in [*request.baseline_features, *request.features]}.values())
     columns = sorted(request.columns or [c for c in frame if c not in {*targets, *ids}])
-    if request.kind == 'groups':
+    if request.kind in {'groups', 'stability'}:
         # The target has its own summary below; listing it twice is redundant, not an input feature.
         columns = [column for column in columns if column not in targets]
+    if request.kind == 'shift' and set(columns) & set(targets):
+        return {'kind': request.kind, 'scope': request.dataset, 'status': 'unavailable',
+                'reason': 'Held-out target distributions are unavailable: validation/test labels are hidden'}
     if set(columns) & set(targets):
         raise ValueError('Use target= for the response; columns must contain input features only')
-    if not set(columns) <= set(frame):
-        raise ValueError(f'Unknown analysis features: {sorted(set(columns) - set(frame))}')
+    available = set(frame) | ({recipe.name for recipe in recipes} if request.kind == 'ablation' else set())
+    if not set(columns) <= available:
+        raise ValueError(f'Unknown analysis features: {sorted(set(columns) - available)}')
     target = request.target or (targets[0] if len(targets) == 1 else None)
     if target is not None and target not in targets:
         raise ValueError('Analysis target must be a declared task target')
-    if request.kind != 'entities' and request.sample_rows and len(frame) > request.sample_rows:
+    preserve_reference = any(recipe.operation in {'history', 'target_encoding'} for recipe in recipes)
+    if request.kind != 'entities' and not preserve_reference and request.sample_rows and len(frame) > request.sample_rows:
         frame = frame.sample(request.sample_rows, random_state=request.seed)
     classification = ('class' in str(task_type).lower() or 'binary' in str(task_type).lower()) if task_type else (
         target in frame and not pd.api.types.is_numeric_dtype(frame[target]))
     result = {'kind': request.kind, 'scope': request.dataset, 'rows_used': len(frame), 'rows_available': len(state[request.dataset]),
               'target_available': target in frame, 'features': columns,
               'filters': [item.model_dump() for item in request.filters]}
+    if frame.empty:
+        return {**result, 'status': 'unavailable', 'reason': 'No rows match the selected population'}
+    if request.group_by and request.group_by not in frame:
+        raise ValueError(f'Unknown grouping column: {request.group_by}')
     if request.kind == 'entities':
         from .entity_analysis import inspect_entities
         other = _population(state[request.compare], request.comparison_filters)
@@ -277,6 +311,11 @@ def analyze_features(state, value, *, task_type=None, cache=None):
         result.update(duplicate_columns=duplicates, duplicated_feature_rows=int(frame[columns].duplicated().sum()))
     elif request.kind == 'shift':
         other = _population(state[request.compare], request.comparison_filters)
+        if other.empty:
+            return {**result, 'status': 'unavailable', 'comparison_rows': 0,
+                    'reason': 'No rows match the comparison population'}
+        if not set(columns) <= set(other):
+            raise ValueError(f'Comparison table lacks columns: {sorted(set(columns) - set(other))}')
         if request.sample_rows and len(other) > request.sample_rows:
             other = other.sample(request.sample_rows, random_state=request.seed)
         measurements = []
@@ -307,7 +346,8 @@ def analyze_features(state, value, *, task_type=None, cache=None):
             row = {'group': str(group), 'rows': len(subset),
                    'feature_means': {c: _number(subset[c].mean()) for c in columns if pd.api.types.is_numeric_dtype(subset[c])}}
             if target in subset:
-                row['target_distribution'] = {str(k): float(v) for k, v in subset[target].value_counts(normalize=True).items()} if classification else {'mean': _number(subset[target].mean())}
+                row['target_distribution'] = {str(k): float(v) for k, v in subset[target].value_counts(normalize=True).items()} if classification else {
+                    name: _number(getattr(subset[target], name)()) for name in ('mean', 'std', 'min', 'max', 'median')}
             result['groups'].append(row)
     elif request.kind == 'stability':
         if request.group_by:
@@ -326,8 +366,18 @@ def analyze_features(state, value, *, task_type=None, cache=None):
             [c for c in frame if c not in {*targets, *ids}])
         if set(baseline_columns) & set(targets):
             raise ValueError('Baseline inputs cannot contain targets')
+        if not set(baseline_columns) <= set(frame):
+            raise ValueError(f'Unknown baseline inputs: {sorted(set(baseline_columns) - set(frame))}')
+        if request.kind == 'ablation':
+            inputs = set(baseline_columns) | {recipe.name for recipe in recipes}
+            if not request.columns or not set(columns) <= inputs:
+                raise ValueError('Ablation columns must name only removed baseline inputs; set baseline_columns explicitly')
+            if not inputs - set(columns):
+                raise ValueError('Ablation removes every model input; retain at least one feature')
         policy = preparation.get('validation', {})
-        baseline, fitted = _predictive(frame, baseline_columns, target, classification, request, metric, cache, policy=policy)
+        baseline_recipes = request.baseline_features if request.kind == 'feature' else recipes
+        baseline, fitted = _predictive(frame, baseline_columns, target, classification, request, metric, cache,
+                                       recipes=baseline_recipes, policy=policy)
         result['baseline'] = baseline
         if request.kind == 'permutation':
             model, valid, labels, scorer = fitted
@@ -337,15 +387,28 @@ def analyze_features(state, value, *, task_type=None, cache=None):
                 for c, mean, std in zip(valid.columns, scores.importances_mean, scores.importances_std)],
                 key=lambda row: -row['mean_score_drop']), request.top_k)
         elif request.kind in {'ablation', 'feature'}:
-            changed = [c for c in baseline_columns if c not in columns] if request.kind == 'ablation' else baseline_columns
-            candidate, _ = _predictive(frame, changed, target, classification, request, metric, cache,
-                                      recipes=request.features if request.kind == 'feature' else (), policy=policy)
+            candidate, _ = _predictive(frame, baseline_columns, target, classification, request, metric, cache,
+                                      recipes=recipes, policy=policy, removed=columns if request.kind == 'ablation' else ())
             result.update(candidate=candidate,
                           improvement=candidate['comparison_score'] - baseline['comparison_score'])
+            result['absolute_improvement'] = result['improvement']
+            result['relative_improvement'] = (result['improvement'] / abs(baseline['value'])
+                                               if baseline['value'] else None)
+            result['improvement_percent'] = (100 * result['relative_improvement']
+                                              if result['relative_improvement'] is not None else None)
+            previous = {recipe.name: recipe for recipe in baseline_recipes}
+            result['comparison'] = {
+                'added_recipes': [recipe.name for recipe in recipes if recipe.name not in previous],
+                'modified_recipes': [recipe.name for recipe in recipes
+                    if recipe.name in previous and recipe != previous[recipe.name]],
+                'removed_inputs': columns if request.kind == 'ablation' else [],
+                'same_inner_split': baseline['inner_split_sha256'] == candidate['inner_split_sha256']}
         elif request.kind == 'interactions':
-            singles = [_predictive(frame, [c], target, classification, request, metric, cache, policy=policy)[0] for c in columns]
+            singles = [_predictive(frame, [c], target, classification, request, metric, cache,
+                                   recipes=recipes, policy=policy)[0] for c in columns]
             result.update(single_features=dict(zip(columns, singles)),
-                          joint_gain_over_best_single=baseline['comparison_score'] - max(row['comparison_score'] for row in singles))
+                          joint_gain_over_best_single=baseline['comparison_score'] - max(row['comparison_score'] for row in singles),
+                          qualification='Each single-input comparison keeps the same engineered recipes' if recipes else 'Single raw inputs versus joint model')
     return result
 
 

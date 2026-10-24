@@ -104,6 +104,33 @@ def select_research(memory, query, limit=8):
             'omitted_insight_count': memory.get('omitted_insight_count', 0) + len(insights) - len(selected)}
 
 
+def research_memory_view(memory, *, review=False):
+    """Keep claims and applicable recipes; detailed evidence remains in the research archive."""
+    keys = ('id', 'phase', 'statement', 'kind', 'importance', 'confidence')
+    if not review:
+        keys += ('implication',)
+    result = {key: memory[key] for key in ('revision', 'open_questions', 'coverage', 'omitted_insight_count') if key in memory}
+    result['insights'] = [{key: item[key] for key in keys if key in item} for item in memory.get('insights', [])]
+    for source, insight in zip(memory.get('insights', []), result['insights']):
+        measured = []
+        for facts in source.get('evidence', {}).values():
+            if not isinstance(facts, dict):
+                continue
+            values = {key: facts[key] for key in ('kind', 'scope', 'rows_used', 'improvement_percent', 'candidates') if key in facts}
+            for side in ('baseline', 'candidate'):
+                if side in facts:
+                    values[side] = {key: facts[side][key] for key in ('metric', 'value', 'inner_train_rows',
+                        'inner_validation_rows', 'inner_reference_rows') if key in facts[side]}
+            if values:
+                measured.append(values)
+        if measured:
+            insight['measured'] = measured
+    if not review:
+        result['feature_candidates'] = [{key: value for key, value in item.items() if key != 'measurement_key'}
+                                        for item in memory.get('feature_candidates', [])]
+    return result
+
+
 def planner_catalog(catalog, idea, limit=24):
     from .storage import fingerprint
     selected = {idea.parent_id: list(catalog[idea.parent_id])} if idea.parent_id in catalog else {}
@@ -181,11 +208,13 @@ def analyzer_context(context):
 def research_history(nodes):
     from .research_policy import FINISHED
     active = [row for row in nodes if row['stage'] not in FINISHED]
-    recent = [row for row in nodes if row['stage'] in FINISHED][-8:]
+    recent = [row for row in nodes if row['stage'] in FINISHED][-4:]
     return [compact({'node_id': row['node_id'], 'phase': row['phase'], 'stage': row['stage'],
         'direction': row.get('direction'), 'mode': row.get('mode'), 'question': row.get('question'),
         'summary': row.get('review', {}).get('summary'), 'error': row.get('error'),
         'probes': [{'kind': value['kind'], 'columns': value.get('columns'),
+                    'baseline_columns': value.get('baseline_columns'),
+                    'baseline_features': value.get('baseline_features'),
                     'features': [{key: recipe[key] for key in ('operation', 'columns', 'parameters')}
                                  for recipe in value.get('features', [])],
                     'sample_rows': value.get('sample_rows'), 'filters': value.get('filters')}
@@ -221,7 +250,7 @@ def preparation_view(preparation):
     return {'data': preparation.data.model_dump(exclude={'files'}), 'metric': preparation.metric.model_dump(),
             'output': preparation.output.model_dump(), 'profile': profiles,
             'validation': {key: value for key, value in preparation.validation.items()
-                           if key not in {'split_file', 'split_sha256'}}, 'issues': preparation.issues}
+                           if key not in {'split_file', 'split_sha256', 'split_plan'}}, 'issues': preparation.issues}
 
 
 def execution_contract(preparation):
@@ -295,10 +324,12 @@ def node_context(context, research_ids):
     return result
 
 
-def research_profile_view(profile):
+def research_profile_view(profile, *, detailed=True):
     """Keep measured values and column names while removing repeated per-column JSON keys."""
     result = {key: value for key, value in profile.items() if key != 'tables'}
-    result['quantile_levels'] = [0, .25, .5, .75, 1]
+    result['quantile_levels'] = [0, .25, .5, .75, 1] if detailed else [0, .5, 1]
+    if not detailed:
+        result['frequent_values_limit'] = 3
     result['tables'] = {}
     for role, table in profile['tables'].items():
         types, unique, missing, nonfinite, quantiles, frequent = {}, {}, {}, {}, {}, {}
@@ -312,7 +343,8 @@ def research_profile_view(profile):
             if column.get('quantiles'):
                 quantiles[name] = [column['quantiles'][str(float(q))] for q in result['quantile_levels']]
             if 'frequent_values' in column:
-                frequent[name] = column['frequent_values']
+                frequent[name] = column['frequent_values'] if detailed else dict(
+                    sorted(column['frequent_values'].items(), key=lambda item: item[1], reverse=True)[:3])
         result['tables'][role] = {'rows': table['rows'], 'columns_by_dtype': types, 'unique': unique,
             'missing': missing, 'nonfinite': nonfinite, 'quantiles': quantiles, 'frequent_values': frequent}
     return result

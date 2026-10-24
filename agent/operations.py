@@ -30,7 +30,7 @@ CATALOG = {
                'provides': ['validation_predictions', 'test_predictions'], 'parameters': 'engine=flaml/autogluon; models:[str], model_parameters:{model:{kw:value}}, search_space:{model:{kw:typed_domain}}, num_trials; validation=holdout/cv, folds=3, holdout_fraction=.2; split_column/group_by optionally name the inner time/group column; otherwise use shared validation metadata. bag_folds=0/2+, stack_levels=0 (AutoGluon only); ensemble:bool; budget_fraction in (0,1]; columns/drop_columns, features:FeatureSpec list; row_weights:{time_column,half_life}. With recipes, weights or group/time policy: explicit fit-only holdout, no bagging/stacking (FLAML ensemble=false), then frozen refit on all fit. Without these constraints native CV is available.'},
     'saved_ensemble': {'requires': ['fit', 'validation', 'test', 'preparation', 'auxiliary'],
         'provides': ['validation_predictions', 'test_predictions'],
-        'parameters': 'EnsemblePlan: source_nodes, method=mean/vote/probabilities/conditional/stacking/gating. Cached blending needs no training. Conditional rules use input features. Learned methods train only the combiner on saved shared inner-holdout predictions (meta_ready sources); estimator/parameters, feature_columns and passthrough control them. optimize_weights=true tunes blend weights on saved meta_ready predictions; weight_trials=64. No source retraining.'},
+        'parameters': 'EnsemblePlan: source_nodes, method=mean/vote/probabilities/conditional/stacking/gating. Cached blending needs no training. Conditional rules use input features. Learned methods use saved shared inner-holdout predictions (meta_ready), or prepare them once on demand (meta_available); estimator/parameters, feature_columns and passthrough control them. optimize_weights=true tunes blend weights on saved meta_ready predictions; weight_trials=64. Ordinary models use all outer-fit rows. Missing meta predictions require one extra held-out source fit, cached for all later ensembles.'},
     'ensemble': {'requires': ['preparation'], 'provides': ['validation_predictions', 'test_predictions'],
                  'parameters': 'sources: [[validation_state_key,test_state_key],...]; weights optional; method=mean/vote/probabilities. List every source state key in block.requires.'},
 }
@@ -191,6 +191,8 @@ def _fit(state, parameters, defaults):
     from .supervised_features import row_weights
     features, targets = state['fit_features'], state['fit_targets']
     classification = _classification(state, defaults)
+    if parameters.get('estimator') == 'catboost.CatBoost':
+        parameters = {**parameters, 'estimator': 'catboost.CatBoostClassifier' if classification else 'catboost.CatBoostRegressor'}
     targets = np.asarray(targets)
     if targets.ndim == 2 and targets.shape[1] == 1:
         targets = targets[:, 0]

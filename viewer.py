@@ -9,6 +9,27 @@ import time
 from urllib.parse import urlsplit
 
 
+def research_presentation(finish, measurements):
+    values = (measurements or {}).get('values', {})
+    failures = [{'name': name, 'error': value.get('error', 'Measurement failed')}
+                for name, value in values.items() if isinstance(value, dict) and value.get('status') == 'failed']
+    unavailable = [{'name': name, 'reason': value.get('reason', 'No measurement available')}
+                   for name, value in values.items() if isinstance(value, dict) and value.get('status') == 'unavailable']
+    finish = finish or {}
+    status, outcome = finish.get('status', 'pending'), finish.get('review', {}).get('outcome')
+    if failures or status in {'failed', 'timeout'}:
+        display = 'failed'
+    elif status in {'cancelled', 'duplicate'}:
+        display = status
+    elif outcome == 'inconclusive' or unavailable:
+        display = 'uncertain'
+    elif outcome == 'refuted':
+        display = 'refuted'
+    else:
+        display = status
+    return {'display_status': display, 'execution_failures': failures, 'unavailable_measurements': unavailable}
+
+
 def module_file(directory, name):
     path = directory / 'modules' / (name + '.py')
     if path.exists():
@@ -72,6 +93,8 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
                 'code': json.dumps(row['analyses'], ensure_ascii=False, indent=2) if row.get('analyses') else source(directory / 'probe.py'),
                 'attempts': [{'number': p.name, 'error': read(p / 'error.json'), 'code': source(p / 'probe.py')}
                              for p in sorted((directory / 'attempts').glob('*'))]})
+            entry = run['research_nodes'][-1]
+            entry.update(research_presentation(entry['finish'], entry['measurements']))
         block_directory = folder / 'extraction' if (folder / 'extraction').is_dir() else folder
         blocks = {key: read(block_directory / f"{key}.json") for key in ("problem", "data", "metric", "output")}
         extraction = read(folder / "extraction.json")
@@ -118,6 +141,7 @@ HTML = r'''<!doctype html>
 :root{color-scheme:light dark;--bg:light-dark(#f6f7fa,#11141a);--paper:light-dark(#fff,#1a1f28);--ink:light-dark(#202638,#e2e7ef);--muted:light-dark(#647084,#a3aec0);--line:light-dark(#dce1eb,#353d4d);--purple:light-dark(#6947c4,#bea7ff);--purple-bg:light-dark(#f2edff,#2c2444);--teal:light-dark(#087c72,#75d7c1);--teal-bg:light-dark(#eaf7f2,#17362f);--red:light-dark(#b34343,#f4a2a2);--red-bg:light-dark(#fff0ef,#3d272a);--amber:light-dark(#95650b,#e5bf74)}
 
 *{box-sizing:border-box}
+:root{--amber-bg:light-dark(#fff5d8,#3b3020)}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 button,select{font:inherit;color:inherit}
 button,select{background:var(--paper);border:1px solid var(--line);border-radius:7px;padding:8px 13px}
@@ -164,6 +188,8 @@ main{max-width:1400px;margin:auto;padding:0 32px 28px}
 .tree-node.best .box{stroke:var(--purple);stroke-width:2.3}
 .tree-node.completed .box{fill:var(--teal-bg)}
 .tree-node.failed .box,.tree-node.timeout .box{fill:var(--red-bg)}
+.tree-node.uncertain .box{fill:var(--amber-bg);stroke:var(--amber)}
+.tree-node.refuted .box,.tree-node.cancelled .box,.tree-node.duplicate .box{fill:var(--bg)}
 .tree-node.partial .box{fill:var(--purple-bg)}
 .tree .score{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:17px;font-variant-numeric:tabular-nums}
 .tree .best-label{fill:var(--purple);font-size:11px;font-weight:650}
@@ -228,7 +254,7 @@ const statuses={completed:'Завершён',failed:'Ошибка',timeout:'Та
 const purposes={baseline:'baseline',improve:'улучшение',explore:'альтернатива',data:'данные'};
 const phases={queued:'В очереди',planning:'Вопрос и код проверки',review:'Интерпретация измерений',cancelled:'Прервано',implementation:'Написание блоков',ready:'Код готов',reused:'Сохранённая версия',assembly:'Сборка',check:'Короткая проверка',execution:'Выполнение',completed:'Завершён',failed:'Ошибка',timeout:'Таймаут'};
 const analysisLabels={pending:'Ожидает анализа',running:'Анализатор работает',completed:'Анализ готов',failed:'Ошибка анализатора',skipped:'Анализ пропущен'};
-const stops={node_limit:'Лимит нод',time_budget:'Лимит времени',llm_error:'Ошибка API / JSON',preparation_failed:'Ошибка подготовки',error:'Ошибка контроллера',max_experiments:'Лимит экспериментов',planning_stalled:'Baker не предложил новых планов'};
+const stops={node_limit:'Лимит нод',time_budget:'Лимит времени',llm_error:'Ошибка API / JSON',preparation_failed:'Ошибка подготовки',error:'Ошибка контроллера',max_experiments:'Лимит экспериментов',planning_stalled:'Baker не предложил новых планов',research_call_limit:'Квота API для EDA',llm_limit:'Лимит API',user_stopped:'Остановлен пользователем'};
 const roles={problem:'Задача',data:'Данные',metric:'Метрика',output:'Формат ответа'};
 const extractionStatus=r=>({running:'Выполняется',ready:'Готово',partial:'Частично',failed:'Ошибка'}[r.report?.status]??'Нет итогового отчёта');
 let state=JSON.parse($('initial-data').textContent), active=null, selected=null, jsonTab='start', signature='', view='extraction', live=__LIVE__;
@@ -318,7 +344,7 @@ function render() {
 function drawResearch(r) {
   const rows=r.research_nodes??[], context=r.research_context??{};
   $('assembly-overview').hidden=true;
-  $('tree-legend').textContent='Дерево вопросов о данных · линия — уточнение предыдущего исследования · нажмите ноду';
+  $('tree-legend').textContent='Зелёный — подтверждена · жёлтый — неопределённость / нет данных · красный — ошибка выполнения · серый — опровергнута / остановлена';
   $('tree-note').textContent='Выводы ссылаются на сохранённые измерения. Интерпретации отмечены отдельно. Структурные исследования не получают таргеты; последующие работают с размеченным fit. Статусы отражают последние сохранённые файлы.';
   $('summary').replaceChildren();
   const stopLabel=({node_limit:'Лимит исследований',llm_limit:'Лимит API',repeated_failures:'Повторные ошибки',...stops})[context.stop_reason]??context.stop_reason??'—';
@@ -351,6 +377,8 @@ function drawResearch(r) {
   if(!row){detail.append(element('p','muted','Исследования ещё не запущены.'));return;}
   detail.append(element('h2','',row.node_id),element('p','',row.question??'Формулируется вопрос'),
     element('p','muted',row.phase==='structure'?'До split · без таргетов':'После split · таргеты только из fit'));
+  for(const failure of row.execution_failures??[])detail.append(element('p','error-text',failure.name+': '+failure.error));
+  for(const missing of row.unavailable_measurements??[])detail.append(element('p','muted',missing.name+': '+missing.reason));
   for(const [label,value] of [['Гипотеза',row.hypothesis],['Метод',row.method],['Какое решение меняется',row.decision],['Вывод',row.finish?.review?.summary],['Ошибка',row.finish?.error]]){
     if(value)detail.append(element('h3','',label),element('p','',value));
   }
@@ -506,11 +534,14 @@ function drawTree(r) {
     class:'source-edge','marker-end':`url(#${c.id}-arrow)`}));}
   for (const n of nodes) {
     const p = positions.get(n.id), f = n.finish, best = r.best?.node_id === n.id;
+    const displayStatus=n.research?.display_status??f?.status??'pending';
     const execution=r.report?.node_states?.[n.id], analyzing=r.report?.analyzing_nodes?.includes(n.id);
-    const status = statuses[f?.status] ?? phases[execution?.stage] ?? (r.report?.running_nodes?.includes(n.id)?'Выполняется':r.report?.queued_nodes?.includes(n.id)?'В очереди':'Ожидает запуска');
+    const status = n.research?.execution_failures?.length ? 'Ошибок измерений: '+n.research.execution_failures.length
+      : displayStatus==='uncertain'?'Недостаточно доказательств':displayStatus==='refuted'?'Проверка завершена':displayStatus==='cancelled'?'Остановлена':displayStatus==='duplicate'?'Повтор пропущен'
+      : statuses[f?.status] ?? phases[execution?.stage] ?? (r.report?.running_nodes?.includes(n.id)?'Выполняется':r.report?.queued_nodes?.includes(n.id)?'В очереди':'Ожидает запуска');
     const duration = typeof f?.duration_seconds === 'number' ? ' · ' + f.duration_seconds.toFixed(2) + ' с' : '';
     const g = svg('g', {
-      class: `tree-node ${f?.status??'pending'} ${n.id===selected?'selected':''} ${best?'best':''} ${analyzing?'analyzing':''}`,
+      class: `tree-node ${displayStatus} ${n.id===selected?'selected':''} ${best?'best':''} ${analyzing?'analyzing':''}`,
       role: 'button', tabindex: 0, 'aria-label': `${n.id}, ${status}, ${fmt(f?.value)}`, 'data-node': n.id
     });
     g.append(svg('rect', {x:p.x, y:p.y, width:240, height:140, rx:9, class:'box'}));

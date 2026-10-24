@@ -205,7 +205,8 @@ GUIDANCE = {
     },
     'catboost.CatBoostRegressor': {
         'sources': ['https://catboost.ai/docs/en/concepts/python-reference_catboostregressor'],
-        'notes': ['Use the CatBoost API and budget/categorical restrictions described for CatBoostClassifier, but do not apply classification-only weights or label conversion to regression.',
+        'notes': ['Use CatBoostRegressor for sklearn-style iterations/learning_rate/cat_features kwargs; generic catboost.CatBoost expects a params dictionary and is not an interchangeable class.',
+                  'Use the CatBoost API and budget/categorical restrictions described for CatBoostClassifier, but do not apply classification-only weights or label conversion to regression.',
                   'For ordinary regression predict produces numeric values. Choose loss_function to match the task; validation metrics and training objectives need not be the same.'],
     },
     'lightgbm.LGBMClassifier': {

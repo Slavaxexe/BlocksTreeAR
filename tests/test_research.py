@@ -70,7 +70,8 @@ def fixture(directory):
     task.write_text(text, encoding='utf-8')
     draft = {'rationale': 'Use the supplied files and hold out the last two rows.',
              'data': {'files': {'train': 'train.csv', 'test': 'test.csv'}, 'target_columns': ['target'], 'id_columns': ['id']},
-             'validation': {'strategy': 'ordered', 'group_columns': []},
+             'validation': {'strategy': 'ordered', 'group_columns': [], 'deployment_scenario': 'uncertain',
+                            'deployment_reason': 'Fixture uses fixed row positions without confirmed time semantics'},
              'metric': {'name': 'MAE', 'direction': 'minimize', 'definition': 'mean(abs(error))', 'status': 'ready'},
              'output': {'filename': 'submission.csv', 'format': 'CSV', 'columns': ['id', 'target']}, 'code': LOADER}
     atomic_bytes(root / 'prepare.py', LOADER.encode())
@@ -97,8 +98,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(choose_direction(nodes, 'fit', [{'direction': 'encoding', 'importance': 'high'}]),
                          ('encoding', 'refine'))
         plan = dict(question='Count rows', hypothesis='Rows exist', method='Quality', decision='Budget', analyses=CHECKS)
-        with self.assertRaises(ValidationError):
-            ResearchPlan.model_validate(plan, context={'assigned_direction': 'entities'})
+        # A valid alternative measurement must not consume retries for a scheduling preference.
+        ResearchPlan.model_validate(plan, context={'assigned_direction': 'entities'})
         ResearchPlan.model_validate({**plan, 'alternative_reason': 'No candidate key is available'},
                                     context={'assigned_direction': 'entities'})
 
@@ -112,6 +113,23 @@ class WorkerTests(unittest.TestCase):
                        {'filters': [{'column': 'a', 'operation': 'gt', 'value': 2}]}):
             changed = AnalysisRequest.model_validate({**request.model_dump(), **change})
             self.assertNotEqual(measurement_key(request), measurement_key(changed))
+        entity = AnalysisRequest(name='keys', kind='entities', columns=['a', 'b'], key_candidates=[['a']])
+        self.assertEqual(measurement_key(entity), measurement_key(entity.model_copy(
+            update={'name': 'renamed', 'columns': ['a'], 'sample_rows': None, 'seed': 123})))
+
+    def test_bad_request_does_not_discard_other_measurements(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, root, _ = fixture(Path(temporary))
+            inspect(root)
+            node = root / 'research/nodes/research_000'
+            checks = [{'name': 'bad', 'kind': 'ablation', 'columns': ['feature'], 'baseline_columns': ['feature']}, *CHECKS]
+            save(node / 'start.json', {'phase': 'structure', 'analyses': checks, 'analysis_sha256': fingerprint(checks),
+                'preparation_sha256': file_hash(root / 'preparation.json')})
+            execute(root, node)
+            measured = json.loads((node / 'measurements.json').read_text())
+            self.assertEqual(measured['values']['bad']['status'], 'failed')
+            self.assertEqual(measured['values']['rows']['rows_used'], 8)
+            self.assertEqual(measured['execution']['failed'], 1)
 
     def test_context_keeps_important_evidence_and_bounds_recent_history(self):
         insights = [{'id': str(i), 'node_id': f'research_{i:03d}', 'statement': f'Observation {i}',
@@ -120,7 +138,7 @@ class WorkerTests(unittest.TestCase):
         nodes = [{'node_id': f'research_{i:03d}', 'phase': 'fit', 'stage': 'completed'} for i in range(30)]
         nodes.append({'node_id': 'research_030', 'phase': 'fit', 'stage': 'planning'})
         self.assertEqual([row['node_id'] for row in research_history(nodes)],
-                         [f'research_{i:03d}' for i in range(22, 31)])
+                         [f'research_{i:03d}' for i in range(26, 31)])
         metadata = {str(i): {'direction': str(i % 4), 'importance': 'high'} for i in range(20)}
         self.assertEqual(len(select_questions(list(metadata), metadata)), 6)
 
@@ -152,9 +170,37 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ResearchReview.model_validate(review(supersedes=['invented']),
                 context={'measurements': {'rows': 8}, 'insight_ids': []})
+        reviewed = ResearchReview.model_validate(review(resolves=[' explain  duplicates ', 'invented']),
+            context={'measurements': {'rows': 8}, 'open_questions': ['Explain duplicates']})
+        self.assertEqual(reviewed.resolves, ['Explain duplicates'])
 
 
 class ResearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unlimited_research_still_preserves_model_call_budget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, root, _ = fixture(Path(temporary))
+            agents = JSONAgents(Settings('fake', 'https://qwen.example/v1', 'model'), time.monotonic()+5, 150)
+            research = Research(agents, root, Options(max_llm_calls=150, research_unlimited=True),
+                                {}, None, lambda message: None, lambda: None)
+
+            async def consume(row, client):
+                # Include all retries in this node's call allowance.
+                client.requests += client.max_calls
+                agents.budget['requests'] += client.max_calls
+                agents.root.call_reservations[row['node_id']] = 0
+                return {'status': 'duplicate'}
+
+            with patch.object(research, 'investigate', new=consume):
+                while not research.stop_reason:
+                    research.fill()
+                    if research.tasks:
+                        await asyncio.gather(*research.tasks)
+                        research.collect(set(research.tasks))
+            self.assertEqual(agents.budget['requests'], 45)
+            self.assertEqual(agents.remaining_calls, 105)
+            self.assertEqual(agents.root.call_reservations, {})
+            self.assertEqual(research.stop_reason, 'research_call_limit')
+
     async def test_two_slots_measurements_memory_supersession_and_cancellation(self):
         with tempfile.TemporaryDirectory() as temporary:
             _, root, _ = fixture(Path(temporary))
@@ -326,7 +372,7 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
             with patch('agent.agents.AsyncOpenAI', side_effect=client):
-                root, report = await run(task, Options(time_budget=70, experiment_timeout=15, output_dir=output,
+                root, report = await run(task, Options(time_budget=70, eda_seconds=30, experiment_timeout=15, output_dir=output,
                     max_experiments=7, max_research_nodes=4, max_llm_calls=120, research_parallel=2),
                     Settings('fake', 'https://qwen.example/v1', 'model', timeout_seconds=5))
             self.assertEqual(report.status, 'ready', report.errors + report.warnings)

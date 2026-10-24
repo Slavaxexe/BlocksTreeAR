@@ -17,7 +17,7 @@ from ml_reference_tools import (MAX_REFERENCE_CALLS, MAX_REFERENCE_ROUNDS, REFER
 
 from .config import Settings
 from .context import (analyzer_context, compact, node_context, planner_catalog, prompt_schema,
-                      repair_context, select_research, table, task_context)
+                      repair_context, research_memory_view, select_research, table, task_context)
 from .contracts import (Analysis, DataFacts, Extraction, Ideas, LLMCall, MetricFacts, NodePlan, OutputFacts,
                         PreparationDraft, ProblemFacts, RunReport)
 from .qwen import QwenError, QwenTemporaryError, api_error_details
@@ -111,7 +111,7 @@ def plan_key(plan):
 
 
 class JSONAgents:
-    def __init__(self, settings: Settings, deadline: float, max_calls: int = 20, *, shared=None,
+    def __init__(self, settings: Settings, deadline: float, max_calls: int | None = 20, *, shared=None,
                  node_id=None, block=None, parallel_agents=8):
         settings.validate()
         self.settings, self.deadline, self.max_calls = settings, deadline, max_calls
@@ -126,6 +126,7 @@ class JSONAgents:
             self.api_retry_at = 0.
             self.api_error = None
             self.reference_facts = {}
+            self.guidance_observations = {}
             self.reference_rounds = {}
             self.call_reservations = {}
             self.active = {}
@@ -156,32 +157,46 @@ class JSONAgents:
             except OSError as error:
                 self.log('diagnostic_write_failed', path=str(relative), error=str(error))
 
+    def observe_error(self, role, error):
+        from .guidance import observed_rules
+        matched = observed_rules(error)
+        for key in matched:
+            self.root.guidance_observations[key] = self.root.guidance_observations.get(key, 0) + 1
+        if matched:
+            self.record('guidance_observations.json', self.root.guidance_observations)
+            self.log('guidance_error_observed', role=role, rules=matched)
+
     @property
     def free_calls(self):
+        if self.budget['limit'] is None:
+            return math.inf
         return max(0, self.budget['limit'] - self.budget['requests']
                    - sum(self.root.call_reservations.values()))
 
     @property
     def remaining_calls(self):
         reserved = self.root.call_reservations.get(self.node_id, 0)
-        return max(0, min(self.max_calls - self.requests, self.free_calls + reserved))
+        local = math.inf if self.max_calls is None else self.max_calls - self.requests
+        return max(0, min(local, self.free_calls + reserved))
 
     def reserve_calls(self, node_id, calls):
         previous = self.root.call_reservations.get(node_id, 0)
         if calls - previous > self.free_calls:
             return False
         self.root.call_reservations[node_id] = calls
-        self.log('api_budget_reserved', owner=node_id, calls=calls, free_calls=self.free_calls)
+        self.log('api_budget_reserved', owner=node_id, calls=calls, free_calls=self.budget_view()['free'])
         return True
 
     def release_calls(self, node_id):
         calls = self.root.call_reservations.pop(node_id, 0)
         if calls:
-            self.log('api_budget_released', owner=node_id, calls=calls, free_calls=self.free_calls)
+            self.log('api_budget_released', owner=node_id, calls=calls, free_calls=self.budget_view()['free'])
 
     def budget_view(self):
-        return {'remaining': self.budget['limit'] - self.budget['requests'],
-                'free': self.free_calls, 'reserved': dict(self.root.call_reservations)}
+        remaining = None if self.budget['limit'] is None else self.budget['limit'] - self.budget['requests']
+        free = self.free_calls
+        return {'remaining': remaining, 'free': None if math.isinf(free) else free,
+                'reserved': dict(self.root.call_reservations)}
 
     async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
                   validation: dict | None = None, thinking: bool | None = None, reference: bool | None = None):
@@ -218,6 +233,10 @@ class JSONAgents:
             used = self.root.reference_rounds.get(reference_key, 0)
             reference_limit = min(reference_limit, MAX_REFERENCE_ROUNDS - used)
         reference_enabled = reference_enabled and reference_limit > 0
+        from .guidance import augment_prompt, prompt_sizes
+        prompt, guidance = augment_prompt(prompt, role, self.root.guidance_observations)
+        if guidance:
+            self.log('guidance_selected', role=role, rules=guidance)
         messages = [
             {"role": "system", "content": (
                 "Return ONLY the final JSON object matching the supplied JSON Schema. "
@@ -239,10 +258,10 @@ class JSONAgents:
                                       'Batch missing details in one round; then return the final schema object. '
                                       + messages[0]['content'])
         max_tokens = self.settings.max_tokens
-        invalid_responses = network_retries = reference_round = 0
+        invalid_responses = network_failures = reference_round = 0
         attempt = 1
         # A tool continuation gets its own HTTP call, not another JSON/code repair.
-        max_requests = 3 + (reference_limit if reference_enabled else 0)
+        max_requests = 8 + (reference_limit if reference_enabled else 0)
         for _ in range(max_requests):
             # A rate limit pauses all roles sharing this key, not just the failed request.
             while True:
@@ -271,6 +290,7 @@ class JSONAgents:
             self.record(Path('llm') / f'{request_id:04d}.request.json', {
                 'role': role, 'node_id': self.node_id, 'block': self.block, 'attempt': attempt,
                 'model': self.settings.model, 'messages': messages,
+                'prompt_characters': prompt_sizes(messages),
                 'timeout_seconds': timeout, 'max_tokens': max_tokens,
                 'thinking': thinking, 'reasoning_effort': reasoning_effort,
                 'reference_round': reference_round, 'reference_limit': reference_limit if reference_enabled else 0,
@@ -297,6 +317,7 @@ class JSONAgents:
                          duration_seconds=time.monotonic() - started)
                 raise
             except (APIStatusError, APITimeoutError, APIConnectionError, TimeoutError) as error:
+                network_failures += 1
                 status = error.status_code if isinstance(error, APIStatusError) else None
                 suffix = f"HTTP {status}" if status else (
                     "таймаут" if isinstance(error, (APITimeoutError, TimeoutError)) else "ошибка соединения")
@@ -317,12 +338,12 @@ class JSONAgents:
                 if self.root.api_error:
                     raise QwenError(self.root.api_error) from None
                 if status == 429:
-                    if attempt < 3 and self.remaining_calls > 0:
+                    if network_failures < 5 and self.remaining_calls > 0:
                         attempt += 1
                         continue
                     raise QwenTemporaryError(f'Qwen: роль {role}: HTTP 429; попытки после пауз исчерпаны.') from None
-                if network_retries == 0 and attempt < 3 and (status is None or status >= 500):
-                    network_retries += 1
+                if network_failures < 5 and (status is None or status >= 500):
+                    await asyncio.sleep(min(5., max(0., self.deadline - time.monotonic())))
                     attempt += 1
                     continue
                 if status is None or status >= 500:
@@ -388,6 +409,10 @@ class JSONAgents:
                 if isinstance(result, Ideas) and len(payload.get('ideas', [])) != len(result.ideas):
                     self.log('api_ideas_normalized', request_id=request_id,
                              received=len(payload['ideas']), accepted=len(result.ideas))
+                if schema.__name__ == 'ResearchReview' and payload.get('resolves', []) != result.resolves:
+                    self.observe_error(role, 'Resolved questions must use supplied identities')
+                    self.log('research_resolves_normalized', request_id=request_id,
+                             received=len(payload.get('resolves', [])), accepted=len(result.resolves))
             except (ValidationError, ValueError) as error:
                 invalid_responses += 1
                 details = ([{"loc": e["loc"], "type": e["type"], "reason": e["msg"]} for e in error.errors()][:8]
@@ -395,13 +420,14 @@ class JSONAgents:
                                'Response reached max_tokens before completion' if finish_reason == 'length'
                                else 'Empty response' if not document else str(error))}])
                 reason = json.dumps(details, ensure_ascii=False)
+                self.observe_error(role, reason)
                 self.calls.append(LLMCall(status="invalid_json", error=reason, **stats))
                 self.log('api_invalid_json', role=role, request_id=request_id, errors=details,
                          duration_seconds=time.monotonic() - started)
                 recover_reference = not document and reference_enabled and bool(reference_results)
-                if (invalid_responses >= 2 or attempt >= 3) and not recover_reference:
+                if invalid_responses >= 4:
                     error_type = QwenTemporaryError if not document or finish_reason == 'length' else QwenError
-                    raise error_type(f"Qwen: роль {role} дважды нарушила JSON-контракт. {reason}") from None
+                    raise error_type(f"Qwen: роль {role} не вернула JSON-контракт за 4 ответа. {reason}") from None
                 attempt += 1
                 if code:
                     thinking, reasoning_effort = True, 'medium'
@@ -468,6 +494,10 @@ class JSONAgents:
         return Extraction(**dict(zip((r[0] for r in roles), results)))
 
     async def prepare(self, context: dict):
+        from .plans import SplitPlan
+        from .validation import SPLIT_CATALOG
+        context = {**context, 'split_catalog': SPLIT_CATALOG,
+                   'split_contract': prompt_schema(SplitPlan.model_json_schema())}
         prompt = (
             "Prepare this NEW task without assuming public dataset names, CSV, a particular target or metric. "
             "Use the extracted requirements and file inventory. Use Python stdlib and packages listed in "
@@ -475,21 +505,27 @@ class JSONAgents:
             "Choose validation to match what the task asks the model to predict. "
             "When data_research is supplied, use its evidence and unresolved questions to finalize validation. "
             "Only when preparation_phase=finalize_validation is previous_code an initial draft with no fixed split. "
-            "A date or group-like column alone does not require a time or group split. Inspect the actual train table inside "
-            "make_split as needed to avoid leakage and account for class balance. Choose the outer split "
+            "Determine whether deployment predicts exchangeable rows, future periods, unseen entities, or is uncertain. "
+            "Use task semantics together with measured ordered_query_ranges; range separation alone is not proof of time. "
+            "A coded/anonymized observation period can still be ordered; distinguish it from an object's age or ID. "
+            "If deployment predicts later periods, use an earlier-to-later outer holdout. Use random only when "
+            "exchangeability is justified; do not dismiss combined task and range evidence with a generic 'group-like column' rule. "
+            "At finalize_validation record validation.deployment_scenario=future_period/unseen_groups/exchangeable/uncertain "
+            "and deployment_reason explaining relevant measured separation and rejected alternatives. "
+            "Choose validation using split_catalog/split_contract: return its configuration in validation. "
+            "The trusted split executor handles positions, sorting, strata, groups and time gaps. "
+            "Do not generate make_split or return row indices. Choose the outer split "
             "once before experiments. When repairing previous_code, fix the reported error without "
             "changing the chosen split strategy, seed or validation size. "
             "Return configuration and a complete prepare.py with these functions:\n"
             "load_data(task_directory: pathlib.Path, config: dict) -> dict[str, pandas.DataFrame]: "
             "read the supplied files using the actual formats/options; train and test roles are required, sample is optional. "
             "Retain literal string IDs, including leading zeros. Other named input tables may be returned too.\n"
-            "make_split(train: DataFrame, config: dict) -> (fit_row_positions, validation_row_positions): "
-            "nonempty disjoint integer positional indices; reproducible; use config.validation.\n"
             "Record the actually used strategy and any limitations in config['validation']; group_columns "
             "must be a list of actual column names if group isolation is required, otherwise []. "
             "If the chosen strategy uses time, record the actual ordered column as time_column; "
             "use this shared metadata name rather than inventing a task-specific key. "
-            "The worker saves this metadata and verifies that declared groups do not overlap. "
+            "The worker executes this plan on the original row order, saves it once and verifies group/time isolation. "
             "Do not claim measured class counts before the code has inspected the table.\n"
             "score(reference: DataFrame, predictions: DataFrame, config: dict) -> float: "
             "reference contains original validation rows including targets and metadata; predictions have the same row order. "
@@ -506,18 +542,20 @@ class JSONAgents:
             "No data printing, filesystem changes or top-level file reads in generated code. "
             "For unsupported input explain the specific missing capability rather than silently changing the task.\n"
             + json.dumps(context, ensure_ascii=False, separators=(',', ':')))
-        return await self.ask(PreparationDraft, prompt, "preparer", code=True)
+        return await self.ask(PreparationDraft, prompt, "preparer", code=True, validation={
+            'require_deployment_assessment': context.get('preparation_phase') == 'finalize_validation'
+                and bool((context.get('data_profile') or {}).get('ordered_query_ranges'))})
 
     async def propose_ideas(self, context: dict):
         from .operations import CATALOG
         from .automl_catalog import CAPABILITIES
-        research = select_research(context.get('data_research', {}),
-                                   [context.get('experiments', []), context.get('queued_ideas', [])])
+        research = research_memory_view(select_research(context.get('data_research', {}),
+                                   [context.get('experiments', []), context.get('queued_ideas', [])]))
         fields = ('purposes', 'max_new_ideas', 'queue_capacity', 'remaining_experiments',
                   'slot_limits', 'occupied_slots', 'api_budget', 'automl_portfolio',
                   'queued_ideas', 'leader_id', 'available_parents', 'experiments', 'experiment_index',
                   'module_catalog', 'previous_ideas', 'idea_coverage', 'remaining_seconds',
-                  'feedback_revision', 'experiment_timeout_seconds', 'trigger')
+                  'feedback_revision', 'experiment_timeout_seconds', 'trigger', 'planning_error')
         payload = compact({'operations': CATALOG, 'automl_engines': CAPABILITIES,
             **task_context(context), **{key: context[key] for key in fields if key in context},
             'prediction_sources': table(context.get('prediction_sources', [])),
@@ -538,19 +576,28 @@ class JSONAgents:
             "Learn from measured results and actual execution_facts; pipeline text is a plan. Do not invent "
             "causes or treat one holdout as proof. Cite only relevant supplied research_ids; interpretations "
             "are unverified, proxy improvements are not outer-validation gains. "
+            "For each untested data_research.feature_candidates entry, either select its id in an idea.feature_candidate_ids "
+            "or return a feature_decisions item (candidate_id, action=defer/reject, reason). Do not silently ignore "
+            "measured candidates while repeatedly refining the same model. Proxy gains require outer validation, "
+            "not automatic acceptance. Test a candidate as a controlled change on a suitable parent; keep unrelated "
+            "settings fixed. Pending/tested recipes need no duplicate trial without a new concrete reason. "
             "State one coherent change, affected/new block names, concrete settings and expected effect. "
             "Keep the change about the new action, without copying parent configuration or dataset statistics. "
             "For ordinary models name useful features/preprocess/fit/predict stages; the planner builds their "
             "interfaces. Native automl and saved ensembles are compiled directly as complete operations. "
             "Set automl for FLAML/AutoGluon: exact model IDs from automl_engines, fixed parameters or typed "
             "search_space, internal validation/folds, bagging/stacking and feature recipes. Do not repeat "
-            "an unchanged automl_portfolio default. Other ready models use installed sklearn-compatible fit/predict. "
+            "an unchanged automl_portfolio configuration. Dedicated FLAML/AutoGluon trials are scheduled separately "
+            "and Qwen configures them using EDA; do not duplicate or remove their pending entries. After results "
+            "arrive, propose targeted improvements or ensembles using their sources. Other ready models use "
+            "installed sklearn-compatible fit/predict. "
             "Standalone preprocess supports encoding=native with native_backend=catboost/lightgbm/xgboost; use the matching estimator library. Ordinary ordinal/onehot still produces numeric arrays. "
             "The standalone fit operation supports one inner holdout; AutoML supports its declared CV settings. "
             "LightAutoML, arbitrary torch loops and resampling/deduplication have no ready operation. "
             "For recombination set ensemble using completed prediction_sources: mean/vote/probabilities "
             "reuse predictions cheaply; conditional changes fixed weights by feature rules. Stacking/gating "
-            "need meta_ready sources with saved predictions on the common inner holdout. They train only the combiner, never the sources. "
+            "need meta_ready or meta_available sources. meta_available prepares and caches honest inner-holdout "
+            "predictions once on demand; this extra source fit consumes time. Subsequent combinations reuse them. "
             "Set optimize_weights=true for simple blends to tune weights locally on saved meta predictions, without LLM calls or source retraining. Feature expression recipes compose arithmetic, conditions, vector functions and fit-only group statistics; EDA kind=feature can compare them on an internal split. Stacking passthrough adds features; gating predicts per-object expert weights. Start with cheap "
             "blends of complementary sources; disagreement alone does not prove gain. Use vote for labels, "
             "mean for regression, probability blending only when available. An ensemble keeps a main parent "
@@ -568,19 +615,52 @@ class JSONAgents:
                         'idea_ids': [idea['id'] for idea in context['previous_ideas']],
                         'installed_libraries': context.get('installed_libraries', {}),
                         'prediction_sources': context.get('prediction_sources', []),
-                        'research_ids': [item['id'] for item in research.get('insights', [])]})
+                        'research_ids': [item['id'] for item in research.get('insights', [])],
+                        'feature_candidates': research.get('feature_candidates', [])})
+
+    async def configure_automl(self, context: dict, engine: str):
+        from .plans import AutoMLPlan
+        from .automl_catalog import CAPABILITIES
+        research = research_memory_view(select_research(context.get('data_research', {}), engine))
+        payload = compact({**task_context(context), 'required_engine': engine,
+            'engine_capabilities': CAPABILITIES[engine], 'data_research': research,
+            'parent': context.get('parent'), 'parent_operations': context.get('parent_operations'),
+            'experiment_timeout_seconds': context['experiment_timeout_seconds'],
+            'remaining_seconds': context['remaining_seconds']})
+        prompt = (
+            'Configure ONE reserved AutoML experiment for required_engine. Return AutoMLPlan only, never Python. '
+            'Choose models, useful feature recipes, columns/drop_columns, search ranges and training settings '
+            'from measured EDA, parent operations and the supplied engine capabilities. A recipe is not a test score. '
+            'Evaluate promising measured recipes in this adapter rather than automatically ignoring them. '
+            'Parent models need not be copied; reuse useful feature mechanisms where appropriate. '
+            'columns selects the complete raw feature subset, [] means all. Keep key/time inputs available '
+            'for feature generation even when excluded from model columns. All tuning is inside fit. '
+            'Do not modify the fixed outer split or metric. Time/group policy or supervised recipes require '
+            'validation=holdout, bag_folds=stack_levels=0 and ensemble=false; adapters rebuild recipes on inner '
+            'train, select there and refit on all fit. For unconstrained data native CV is available. '
+            'Use exact model IDs from this engine; optional dependencies must be installed, with no downloads. '
+            'Respect experiment_timeout_seconds across search, frozen refit and prediction; avoid unnecessary '
+            'trials/large bags that cannot finish. This experiment is already reserved: do not return other '
+            'hypotheses, defer it or switch engines.\n')
+        return await self.ask(AutoMLPlan, prompt + json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
+            'automl_planner', thinking=True, reference=False, validation={'requested_engine': engine})
 
     async def plan_node(self, context: dict, idea, catalog):
         from .operations import CATALOG
         from .automl_catalog import CAPABILITIES
+        from .feature_trials import selected_candidates
+        selected = selected_candidates(context.get('data_research', {}).get('feature_candidates', []), idea.feature_candidate_ids)
         context = node_context(context, idea.research_ids)
         payload = compact({**task_context(context), 'idea': idea.model_dump(exclude_defaults=True),
             'parent': context.get('parent'), 'module_catalog': planner_catalog(catalog, idea),
             'remaining_seconds': context['remaining_seconds'],
             'experiment_timeout_seconds': context['experiment_timeout_seconds'],
             'data_research': context.get('data_research'), 'operations': CATALOG, 'automl_engines': CAPABILITIES,
+            'selected_feature_candidates': selected,
             'api_reference': self.reference_context(idea.change, focus=idea.change, max_chars=4500)})
         prompt = (
+            'Include every exact recipe in selected_feature_candidates, preserving its name, columns and parameters. '
+            'Connect its output tables to preprocessing/model training and retain those new features. '
             'Turn ONE hypothesis into an ordered plan of trusted operations, never Python. Each changed '
             'block selects operation={kind,parameters,inputs,outputs}; Python derives requires/provides. '
             'Initial keys fit,validation,test,preparation,auxiliary are available. Only fit contains targets. '
@@ -600,7 +680,7 @@ class JSONAgents:
             'never outer labels or in-sample predictions. Use supplied API facts and exact AutoML IDs. '
             'Describe the actual algorithm/configuration, without claiming unexecuted measurements.\n')
         plan = await self.ask(NodePlan, prompt + json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
-                              'node_planner', validation={'idea': idea, 'catalog': catalog})
+                              'node_planner', validation={'idea': idea, 'catalog': catalog, 'selected_feature_candidates': selected})
         return plan.proposal(idea, catalog)
 
     async def repair_operation(self, context: dict):
