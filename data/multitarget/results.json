@@ -1,0 +1,66 @@
+{
+  "task": "multitarget_regression",
+  "targets": [
+    "heating_load",
+    "cooling_load"
+  ],
+  "baseline_mean_rmse": 9.529286291351944,
+  "lgb_mean_rmse": 0.7371967524695997,
+  "lgb_rmses": {
+    "heating_load": 0.7157102286898721,
+    "cooling_load": 0.7586832762493272
+  },
+  "cb_mean_rmse": 0.6087350471820848,
+  "cb_rmses": {
+    "heating_load": 0.44338687918864067,
+    "cooling_load": 0.774083215175529
+  },
+  "ensemble_mean_rmse": 0.6087019484477361,
+  "ensemble_weights": {
+    "lgb": 0.05,
+    "cb": 0.95
+  },
+  "improvement_pct": 93.61230285420066,
+  "lgb_params": {
+    "heating_load": {
+      "num_leaves": 43,
+      "learning_rate": 0.20210388087094838,
+      "feature_fraction": 0.8061965143273871,
+      "bagging_fraction": 0.8278391997009998,
+      "bagging_freq": 1,
+      "min_child_samples": 6,
+      "reg_alpha": 4.032766414225591e-08,
+      "reg_lambda": 2.009497096413807,
+      "max_depth": 9
+    },
+    "cooling_load": {
+      "num_leaves": 91,
+      "learning_rate": 0.18165179298006437,
+      "feature_fraction": 0.5339066362625249,
+      "bagging_fraction": 0.8758774969719116,
+      "bagging_freq": 4,
+      "min_child_samples": 3,
+      "reg_alpha": 0.021915890832074833,
+      "reg_lambda": 3.736588612105429e-05,
+      "max_depth": 8
+    }
+  },
+  "cb_params": {
+    "heating_load": {
+      "depth": 5,
+      "learning_rate": 0.22213988075571428,
+      "l2_leaf_reg": 0.11815375707928763,
+      "bagging_temperature": 1.3926309100623837,
+      "random_strength": 0.14692002883113306,
+      "min_data_in_leaf": 9
+    },
+    "cooling_load": {
+      "depth": 6,
+      "learning_rate": 0.0797385383474029,
+      "l2_leaf_reg": 0.47346965455133216,
+      "bagging_temperature": 1.8008422587639796,
+      "random_strength": 0.8130768598822717,
+      "min_data_in_leaf": 15
+    }
+  }
+}

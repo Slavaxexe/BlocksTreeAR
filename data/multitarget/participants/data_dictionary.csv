@@ -1,0 +1,12 @@
+feature,role,dtype,unit,description_ru
+id,identifier,int,-,Уникальный идентификатор строки
+relative_compactness,input,float,-,Относительная компактность здания (V/A отношение)
+surface_area,input,float,m²,Площадь поверхности здания
+wall_area,input,float,m²,Площадь стен
+roof_area,input,float,m²,Площадь крыши
+overall_height,input,float,m,Общая высота здания
+orientation,input,int,-,"Ориентация (2=север, 3=восток, 4=юг, 5=запад)"
+glazing_area,input,float,-,"Доля площади остекления (0, 10%, 25%, 40%)"
+glazing_area_distribution,input,int,-,Распределение остекления (0-5)
+heating_load,target,float,kWh/m²,Нагрузка на отопление
+cooling_load,target,float,kWh/m²,Нагрузка на охлаждение
