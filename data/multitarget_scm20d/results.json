@@ -1,0 +1,462 @@
+{
+  "task": "multitarget_regression",
+  "dataset": "scm20d",
+  "source": "OpenML (id=41486)",
+  "domain": "Supply Chain Management (Trading Agent Competition 2010)",
+  "rows_train": 7172,
+  "rows_test": 1794,
+  "n_features": 61,
+  "n_targets": 16,
+  "targets": [
+    "LBL",
+    "MTLp2A",
+    "MTLp3A",
+    "MTLp4A",
+    "MTLp5A",
+    "MTLp6A",
+    "MTLp7A",
+    "MTLp8A",
+    "MTLp9A",
+    "MTLp10A",
+    "MTLp11A",
+    "MTLp12A",
+    "MTLp13A",
+    "MTLp14A",
+    "MTLp15A",
+    "MTLp16A"
+  ],
+  "baseline_mean_rmse": 265.9850516676062,
+  "baseline_rmses": {
+    "LBL": 222.71351422237794,
+    "MTLp2A": 243.2789926837144,
+    "MTLp3A": 240.81889881193786,
+    "MTLp4A": 259.498409511479,
+    "MTLp5A": 265.5239873761097,
+    "MTLp6A": 287.51163563807376,
+    "MTLp7A": 306.9738641971159,
+    "MTLp8A": 326.0938504349763,
+    "MTLp9A": 215.86756200412896,
+    "MTLp10A": 237.17944397064406,
+    "MTLp11A": 223.92729741032042,
+    "MTLp12A": 239.94418216007318,
+    "MTLp13A": 274.849056859245,
+    "MTLp14A": 284.7983754096999,
+    "MTLp15A": 303.584825411367,
+    "MTLp16A": 323.1969305804363
+  },
+  "lgb_mean_rmse": 90.95518641827996,
+  "lgb_rmses": {
+    "LBL": 67.29790121754625,
+    "MTLp2A": 79.2440650999504,
+    "MTLp3A": 72.70740117475536,
+    "MTLp4A": 88.6167137256297,
+    "MTLp5A": 93.38762101540155,
+    "MTLp6A": 104.49798566925875,
+    "MTLp7A": 102.70043814094007,
+    "MTLp8A": 117.53851954033415,
+    "MTLp9A": 72.89827661925042,
+    "MTLp10A": 82.92567159526352,
+    "MTLp11A": 78.59030071970994,
+    "MTLp12A": 91.44996786013,
+    "MTLp13A": 92.94324895266875,
+    "MTLp14A": 101.86484075908592,
+    "MTLp15A": 98.79173323554029,
+    "MTLp16A": 109.82829736701432
+  },
+  "lgb_cv_scores": {
+    "LBL": 71.40949810230752,
+    "MTLp2A": 80.82946018867632,
+    "MTLp3A": 83.55542087864323,
+    "MTLp4A": 91.61128091921007,
+    "MTLp5A": 100.57082874060723,
+    "MTLp6A": 108.99177580857615,
+    "MTLp7A": 109.85624926061155,
+    "MTLp8A": 121.13565533845843,
+    "MTLp9A": 77.08950771791594,
+    "MTLp10A": 90.92857169963013,
+    "MTLp11A": 83.53699644993287,
+    "MTLp12A": 93.5283962701576,
+    "MTLp13A": 98.32718293596172,
+    "MTLp14A": 119.72522614508306,
+    "MTLp15A": 105.68032526436912,
+    "MTLp16A": 117.39915775976704
+  },
+  "cb_mean_rmse": 87.76183801924336,
+  "cb_rmses": {
+    "LBL": 68.46931511353263,
+    "MTLp2A": 75.0612549222692,
+    "MTLp3A": 71.88720199425114,
+    "MTLp4A": 85.35134174152626,
+    "MTLp5A": 88.34460158061167,
+    "MTLp6A": 101.08860975389007,
+    "MTLp7A": 99.14784757399197,
+    "MTLp8A": 109.41005037401054,
+    "MTLp9A": 69.33553167546607,
+    "MTLp10A": 78.00386509867569,
+    "MTLp11A": 77.78283137624594,
+    "MTLp12A": 87.36940965531461,
+    "MTLp13A": 92.92958917078882,
+    "MTLp14A": 95.99844326132117,
+    "MTLp15A": 96.23677253059209,
+    "MTLp16A": 107.77274248540587
+  },
+  "cb_cv_scores": {
+    "LBL": 69.92026412070142,
+    "MTLp2A": 76.72197131202,
+    "MTLp3A": 80.29806172182276,
+    "MTLp4A": 86.71908478221734,
+    "MTLp5A": 95.49701373155447,
+    "MTLp6A": 105.71446264125268,
+    "MTLp7A": 106.77716750139098,
+    "MTLp8A": 118.84227770169366,
+    "MTLp9A": 73.60080364495558,
+    "MTLp10A": 86.846706950427,
+    "MTLp11A": 80.07733552471069,
+    "MTLp12A": 89.99092302621487,
+    "MTLp13A": 96.776261551718,
+    "MTLp14A": 108.96390319867608,
+    "MTLp15A": 102.80114267910518,
+    "MTLp16A": 111.47967773306614
+  },
+  "ensemble_mean_rmse": 87.58247190237361,
+  "ensemble_rmses": {
+    "LBL": 67.7908522372915,
+    "MTLp2A": 75.32922889488349,
+    "MTLp3A": 71.37846246716914,
+    "MTLp4A": 85.28243689488968,
+    "MTLp5A": 88.14589377382613,
+    "MTLp6A": 100.96992457785545,
+    "MTLp7A": 98.98131808618486,
+    "MTLp8A": 109.7149697649308,
+    "MTLp9A": 69.47617980339842,
+    "MTLp10A": 78.34592046694927,
+    "MTLp11A": 77.28725766573422,
+    "MTLp12A": 87.57616323931734,
+    "MTLp13A": 92.30680405708029,
+    "MTLp14A": 95.57872744633154,
+    "MTLp15A": 96.01138320025255,
+    "MTLp16A": 107.14402786188315
+  },
+  "ensemble_weights": {
+    "lgb": 0.2,
+    "cb": 0.8
+  },
+  "improvement_pct": 67.0724082600616,
+  "lgb_params": {
+    "LBL": {
+      "num_leaves": 75,
+      "learning_rate": 0.07500118950416987,
+      "feature_fraction": 0.5232252063599989,
+      "bagging_fraction": 0.8037724259507192,
+      "bagging_freq": 2,
+      "min_child_samples": 11,
+      "reg_alpha": 1.7960847528705854,
+      "reg_lambda": 2.5119100929409792,
+      "max_depth": 11
+    },
+    "MTLp2A": {
+      "num_leaves": 98,
+      "learning_rate": 0.03887426626459617,
+      "feature_fraction": 0.8350725823511909,
+      "bagging_fraction": 0.8523578039402707,
+      "bagging_freq": 5,
+      "min_child_samples": 56,
+      "reg_alpha": 6.204400719454039e-07,
+      "reg_lambda": 5.40131755534591e-07,
+      "max_depth": 10
+    },
+    "MTLp3A": {
+      "num_leaves": 36,
+      "learning_rate": 0.06784929642698587,
+      "feature_fraction": 0.5795776319065739,
+      "bagging_fraction": 0.5864474632911496,
+      "bagging_freq": 1,
+      "min_child_samples": 24,
+      "reg_alpha": 9.113349763473515e-05,
+      "reg_lambda": 0.08165510892299123,
+      "max_depth": 12
+    },
+    "MTLp4A": {
+      "num_leaves": 67,
+      "learning_rate": 0.026785720173348664,
+      "feature_fraction": 0.7548498420235706,
+      "bagging_fraction": 0.5562304478979974,
+      "bagging_freq": 2,
+      "min_child_samples": 50,
+      "reg_alpha": 1.2934389178182357e-06,
+      "reg_lambda": 2.3716373587854338e-05,
+      "max_depth": 11
+    },
+    "MTLp5A": {
+      "num_leaves": 104,
+      "learning_rate": 0.0866415793852429,
+      "feature_fraction": 0.6245215457578744,
+      "bagging_fraction": 0.8790379323249089,
+      "bagging_freq": 3,
+      "min_child_samples": 94,
+      "reg_alpha": 2.359854623091194e-08,
+      "reg_lambda": 6.840543020368692e-05,
+      "max_depth": 12
+    },
+    "MTLp6A": {
+      "num_leaves": 49,
+      "learning_rate": 0.02535498773851709,
+      "feature_fraction": 0.9772063411992713,
+      "bagging_fraction": 0.5635572855295318,
+      "bagging_freq": 6,
+      "min_child_samples": 5,
+      "reg_alpha": 0.28391987674815483,
+      "reg_lambda": 0.011326666661860645,
+      "max_depth": 8
+    },
+    "MTLp7A": {
+      "num_leaves": 82,
+      "learning_rate": 0.031215535987180812,
+      "feature_fraction": 0.6902862193484706,
+      "bagging_fraction": 0.7008203459636424,
+      "bagging_freq": 5,
+      "min_child_samples": 19,
+      "reg_alpha": 0.07271269723943838,
+      "reg_lambda": 2.1162980619579457e-08,
+      "max_depth": 9
+    },
+    "MTLp8A": {
+      "num_leaves": 51,
+      "learning_rate": 0.028913741189180997,
+      "feature_fraction": 0.8509531337604976,
+      "bagging_fraction": 0.8538044305924266,
+      "bagging_freq": 7,
+      "min_child_samples": 63,
+      "reg_alpha": 1.2305847786870281e-05,
+      "reg_lambda": 4.576357270439721e-05,
+      "max_depth": 12
+    },
+    "MTLp9A": {
+      "num_leaves": 110,
+      "learning_rate": 0.018358712480048587,
+      "feature_fraction": 0.6135570853484456,
+      "bagging_fraction": 0.8299382230171533,
+      "bagging_freq": 4,
+      "min_child_samples": 12,
+      "reg_alpha": 1.617370404045001e-07,
+      "reg_lambda": 9.483241746952663e-08,
+      "max_depth": 7
+    },
+    "MTLp10A": {
+      "num_leaves": 77,
+      "learning_rate": 0.02924223026075225,
+      "feature_fraction": 0.5559777135996491,
+      "bagging_fraction": 0.8370513991415077,
+      "bagging_freq": 4,
+      "min_child_samples": 51,
+      "reg_alpha": 0.0016866309861392616,
+      "reg_lambda": 0.00030368901217346764,
+      "max_depth": 11
+    },
+    "MTLp11A": {
+      "num_leaves": 60,
+      "learning_rate": 0.060201120644456915,
+      "feature_fraction": 0.8472467122324976,
+      "bagging_fraction": 0.7127841313857285,
+      "bagging_freq": 5,
+      "min_child_samples": 62,
+      "reg_alpha": 8.949043313116102e-05,
+      "reg_lambda": 0.9253618259207828,
+      "max_depth": 10
+    },
+    "MTLp12A": {
+      "num_leaves": 33,
+      "learning_rate": 0.034099463298896876,
+      "feature_fraction": 0.5213697033614155,
+      "bagging_fraction": 0.8167889158525972,
+      "bagging_freq": 6,
+      "min_child_samples": 71,
+      "reg_alpha": 0.18510388446797696,
+      "reg_lambda": 1.5269451301634789,
+      "max_depth": 11
+    },
+    "MTLp13A": {
+      "num_leaves": 48,
+      "learning_rate": 0.04475563783773934,
+      "feature_fraction": 0.6046914770640702,
+      "bagging_fraction": 0.7364519059824906,
+      "bagging_freq": 2,
+      "min_child_samples": 20,
+      "reg_alpha": 7.730670159932394e-07,
+      "reg_lambda": 2.500685976523396e-07,
+      "max_depth": 12
+    },
+    "MTLp14A": {
+      "num_leaves": 58,
+      "learning_rate": 0.1908928557277616,
+      "feature_fraction": 0.698440872861886,
+      "bagging_fraction": 0.8218286095883494,
+      "bagging_freq": 1,
+      "min_child_samples": 82,
+      "reg_alpha": 5.460007354989623e-05,
+      "reg_lambda": 0.0007224028410300689,
+      "max_depth": 10
+    },
+    "MTLp15A": {
+      "num_leaves": 63,
+      "learning_rate": 0.049830090006697754,
+      "feature_fraction": 0.568913686282605,
+      "bagging_fraction": 0.8626013598058556,
+      "bagging_freq": 5,
+      "min_child_samples": 20,
+      "reg_alpha": 0.06887344245682636,
+      "reg_lambda": 2.7432909121503507e-07,
+      "max_depth": 10
+    },
+    "MTLp16A": {
+      "num_leaves": 82,
+      "learning_rate": 0.08468165758234976,
+      "feature_fraction": 0.5552779924839131,
+      "bagging_fraction": 0.830999609565302,
+      "bagging_freq": 5,
+      "min_child_samples": 34,
+      "reg_alpha": 2.5300981058790577e-05,
+      "reg_lambda": 3.925628977201578e-05,
+      "max_depth": 12
+    }
+  },
+  "cb_params": {
+    "LBL": {
+      "depth": 9,
+      "learning_rate": 0.020589728197687916,
+      "l2_leaf_reg": 0.23102018878452935,
+      "bagging_temperature": 0.36680901970686763,
+      "random_strength": 0.6084844859190754,
+      "min_data_in_leaf": 27
+    },
+    "MTLp2A": {
+      "depth": 8,
+      "learning_rate": 0.06300314164107554,
+      "l2_leaf_reg": 0.11429510971143886,
+      "bagging_temperature": 1.4674965925605659,
+      "random_strength": 0.7899000368620117,
+      "min_data_in_leaf": 41
+    },
+    "MTLp3A": {
+      "depth": 9,
+      "learning_rate": 0.03609843031143223,
+      "l2_leaf_reg": 1.0751643388858856,
+      "bagging_temperature": 0.11779784274415483,
+      "random_strength": 1.4221913724060573,
+      "min_data_in_leaf": 4
+    },
+    "MTLp4A": {
+      "depth": 10,
+      "learning_rate": 0.04951822714400566,
+      "l2_leaf_reg": 1.72420526588307,
+      "bagging_temperature": 0.5653344130623348,
+      "random_strength": 1.9520066316350833,
+      "min_data_in_leaf": 34
+    },
+    "MTLp5A": {
+      "depth": 9,
+      "learning_rate": 0.0866415793852429,
+      "l2_leaf_reg": 0.3148373027106769,
+      "bagging_temperature": 1.5161517292996354,
+      "random_strength": 0.6261538712633596,
+      "min_data_in_leaf": 47
+    },
+    "MTLp6A": {
+      "depth": 8,
+      "learning_rate": 0.04096508798500077,
+      "l2_leaf_reg": 2.582628995201558,
+      "bagging_temperature": 0.4932987635492838,
+      "random_strength": 0.5119848625959247,
+      "min_data_in_leaf": 2
+    },
+    "MTLp7A": {
+      "depth": 10,
+      "learning_rate": 0.04581739790638597,
+      "l2_leaf_reg": 1.2487048907397846,
+      "bagging_temperature": 0.714343989659979,
+      "random_strength": 0.22462405078541958,
+      "min_data_in_leaf": 8
+    },
+    "MTLp8A": {
+      "depth": 7,
+      "learning_rate": 0.15321002662798866,
+      "l2_leaf_reg": 4.893984747228436,
+      "bagging_temperature": 0.45827640882545584,
+      "random_strength": 1.9243350828084986,
+      "min_data_in_leaf": 3
+    },
+    "MTLp9A": {
+      "depth": 8,
+      "learning_rate": 0.09120203786478535,
+      "l2_leaf_reg": 1.5759061752483359,
+      "bagging_temperature": 0.44407878415935165,
+      "random_strength": 1.3647143382727576,
+      "min_data_in_leaf": 44
+    },
+    "MTLp10A": {
+      "depth": 8,
+      "learning_rate": 0.0879196538235643,
+      "l2_leaf_reg": 3.8940135384201935,
+      "bagging_temperature": 1.7389811198086855,
+      "random_strength": 0.6999837964903226,
+      "min_data_in_leaf": 16
+    },
+    "MTLp11A": {
+      "depth": 9,
+      "learning_rate": 0.041397321991799726,
+      "l2_leaf_reg": 3.4483442300428475,
+      "bagging_temperature": 0.8464035008240633,
+      "random_strength": 1.852207143053663,
+      "min_data_in_leaf": 35
+    },
+    "MTLp12A": {
+      "depth": 9,
+      "learning_rate": 0.0674387554419535,
+      "l2_leaf_reg": 0.8123642533830818,
+      "bagging_temperature": 0.7043498273839235,
+      "random_strength": 1.1717027682696746,
+      "min_data_in_leaf": 27
+    },
+    "MTLp13A": {
+      "depth": 8,
+      "learning_rate": 0.050057532343580353,
+      "l2_leaf_reg": 0.8346682707424389,
+      "bagging_temperature": 0.47030801682512124,
+      "random_strength": 1.7124343446091772,
+      "min_data_in_leaf": 24
+    },
+    "MTLp14A": {
+      "depth": 10,
+      "learning_rate": 0.023675436298775412,
+      "l2_leaf_reg": 0.3036054354364659,
+      "bagging_temperature": 1.8198462945603218,
+      "random_strength": 1.553630700951259,
+      "min_data_in_leaf": 22
+    },
+    "MTLp15A": {
+      "depth": 10,
+      "learning_rate": 0.03108066803068162,
+      "l2_leaf_reg": 2.2253752279699115,
+      "bagging_temperature": 0.3927808344290491,
+      "random_strength": 0.7088929292820472,
+      "min_data_in_leaf": 41
+    },
+    "MTLp16A": {
+      "depth": 9,
+      "learning_rate": 0.06369817555703516,
+      "l2_leaf_reg": 0.24828061676622848,
+      "bagging_temperature": 1.0774186635308725,
+      "random_strength": 1.0145799812487897,
+      "min_data_in_leaf": 14
+    }
+  },
+  "overfit_check": {
+    "mean_gap_pct": -6.328689909780522,
+    "max_gap_pct": -14.928066349751248
+  },
+  "tuning_config": {
+    "lgb_trials": 10,
+    "cb_trials": 8,
+    "n_folds": 3
+  }
+}
