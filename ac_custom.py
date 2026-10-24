@@ -73,7 +73,8 @@ def worker(root):
     if check_code(code):
         raise ValueError('Feature AST rejected')
     frame = pd.read_parquet(root/'input.parquet')
-    namespace = {'__builtins__': {}, 'np': np, 'pd': pd}
+    namespace = {'__builtins__': {}, 'np': np, 'pd': pd,
+        'float': float, 'int': int, 'bool': bool, 'str': str}
     exec(compile(code, '<classification_features>', 'exec'), namespace)
     output = namespace['add_features'](frame.copy())
     if (not isinstance(output, pd.DataFrame) or not output.index.equals(frame.index)

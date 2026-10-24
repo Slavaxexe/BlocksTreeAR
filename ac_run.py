@@ -21,6 +21,9 @@ from ac_data import Features, detect_time, design_folds, discover_entity
 from ac_models import positive_index
 from ac_research import Lab, research_loop
 from ac_final import build_ensemble, refit_members, write_submission
+from ac_diagnostics import class_profile, dataset_profile
+from ac_eda import extended_profile
+from ac_strategy import previous_winner
 
 
 @dataclass
@@ -90,6 +93,9 @@ def run(task_path, out_dir=None, no_llm=False, total_budget=10800., max_experime
     if len(classes) < 2:raise ValueError('Classification requires at least two classes')
     if task.metric == 'f1' and len(classes) != 2:raise ValueError('Binary F1 requires exactly two classes')
     y = encoder.transform(train[task.target])
+    balance = class_profile(y, classes)
+    mem.fact('balance.training', balance)
+    log(f'Class balance: majority/minority={balance["majority_to_minority_ratio"]:.1f}, minimum class={min(row["count"] for row in balance["per_class"])}')
     for name, value in {'task.target': task.target, 'task.id_cols': task.id_cols, 'task.metric': task.metric,
                         'task.metric_quote': task.metric_quote, 'task.type': 'classification',
                         'direction': 'minimize' if task.metric == 'log_loss' else 'maximize',
@@ -113,11 +119,19 @@ def run(task_path, out_dir=None, no_llm=False, total_budget=10800., max_experime
     except Exception as error:
         audit['adversarial'] = {'error': str(error)[:400]}
     for key, value in audit.items():mem.fact('audit.'+key, value)
+    mem.fact('audit.dataset_profile', dataset_profile(train, test, task.target, task.id_cols))
     mem.stage('1_audit', 'ok', audit)
     log(f'Audit: time={time_column}, inferred entity={entity and entity["key"]}, classes={len(classes)}')
     design = design_folds(train, y, time_column, entity['key'] if entity else None, settings.seed)
     folds_path = run_dir/'folds.npz'
     fold_hash = save_folds(design, folds_path)
+    eda = extended_profile(train.iloc[design['folds'][0]['fit']], test, feature_columns, task.target)
+    mem.fact('audit.feature_profile', eda)
+    (run_dir/'eda_profile.json').write_text(json.dumps(eda, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    mem.fact('balance.folds', [{'label': fold['label'],
+        'fit_counts': np.bincount(y[fold['fit']], minlength=len(classes)).tolist(),
+        'validation_counts': np.bincount(y[fold['valid']], minlength=len(classes)).tolist()}
+        for fold in design['folds']])
     mem.fact('validation', {'kind': design['kind'], 'folds': design['labels'], 'sizes': design['sizes'],
         'weights': design['weights'], 'sha256': fold_hash, 'history_scope': 'fit-local; validation labels excluded'})
     mem.stage('2_validation', 'ok', {'kind': design['kind'], 'folds': design['labels']})
@@ -134,6 +148,9 @@ def run(task_path, out_dir=None, no_llm=False, total_budget=10800., max_experime
         'group_columns': group_columns, 'seed': settings.seed, 'metric': task.metric, 'n_jobs': settings.n_jobs,
         'positive_index': positive_index(classes, task.positive_label)}
     (run_dir/'context.json').write_text(json.dumps(context, ensure_ascii=False), encoding='utf-8')
+    signature, reference = previous_winner(root, run_dir, context)
+    mem.fact('search.data_signature', signature)
+    if reference:mem.fact('search.previous_winner', reference)
     lab = Lab(mem, settings, budget, feature_store, context, run_dir)
     paths = [run_dir/'submission.csv']+([Path(task.task_dir)/'submission.csv'] if write_next_to_task else [])
     safety = {'checks': None, 'record': None}

@@ -9,6 +9,7 @@ import pandas as pd
 
 from ac_experiment import ExperimentSpec, run_in_subprocess
 from ac_models import labels_from_probabilities, normalize, positive_index, score
+from ac_diagnostics import prediction_monitor
 
 
 def build_ensemble(mem, root, y, metric, positive, deadline=None):
@@ -43,10 +44,15 @@ def build_ensemble(mem, root, y, metric, positive, deadline=None):
     used = gain >= .003 and np.count_nonzero(best_counts) >= 2
     weights = ({candidates[i]['id']: float(count/best_counts.sum()) for i, count in enumerate(best_counts) if count}
                if used else {best['id']: 1.})
+    combined = sum(weights.get(record['id'], 0.)*value for record, value in zip(candidates, probabilities))
+    diagnostics = prediction_monitor(target, combined, mem.get('class_labels'), metric,
+        mem.get('balance.training'), threshold, positive)
+    (root/'balance_final.json').write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding='utf-8')
     return {'used': bool(used), 'weights': weights, 'threshold': threshold,
         'best_single': best['id'], 'best_single_score': best['cv'],
         'ensemble_score': float(best_score if used else best['cv']), 'rel_gain_pct': float(100*gain),
         'validation_rows': int(mask.sum()), 'score_scope': 'OOF selection on repeatedly inspected fixed outer folds, not hidden-test score',
+        'balance_monitor': diagnostics,
         'reason': 'OOF blend improved at least 0.3%' if used else 'Retain best individual classifier'}
 
 
@@ -62,7 +68,7 @@ def refit_members(weights, mem, context, root, deadline, log=print, max_seeds=3)
         iterations = record.get('best_iters') or [250]
         rounds = max(20, int(np.mean(iterations)*1.15))
         runs, seeds = [], []
-        for seed in range(seed_count if spec.model.model_id not in {'logistic_regression', 'sgd'} else 1):
+        for seed in range(seed_count if spec.model.model_id not in {'logistic_regression', 'sgd', 'prior'} else 1):
             remaining = deadline-time.monotonic()
             if remaining < estimates[name]+2:
                 runs.append({'status': 'skipped', 'reason': 'Insufficient measured final-refit budget'});break
@@ -114,7 +120,10 @@ def write_submission(probabilities, test, task, classes, paths, threshold=.5):
             if result[columns].isna().any().any():raise ValueError('Sample identifiers do not match test identifiers')
         result = result[list(sample)]
     checks = {'ok': True, 'rows': len(result), 'columns': list(result), 'probabilities_finite': bool(np.isfinite(probabilities).all()),
-              'class_labels': classes, 'prediction_type': task.prediction_type, 'score': None}
+              'class_labels': classes, 'prediction_type': task.prediction_type, 'score': None,
+              'predicted_test_class_counts': {str(label): int(count) for label, count in zip(classes,
+                  np.bincount(labels_from_probabilities(probabilities, threshold, positive), minlength=len(classes)))},
+              'test_balance_scope': 'Model predictions only; true test class balance is unknown'}
     for path in paths:
         path = Path(path);path.parent.mkdir(parents=True, exist_ok=True)
         pending = path.with_suffix('.csv.tmp');result.to_csv(pending, index=False);pending.replace(path)

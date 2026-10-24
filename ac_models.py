@@ -6,6 +6,7 @@ from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, l
 
 
 PARAM_SPACE = {
+    'prior': {},  # Last-resort local baseline if all training attempts time out.
     'lightgbm': {'learning_rate': (.005, .3), 'num_leaves': (7, 255), 'max_depth': (-1, 16),
         'min_child_samples': (2, 500), 'subsample': (.3, 1.), 'subsample_freq': (0, 10),
         'colsample_bytree': (.2, 1.), 'reg_alpha': (0., 100.), 'reg_lambda': (0., 100.),
@@ -23,6 +24,7 @@ PARAM_SPACE = {
     'sgd': {'alpha': (.000001, 1.), 'l1_ratio': (0., 1.), 'class_weight': ('balanced', None)},
 }
 DEFAULTS = {
+    'prior': {},
     'lightgbm': {'learning_rate': .05, 'num_leaves': 31, 'min_child_samples': 30,
                  'subsample': .8, 'subsample_freq': 1, 'colsample_bytree': .8, 'reg_lambda': 1.},
     'catboost': {'learning_rate': .05, 'depth': 6, 'l2_leaf_reg': 3.},
@@ -121,11 +123,14 @@ def _numeric(frame):
 
 
 def fit_predict(model_id, loss, params, x, y, early_x, early_y, predict, n_classes,
-                n_jobs=2, seed=42, n_rounds=None, sample_weight=None):
+                n_jobs=2, seed=42, n_rounds=None, sample_weight=None, max_rounds=MAX_ROUNDS):
     errors = validate_spec(model_id, loss, params)
     if errors:
         raise ValueError('; '.join(errors))
     parameters = {**DEFAULTS[model_id], **params}
+    if model_id == 'prior':
+        prior = (np.bincount(np.asarray(y, dtype=int), minlength=n_classes)+1)/(len(y)+n_classes)
+        return [np.tile(prior, (len(frame), 1)) for frame in predict], 1, None
     observed = np.unique(y)
     if len(observed) == 1:
         probabilities = []
@@ -137,7 +142,7 @@ def fit_predict(model_id, loss, params, x, y, early_x, early_y, predict, n_class
     local_y = np.searchsorted(observed, y)
     can_stop = (early_x is not None and len(early_y) and n_rounds is None
                 and set(np.unique(early_y)).issubset(set(observed)))
-    iterations = int(n_rounds or MAX_ROUNDS)
+    iterations = min(int(n_rounds or max_rounds), int(max_rounds))
     importance = None
     if model_id == 'lightgbm':
         import lightgbm as lgb

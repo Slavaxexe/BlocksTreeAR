@@ -14,13 +14,15 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo))
     from ar_config import Settings, load_env
+    from tools.vitaly_state import publish_manifest
     load_env(repo)
+    publication_failed = False
     def save(path, value):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pending = path.with_suffix('.json.tmp')
-        pending.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
-        pending.replace(path)
+        nonlocal publication_failed
+        ok = publish_manifest(path, value)
+        if not ok and not publication_failed:
+            print('Viewer status file is temporarily locked; training and hard-timeout watchdog continue.', flush=True)
+        publication_failed = not ok
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('solution', type=Path)
     parser.add_argument('task', type=Path)
