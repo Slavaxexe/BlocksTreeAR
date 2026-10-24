@@ -215,8 +215,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         def handler(request):
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
-            self.assertEqual(body['reasoning_effort'], 'none')
-            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
+            self.assertEqual(body['reasoning_effort'], 'low')
+            self.assertNotIn('chat_template_kwargs', body)
             self.assertEqual('response_format' in body, title not in {'PreparationDraft', 'Program'})  # JSON-mode except code roles
             if title == 'Program' and seen.count(title) < int(network_failure):
                 seen.append(title)
@@ -960,8 +960,8 @@ class TreeTests(unittest.IsolatedAsyncioTestCase):
             nonlocal wrong_sent, rejected, simultaneous, peak
             body = json.loads(request.content)
             title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
-            self.assertEqual(body['reasoning_effort'], 'none')
-            self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
+            self.assertEqual(body['reasoning_effort'], 'low')
+            self.assertNotIn('chat_template_kwargs', body)
             context = json.loads(body['messages'][1]['content'].rsplit('\n', 1)[1])
             if title in {'Hypothesis', 'Hypotheses'}:
                 self.assertEqual(context['allowed_libraries'], LIBRARIES)
@@ -1356,7 +1356,7 @@ class SubmissionTests(unittest.TestCase):
         with patch('solution.cli', return_value=0) as cli:
             main(['task.md'])
             arguments = cli.call_args.args[0]
-            for option, value in {'--time-budget': '7200', '--experiment-timeout': '1200', '--max-nodes': '1000',
+            for option, value in {'--time-budget': '9900', '--experiment-timeout': '1200', '--max-nodes': '1000',
                                   '--executors': '6', '--threads': '2'}.items():
                 self.assertEqual(arguments[arguments.index(option) + 1], value)
             main(['task.md', '--time-budget=300', '--experiment-timeout', '60', '--max-nodes', '1'])
@@ -1473,8 +1473,8 @@ def handler(request):
     body=json.loads(request.content)
     assert body['model']=='qwen/qwen3.8-27b'
     title=json.loads(body['messages'][0]['content'].split('Schema: ',1)[1])['title']
-    assert body['reasoning_effort']=='none'
-    assert body['chat_template_kwargs']=={'enable_thinking':False}
+    assert body['reasoning_effort']=='low'
+    assert 'chat_template_kwargs' not in body
     assert body['temperature']==0 and body['max_tokens']==(8192 if title=='CodeReview' else 32768) and ('response_format' in body)==(title not in ('PreparationDraft','Program'))
     context=json.loads(body['messages'][1]['content'].rsplit('\\n',1)[1])
     if title=='PreparationDraft':

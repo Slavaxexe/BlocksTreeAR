@@ -17,8 +17,12 @@ def reply_text(response) -> str:
     choice = (getattr(response, 'choices', None) or [None])[0]
     content = getattr(getattr(choice, 'message', None), 'content', None)
     if isinstance(content, list):  # [{'type': 'text', 'text': ...}] or objects with .text
-        content = ''.join(part.get('text') or '' if isinstance(part, dict) else getattr(part, 'text', None) or ''
-                          for part in content)
+        parts = [part.get('text') if isinstance(part, dict) else getattr(part, 'text', None)
+                 for part in content]
+        # Reject the whole malformed answer: dropping a bad part could accept incomplete JSON.
+        if any(part is not None and not isinstance(part, str) for part in parts):
+            return ''
+        content = ''.join(part or '' for part in parts)
     return content if isinstance(content, str) else '' if content is None else str(content)
 
 
@@ -55,6 +59,7 @@ def ask_qwen(
                 ],
                 # The organizer's endpoint uses this compatible chat interface.
                 max_tokens=settings.max_tokens,
+                reasoning_effort="low",
             )
     except APITimeoutError:
         raise QwenError("Qwen не ответил до истечения таймаута. Повторный запрос автоматически не отправлялся.") from None

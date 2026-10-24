@@ -5,7 +5,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pandas as pd
@@ -16,7 +17,7 @@ from alfa_agent.config import Settings
 from alfa_agent.contracts import CodeReview, OutputBinding
 from alfa_agent.data import check_code, file_hash, inventory, module
 from alfa_agent.library_docs import DOCS
-from alfa_agent.qwen import QwenError
+from alfa_agent.qwen import QwenError, reply_text
 from alfa_agent.worker import validate_submission
 from tests.test_pipeline import PipelineTests
 
@@ -91,6 +92,61 @@ class LoaderAndFilesTests(unittest.TestCase):
 
 
 class LLMRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_content_parts_retry_without_accepting_partial_json(self):
+        for bad in ({'value': 'wrong'}, 7, False, []):
+            bodies = []
+            def handler(request):
+                bodies.append(json.loads(request.content))
+                content = ([{'type': 'text', 'text': '{"status":"pass"}'}, {'type': 'text', 'text': bad}]
+                           if len(bodies) == 1 else '{"status":"pass"}')
+                return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0,
+                    'model': 'mock', 'choices': [{'index': 0, 'finish_reason': 'stop',
+                        'message': {'role': 'assistant', 'content': content, 'reasoning_content': 'not JSON'}}]})
+            def client(**kwargs):
+                return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+            agent = JSONAgents(Settings('fake', 'http://proxy/v1', 'mock'), time.monotonic() + 10)
+            with self.subTest(bad=bad), patch('alfa_agent.agents.AsyncOpenAI', side_effect=client):
+                result = await agent.ask(CodeReview, 'Review', 'reviewer', attempts=2, repairs=1)
+            self.assertEqual(result.status, 'pass')
+            self.assertEqual([call.status for call in agent.calls], ['invalid_json', 'completed'])
+            self.assertEqual(len(bodies), 2)
+            self.assertTrue(all(b['reasoning_effort'] == 'low' and 'chat_template_kwargs' not in b for b in bodies))
+
+    def test_content_object_parts_and_missing_text(self):
+        for parts, expected in (([SimpleNamespace(text='a'), {'text': 'b'}, {'type': 'image'}], 'ab'),
+                                ([SimpleNamespace(text={'value': 'bad'})], ''),
+                                ([{'text': None}], '')):
+            response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=parts))])
+            self.assertEqual(reply_text(response), expected)
+
+    async def test_preparer_prompt_explicitly_allows_required_output_write(self):
+        agent = JSONAgents(Settings('fake', 'http://proxy/v1', 'mock'), time.monotonic() + 10)
+        with patch.object(agent, 'ask', new_callable=AsyncMock) as ask:
+            await agent.prepare({})
+        prompt = ask.call_args.args[1]
+        self.assertIn('write only the requested output path inside write_submission', prompt)
+        self.assertIn('Do not modify source data', prompt)
+        self.assertNotIn('No data printing, filesystem changes', prompt)
+
+    async def test_preparation_can_recover_on_tenth_attempt_and_stops_after_ten(self):
+        original = JSONAgents.prepare
+        for always_invalid in (False, True):
+            calls = []
+            async def prepare(agent, context):
+                draft = await original(agent, context)
+                calls.append(context.copy())
+                if always_invalid or len(calls) < 10:
+                    return draft.model_copy(update={'output': draft.output.model_copy(update={'columns': ['wrong']})})
+                return draft
+            with tempfile.TemporaryDirectory() as temporary, patch.object(JSONAgents, 'prepare', prepare):
+                fixture = PipelineTests('test_empty_and_truncated_llm_answers_are_repaired')
+                (_, report), seen = await fixture.exercise(Path(temporary))
+                self.assertEqual(len(calls), 10)
+                self.assertEqual(report.status, 'failed' if always_invalid else 'ready', report.errors)
+                self.assertTrue(all('execution_error' in c for c in calls[1:]))
+                if always_invalid:
+                    self.assertNotIn('Hypothesis', seen)
+
     async def test_empty_json_mode_and_truncation_change_request(self):
         for case in ('empty', 'truncated', 'unsupported_larger_limit'):
             bodies = []

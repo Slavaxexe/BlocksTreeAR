@@ -202,8 +202,7 @@ class JSONAgents:
                             model=self.settings.model, messages=messages, temperature=temperature,
                             max_tokens=token_limit,
                             **({'response_format': {'type': 'json_object'}} if json_mode else {}),
-                            extra_body={"reasoning_effort": "none",
-                                "chat_template_kwargs": {"enable_thinking": False}})
+                            reasoning_effort="low")
             except asyncio.CancelledError:
                 self.record(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
                 raise
@@ -344,7 +343,8 @@ class JSONAgents:
             "If platform_output is supplied, its filename and CSV format are mandatory; keep task-specific columns and IDs. "
             "Use arbitrary metric.name; mark metric ready only when its definition can be implemented. "
             "Do not put row counts or measured profiles in your JSON; Python will compute them. "
-            "No data printing, filesystem changes or top-level file reads in generated code. "
+            "Do not print data or read/write files at module scope. Read supplied inputs inside load_data; "
+            "write only the requested output path inside write_submission. Do not modify source data or other files. "
             "For unsupported input explain the specific missing capability rather than silently changing the task.\n"
             "On repair address execution_error and review_findings without changing the task requirements.\n"
             + json.dumps(context, ensure_ascii=False))

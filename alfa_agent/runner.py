@@ -26,6 +26,7 @@ from .data import check_code, file_hash, inventory, library_context, within
 from .storage import atomic_bytes, canonical, load, save
 
 ENTRY = "\nif __name__ == '__main__':\n    from alfa_agent.worker import main\n    main(fit_model)\n"
+PREPARATION_ATTEMPTS = 10
 IMPLEMENTATION_CALLS = 12  # more repairs rarely help: the hybrid repair and refusal limit settle sooner
 AUTOML_CODE = re.compile(r'autogluon|lightautoml|flaml|\bautoml\(')
 CHILD = {'threads': 2, 'shift_check': False}  # set per run from Options; children inherit nothing else
@@ -360,7 +361,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         if options.platform_output:
             context['platform_output'] = {'filename': 'submission.csv', 'format': 'CSV',
                 'requirement': 'Mandatory platform contract: comma-separated CSV, explicit ordered columns, one row per test object.'}
-        for attempt in range(2):
+        for attempt in range(PREPARATION_ATTEMPTS):
             draft = await agents.prepare(context)
             try:
                 if options.platform_output and (draft.output.filename != 'submission.csv'
@@ -404,10 +405,10 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     failed = load(directory / 'preparation.json', Preparation).model_copy(
                         update={'status': 'blocked', 'issues': [str(error)[-5000:]]})
                     save(directory / 'preparation.json', failed)
-                if attempt or isinstance(error, QwenError):
+                if attempt == PREPARATION_ATTEMPTS - 1 or isinstance(error, QwenError):
                     raise
                 context.update(previous_code=draft.code, execution_error=str(error)[-5000:])
-                update(warnings=report.warnings + ['Preparation required one code repair'])
+                update(warnings=report.warnings + [f'Preparation requires code repair {attempt + 1}/{PREPARATION_ATTEMPTS - 1}'])
         update(stage='baseline', checks=report.checks + ['executed_preparation', 'measured_profile', 'fixed_split'])
         shared = {'task_text': task_path.read_text(encoding='utf-8'),
                   'runtime_limits': context['runtime_limits'],
@@ -439,10 +440,10 @@ async def run(task_path: Path, options: Options, settings: Settings):
             if prepared:
                 start = create(None, 'baseline', Hypothesis.model_validate(prepared[1]), 'controller')
                 sources[start.node_id], baseline_id = prepared[0], start.node_id
-                # AutoML references run beside the LLM search; half the process limit leaves room for prediction checks.
+                # AutoML references run beside the LLM search; 75% of the process limit leaves room for prediction checks.
                 # Small debug runs keep their node budget for the LLM search; AutoML needs at least 6 nodes.
                 # AutoGluon gets a double process limit (60% of it to search): its stacking keeps improving with time.
-                for code, plan in automl(preparation.model_dump(mode='json'), CHILD['threads'], .5 * options.experiment_timeout,
+                for code, plan in automl(preparation.model_dump(mode='json'), CHILD['threads'], .75 * options.experiment_timeout,
                                          long_limit=1.2 * options.experiment_timeout)[:max(0, min(3, options.max_nodes - 3))]:
                     long = 'autogluon' in plan['pipeline']['model']['family']
                     start = create(None, 'reference', Hypothesis.model_validate(plan), 'controller',

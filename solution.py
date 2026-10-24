@@ -1,4 +1,4 @@
-"""Platform entry: python solution.py task.md; two hours per task, time-bounded search, six workers of two threads on 8 CPUs."""
+"""Platform entry: python solution.py task.md; two hours forty-five minutes per task, time-bounded search, six workers of two threads on 8 CPUs."""
 
 from pathlib import Path
 import sys
@@ -34,8 +34,8 @@ def main(argv=None):
 
 
 def run(task, args):
-    # Two hours leave a wide margin before the platform's three-hour stop; time, not a node count, ends the search.
-    for option, value in {'--time-budget': '7200', '--experiment-timeout': '1200', '--max-nodes': '1000',
+    # Leave fifteen minutes before the platform's three-hour stop; time, not a node count, ends the search.
+    for option, value in {'--time-budget': '9900', '--experiment-timeout': '1200', '--max-nodes': '1000',
                           '--executors': '6', '--threads': '2'}.items():
         if not any(arg == option or arg.startswith(option + '=') for arg in args):
             args.extend((option, value))

@@ -74,7 +74,7 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
             def handler(request):
                 body = json.loads(request.content)
                 self.assertEqual(body['response_format'], {'type': 'json_object'})
-                self.assertEqual(body['reasoning_effort'], 'none')
+                self.assertEqual(body['reasoning_effort'], 'low')
                 return httpx.Response(200, json={'id': 'proxy', 'object': 'chat.completion', 'created': 0,
                     'model': 'model', 'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {
                         'role': 'assistant', 'reasoning_content': 'This is not the JSON to parse.',
@@ -102,8 +102,8 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
                     title = json.loads(body['messages'][0]['content'].split('Schema: ', 1)[1])['title']
                     role = {'ProblemFacts': 'problem', 'DataFacts': 'data', 'MetricFacts': 'metric', 'OutputFacts': 'output'}[title]
                     seen.append(role)
-                    self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
-                    self.assertEqual(body['reasoning_effort'], 'none')
+                    self.assertNotIn('chat_template_kwargs', body)
+                    self.assertEqual(body['reasoning_effort'], 'low')
                     self.assertEqual(body['response_format'], {'type': 'json_object'})
                     self.assertEqual(json.loads(body['messages'][-1]['content'].rsplit('\n', 1)[1]), {'task_text': text})
                     return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': 'model',
