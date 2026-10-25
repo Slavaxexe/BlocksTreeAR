@@ -158,7 +158,6 @@ class JSONAgents:
     async def ask(self, schema, prompt: str, role: str, *, source: str | None = None, code: bool = False,
                   request_limit: int | None = None, validation: dict | None = None,
                   attempts: int = 8, repairs: int = 7, refresh=None, temperature: float = 0):  # any failed answer is retried
-        reviewing = role in {'reviewer', 'preparation_reviewer'}
         messages = [
             {"role": "system", "content": (
                 "Return ONLY one JSON object matching the supplied JSON Schema. "
@@ -174,7 +173,7 @@ class JSONAgents:
         quota_failures = rate_failures = 0
         # Provider JSON-mode for every role that returns plain JSON; code roles keep free text inside their schema.
         json_mode = not code
-        initial_tokens = min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens
+        initial_tokens = self.settings.max_tokens
         token_limit = initial_tokens
         token_growth_rejected = False
         limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
@@ -206,7 +205,7 @@ class JSONAgents:
                                            timeout=min(self.settings.timeout_seconds or remaining, remaining)) as client:
                         response = await client.chat.completions.create(
                             model=self.settings.model, messages=messages, temperature=temperature,
-                            max_tokens=token_limit,
+                            **({'max_tokens': token_limit} if token_limit is not None else {}),
                             **({'response_format': {'type': 'json_object'}} if json_mode else {}),
                             reasoning_effort="low")
             except asyncio.CancelledError:
@@ -274,7 +273,7 @@ class JSONAgents:
                     raise QwenError(f"Qwen: роль {role} не вернула валидный JSON-контракт. {feedback}") from None
                 if not content or truncated:
                     json_mode = False
-                    if truncated and not token_growth_rejected:
+                    if truncated and token_limit is not None and not token_growth_rejected:
                         token_limit = max(initial_tokens, min(token_limit * 2, 65536))
                     messages[2:] = [{"role": "user", "content":
                         "The previous answer was empty or truncated. Regenerate the complete schema object "

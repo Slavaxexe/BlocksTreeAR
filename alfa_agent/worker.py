@@ -118,6 +118,11 @@ def shift_split(train, test, data, validation, fit, valid):
         if not values.iloc[fit].max() <= values.iloc[valid].min():
             positions = np.flatnonzero(values.notna().to_numpy())
             threshold = np.quantile(values.iloc[positions], .8, method='higher')
+            # A repeated earliest period can occupy the 80th percentile. Keep whole periods
+            # together, but move the boundary forward so the training side is never empty.
+            periods = np.sort(values.iloc[positions].unique())
+            if threshold <= periods[0]:
+                threshold = periods[1]  # temporal candidates have at least two distinct periods
             later = values.iloc[positions].to_numpy() >= threshold
             fit, valid = positions[~later], positions[later]
             report.update(override='temporal_holdout', reason=f'All test values of {column} are later than train; '
@@ -171,6 +176,16 @@ def target_summary(train, targets):
     return result
 
 
+def validate_split(fit, valid, rows):
+    for indices in (fit, valid):
+        if indices.ndim != 1 or not len(indices) or indices.dtype.kind not in 'iu':
+            raise ValueError('Split must contain nonempty one-dimensional integer row positions')
+        if len(np.unique(indices)) != len(indices) or indices.min() < 0 or indices.max() >= rows:
+            raise ValueError('Split contains duplicate or out-of-range rows')
+    if np.intersect1d(fit, valid).size:
+        raise ValueError('Fit and validation rows overlap')
+
+
 def prepare(directory: Path):
     path = directory / 'preparation.json'
     preparation = load(path, Preparation)
@@ -184,16 +199,11 @@ def prepare(directory: Path):
     if any(column not in train for column in preparation.data.target_columns):
         raise ValueError('Prepared target columns are absent from the loaded training table')
     fit, valid = (np.asarray(indices) for indices in reader.make_split(train, config))
-    for indices in (fit, valid):
-        if indices.ndim != 1 or not len(indices) or indices.dtype.kind not in 'iu':
-            raise ValueError('Split must contain nonempty one-dimensional integer row positions')
-        if len(np.unique(indices)) != len(indices) or indices.min() < 0 or indices.max() >= len(train):
-            raise ValueError('Split contains duplicate or out-of-range rows')
-    if np.intersect1d(fit, valid).size:
-        raise ValueError('Fit and validation rows overlap')
+    validate_split(fit, valid, len(train))
     issues, shift = [], {}
     if SHIFT_CHECK and preparation.prediction_scope == 'row':
         fit, valid, shift = shift_split(train, test, preparation.data, preparation.validation, fit, valid)
+        validate_split(fit, valid, len(train))
         if shift.get('override'):
             issues.append('Validation split replaced: ' + shift['reason'])
         measured['target'] = target_summary(train, preparation.data.target_columns)

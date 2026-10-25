@@ -20,7 +20,7 @@ class Settings:
     base_url: str
     model: str
     timeout_seconds: float | None = 1200  # None waits for the answer; the run budget bounds a request either way
-    max_tokens: int = 32768
+    max_tokens: int | None = None
 
     @classmethod
     def from_env(
@@ -34,15 +34,14 @@ class Settings:
         values.update(os.environ if environ is None else environ)
         try:
             timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "1200")
-            max_tokens = int(values.get("QWEN_MAX_TOKENS") or "32768")
         except (ValueError, TypeError):
-            raise ConfigurationError("QWEN_TIMEOUT_SECONDS и QWEN_MAX_TOKENS должны быть числами.") from None
+            raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть числом.") from None
         return cls(
             api_key=(values.get("OPENAI_API_KEY") or "").strip(),
             base_url=(values.get("OPENAI_BASE_URL") or "").strip(),
             model=(values.get("OPENAI_MODEL") or "").strip() or "qwen/qwen3.8-27b",
             timeout_seconds=timeout,
-            max_tokens=max_tokens,
+            max_tokens=None,  # Like Blocks/Pipelines, let the platform choose the output limit.
         )
 
     def validate(self) -> None:
@@ -69,7 +68,7 @@ class Settings:
             raise ConfigurationError("OPENAI_BASE_URL: нужен HTTP(S) base URL без логина, пароля и query-параметров.")
         if self.timeout_seconds is not None and (not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть конечным положительным числом.")
-        if self.max_tokens <= 0:
+        if self.max_tokens is not None and self.max_tokens <= 0:
             raise ConfigurationError("QWEN_MAX_TOKENS должен быть положительным целым числом.")
 
     def public_status(self) -> dict:

@@ -103,7 +103,7 @@ def check_code(code: str, functions: tuple[str, ...]):
         raise ValueError('Missing required functions: ' + ', '.join(sorted(set(functions) - names)))
     allowed = {'math', 'statistics', 'collections', 'itertools', 'functools', 'pathlib', 'csv', 'json',
                're', 'datetime', 'typing', 'io', 'zipfile', 'gzip', 'random', 'copy', 'time', 'tempfile',
-               'warnings', 'contextlib', 'operator', 'dataclasses', 'enum', '__future__', 'os'} | set(LIBRARIES.values())
+               'warnings', 'contextlib', 'operator', 'abc', 'types', 'numbers', 'dataclasses', 'enum', '__future__', 'os'} | set(LIBRARIES.values())
     for node in ast.walk(tree):
         imports = [a.name for a in node.names] if isinstance(node, ast.Import) else (
             [node.module or ''] if isinstance(node, ast.ImportFrom) else [])

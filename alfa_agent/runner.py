@@ -112,7 +112,9 @@ async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, t
         raise TimeoutError('Run time budget exhausted')
     # No inherited credentials. This is a bounded process, not an OS sandbox.
     env = {'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
-           **{name: os.environ[name] for name in ('TMPDIR',) if name in os.environ},  # AutoML model workspaces
+           **{name: os.environ[name] for name in ('HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+               'TMPDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA') if name in os.environ},
+           'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'HF_DATASETS_OFFLINE': '1',
            'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1',
            'ALFA_THREADS': str(CHILD['threads']), 'ALFA_SHIFT_CHECK': '1' if CHILD['shift_check'] else '0',
            **{name: str(CHILD['threads']) for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS')}}
@@ -348,7 +350,14 @@ async def run(task_path: Path, options: Options, settings: Settings):
         report = report.model_copy(update={**changes, 'llm_calls': list(agents.calls),
             'running_nodes': [s.node_id for s in active.values()], 'queued_nodes': [s.node_id for s in waiting],
             'planning': planner is not None})
-        save(directory / 'report.json', report)
+        try:
+            save(directory / 'report.json', report)
+        except OSError as error:
+            # A diagnostic file must not prevent publishing/finalizing an available prediction.
+            warning = 'report.json could not be refreshed; details were printed to stderr'
+            if warning not in report.warnings:
+                report = report.model_copy(update={'warnings': report.warnings + [warning]})
+                print(warning + ': ' + error_message(error), file=sys.stderr)
 
     def error_message(error):
         return (type(error).__name__ + ': ' + (str(error) or 'operation cancelled or interrupted')).replace(settings.api_key, '[REDACTED]')[-5000:]

@@ -231,7 +231,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 kind = review_context['kind']
                 self.assertEqual(set(review_context), {'kind', 'code', 'contract', 'previous_findings'} |
                                  ({'plan', 'smoke'} if kind == 'experiment' else {'requirements', 'execution'}))
-                self.assertEqual(body['max_tokens'], 8192)
+                self.assertNotIn('max_tokens', body)
                 if kind == 'experiment' and review_unavailable:
                     return httpx.Response(401, json={'error': {'message': 'fake-secret'}})
                 quote = 'float(fit[column].median())' if kind == 'experiment' else ' + 8)'
@@ -1475,7 +1475,7 @@ def handler(request):
     title=json.loads(body['messages'][0]['content'].split('Schema: ',1)[1])['title']
     assert body['reasoning_effort']=='low'
     assert 'chat_template_kwargs' not in body
-    assert body['temperature']==0 and body['max_tokens']==(8192 if title=='CodeReview' else 32768) and ('response_format' in body)==(title not in ('PreparationDraft','Program'))
+    assert body['temperature']==0 and 'max_tokens' not in body and ('response_format' in body)==(title not in ('PreparationDraft','Program'))
     context=json.loads(body['messages'][1]['content'].rsplit('\\n',1)[1])
     if title=='PreparationDraft':
         preparations+=1

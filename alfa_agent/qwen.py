@@ -102,7 +102,7 @@ def ask_qwen(
                     {"role": "user", "content": prompt},
                 ],
                 # The organizer's endpoint uses this compatible chat interface.
-                max_tokens=settings.max_tokens,
+                **({'max_tokens': settings.max_tokens} if settings.max_tokens is not None else {}),
                 reasoning_effort="low",
             )
     except APITimeoutError:
