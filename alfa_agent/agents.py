@@ -17,7 +17,7 @@ from .config import Settings
 from .library_docs import DOCS, library_notes
 from .contracts import (CodeReview, DataFacts, Extraction, Hypotheses, Hypothesis, LLMCall, MetricFacts, OutputFacts,
                         PreparationDraft, ProblemFacts, Program, RunReport)
-from .qwen import QwenError, api_error_details, reply_text
+from .qwen import QwenError, api_error_details, reply_text, connection_options
 from .storage import save
 
 BAKER_ATTEMPTS = 10
@@ -201,7 +201,7 @@ class JSONAgents:
                     if remaining <= 0:
                         raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
                     async with asyncio.timeout(min(self.settings.timeout_seconds or remaining, remaining)), AsyncOpenAI(
-                            api_key=self.settings.api_key, base_url=self.settings.base_url, max_retries=0,
+                            api_key=self.settings.api_key, **connection_options(self.settings, asynchronous=True), max_retries=0,
                                            timeout=min(self.settings.timeout_seconds or remaining, remaining)) as client:
                         response = await client.chat.completions.create(
                             model=self.settings.model, messages=messages, temperature=temperature,

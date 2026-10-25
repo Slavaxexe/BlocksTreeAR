@@ -7,6 +7,8 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+import cloudpickle
+from joblib.externals import cloudpickle as joblib_cloudpickle
 import pandas as pd
 
 # Distribution → import root from the organizer's requirements (also used by flat ZIP exports).
@@ -135,6 +137,10 @@ def module(path: Path, expected_hash: str):
     sys.modules[spec.name] = result
     try:
         exec(compile(path.read_bytes(), str(path), 'exec'), result.__dict__)
+        # Generated module names exist only in this process. Send their functions/classes
+        # by value to fresh workers; retain sys.modules registration for dataclasses.
+        cloudpickle.register_pickle_by_value(result)
+        joblib_cloudpickle.register_pickle_by_value(result)
     except BaseException:
         if previous is None:
             sys.modules.pop(spec.name, None)

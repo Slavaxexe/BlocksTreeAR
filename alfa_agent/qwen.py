@@ -7,13 +7,31 @@ import re
 import time
 
 import httpx
-from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, DefaultHttpxClient, DefaultAsyncHttpxClient
 
 from .config import Settings
 
 
 class QwenError(RuntimeError):
     """A printable error without raw provider responses or credentials."""
+
+
+def connection_options(settings: Settings, *, http_client=None, asynchronous=False) -> dict:
+    """Keep proxy routing parameters out of the SDK's endpoint path concatenation."""
+    url = httpx.URL(settings.base_url)
+    options = {'base_url': settings.base_url}
+    if url.query:
+        options['base_url'] = url.copy_with(query=None, fragment=None)
+        # HTTPX preserves repeated keys and empty values; the SDK's default_query
+        # serializer changes arrays into key[] and drops empty values.
+        if http_client is None:
+            factory = DefaultAsyncHttpxClient if asynchronous else DefaultHttpxClient
+            http_client = factory(params=url.params)
+        else:
+            http_client.params = http_client.params.merge(url.params)
+    if http_client is not None:
+        options['http_client'] = http_client
+    return options
 
 
 def api_error_details(error: APIStatusError) -> dict:
@@ -90,10 +108,9 @@ def ask_qwen(
     try:
         with OpenAI(
             api_key=settings.api_key,
-            base_url=settings.base_url,
+            **connection_options(settings, http_client=http_client),
             timeout=settings.timeout_seconds,  # None waits for the answer
             max_retries=0,
-            http_client=http_client,
         ) as client:
             response = client.chat.completions.create(
                 model=settings.model,

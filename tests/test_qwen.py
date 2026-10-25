@@ -50,9 +50,8 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(url=url):
                 Settings("test-secret", url, "qwen-model").validate()
 
-    def test_invalid_urls_credentials_and_query_are_rejected(self):
-        for url in ["ftp://remote.example/v1", "https://user:secret@qwen.example/v1",
-                    "https://qwen.example/v1?token=secret", "https://qwen.example/v1#fragment",
+    def test_invalid_url_format_is_rejected(self):
+        for url in ["ftp://remote.example/v1",
                     "http://proxy:invalid/v1", "http://proxy:99999/v1", "http:///v1", "not-a-url"]:
             with self.subTest(url=url), self.assertRaises(ConfigurationError):
                 Settings("test-secret", url, "qwen-model").validate()

@@ -56,8 +56,6 @@ class Settings:
             url = urlsplit(self.base_url)
             valid_url = (
                 bool(url.hostname)
-                and not url.username and not url.password
-                and not url.query and not url.fragment
                 # The platform may supply an internal HTTP proxy.
                 and url.scheme in {"http", "https"}
             )
@@ -65,7 +63,7 @@ class Settings:
         except ValueError:
             valid_url = False
         if not valid_url:
-            raise ConfigurationError("OPENAI_BASE_URL: нужен HTTP(S) base URL без логина, пароля и query-параметров.")
+            raise ConfigurationError("OPENAI_BASE_URL: нужен абсолютный HTTP/HTTPS URL с корректным адресом и портом.")
         if self.timeout_seconds is not None and (not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть конечным положительным числом.")
         if self.max_tokens is not None and self.max_tokens <= 0:
