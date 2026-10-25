@@ -1,0 +1,107 @@
+{
+  "task": "time_series_forecasting",
+  "dataset": "ETTh1",
+  "source": "https://github.com/zhouhaoyi/ETDataset",
+  "domain": "Energy / Industrial",
+  "frequency": "hourly",
+  "target": "OT (Oil Temperature)",
+  "total_rows": 17420,
+  "n_features_original": 6,
+  "period": "Jul 2016 - Jun 2018",
+  "horizons": {
+    "1h": {
+      "horizon_hours": 1,
+      "rows_train": 12076,
+      "rows_test": 3451,
+      "n_features_engineered": 54,
+      "n_features_total": 60,
+      "baselines": {
+        "mean": {"rmse": 9.0208, "mae": 8.3464},
+        "naive_lag1": {"rmse": 0.6559, "mae": 0.4490},
+        "yesterday_same_hour": {"rmse": 2.2421, "mae": 1.7168}
+      },
+      "lgb": {
+        "rmse": 0.6946,
+        "mae": 0.4900,
+        "cv_rmse": 0.9115,
+        "optuna_trials": 20
+      },
+      "cb": {
+        "rmse": 0.7189,
+        "mae": 0.5078,
+        "cv_rmse": 0.9396,
+        "optuna_trials": 15
+      },
+      "ensemble": {
+        "rmse": 0.6946,
+        "mae": 0.4900,
+        "weights": {"lgb": 1.0, "cb": 0.0}
+      },
+      "improvement_vs_mean_pct": 92.3,
+      "improvement_vs_yesterday_pct": 69.0,
+      "improvement_vs_naive_pct": -5.9,
+      "overfit_check": {
+        "train_rmse": 0.7234,
+        "test_rmse": 0.6946,
+        "gap_pct": -4.0
+      },
+      "top_features": [
+        ["OT_lag_1", 17388484],
+        ["OT_lag_2", 1034971],
+        ["OT_roll_mean_24", 63187],
+        ["OT_roll_max_24", 56635],
+        ["OT_roll_max_168", 32343],
+        ["OT_roll_min_24", 30695],
+        ["OT_lag_24", 27246],
+        ["OT_roll_max_6", 19067],
+        ["hour_cos", 18493],
+        ["OT_roll_mean_168", 14022]
+      ]
+    },
+    "24h": {
+      "horizon_hours": 24,
+      "rows_train": 12059,
+      "rows_test": 3446,
+      "n_features_engineered": 55,
+      "n_features_total": 74,
+      "baselines": {
+        "mean": {"rmse": 8.9748, "mae": 8.3002},
+        "naive_current": {"rmse": 2.2400, "mae": 1.7144},
+        "yesterday_same_hour": {"rmse": 3.0020, "mae": 2.3621},
+        "same_hour_week": {"rmse": 3.6731, "mae": 2.8009}
+      },
+      "lgb": {
+        "rmse": 3.5285,
+        "mae": 2.9574,
+        "cv_rmse": 3.2579,
+        "optuna_trials": 20
+      },
+      "cb": {
+        "rmse": 3.4395,
+        "mae": 2.8287,
+        "cv_rmse": 2.9755,
+        "optuna_trials": 15
+      },
+      "ensemble": {
+        "rmse": 3.4395,
+        "mae": 2.8287,
+        "weights": {"lgb": 0.0, "cb": 1.0}
+      },
+      "improvement_vs_mean_pct": 61.7,
+      "improvement_vs_week_pct": 6.4,
+      "improvement_vs_yesterday_pct": -14.6,
+      "improvement_vs_naive_pct": -53.6,
+      "overfit_check": {
+        "train_rmse": 0.7103,
+        "test_rmse": 3.4395,
+        "gap_pct": 384.3
+      },
+      "note": "24h ahead is challenging for gradient boosting on univariate temperature: high autocorrelation makes naive baselines very strong. Severe overfitting indicates the model learns noise rather than generalizable patterns at this horizon."
+    }
+  },
+  "cv_method": "expanding_window",
+  "cv_folds": 3,
+  "models": ["LightGBM", "CatBoost"],
+  "ensemble_method": "grid_search_weights",
+  "bagging_folds": 5
+}

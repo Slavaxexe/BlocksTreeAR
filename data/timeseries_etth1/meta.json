@@ -1,0 +1,20 @@
+{
+  "name": "ETTh1",
+  "full_name": "Electricity Transformer Temperature (hourly)",
+  "source": "https://github.com/zhouhaoyi/ETDataset",
+  "domain": "Energy / Industrial",
+  "frequency": "hourly",
+  "rows_total": 17420,
+  "rows_train": 12194,
+  "rows_test": 3484,
+  "target": "OT",
+  "features": [
+    "HUFL",
+    "HULL",
+    "MUFL",
+    "MULL",
+    "LUFL",
+    "LULL"
+  ],
+  "date_range": "2016-07-01 00:00:00 to 2018-06-26 19:00:00"
+}
