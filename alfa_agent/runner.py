@@ -350,6 +350,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
             'planning': planner is not None})
         save(directory / 'report.json', report)
 
+    def error_message(error):
+        return (type(error).__name__ + ': ' + (str(error) or 'operation cancelled or interrupted')).replace(settings.api_key, '[REDACTED]')[-5000:]
+
     delta, published, stop_reason, baseline_ready = None, None, 'node_limit', False
     try:
         extraction = load(directory / 'extraction.json', Extraction)
@@ -489,6 +492,23 @@ async def run(task_path: Path, options: Options, settings: Settings):
             update(completed_nodes=completed, failed_nodes=len(delta.nodes) - completed,
                    warnings=report.warnings + ([f'{start.node_id}: {finish.error}'] if finish.error else []))
 
+        def failed_finish(start, error):
+            node = directory / 'nodes' / start.node_id
+            finish = Finish(node_id=start.node_id,
+                status='timeout' if time.monotonic() >= deadline else 'failed',
+                stage='implementation', metric=preparation.metric, duration_seconds=0.,
+                preparation_sha256=start.preparation_sha256, start_sha256=file_hash(node / 'start.json'),
+                error=error_message(error))
+            save(node / 'finish.json', finish)
+            return finish
+
+        def result_or_failure(task, start):
+            # Cancellation before coroutine entry bypasses experiment's own exception handler.
+            try:
+                return task.result()
+            except (Exception, asyncio.CancelledError) as error:
+                return failed_finish(start, error)
+
         def planning_context():
             nonlocal snapshot
             finished = {n.node_id for n in delta.nodes}
@@ -497,10 +517,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 'remaining_seconds': max(0., deadline - time.monotonic()),
                 'delta': {**delta.model_dump(mode='json'),
                           'nodes': [n.model_dump(mode='json', exclude={'comparisons'}) for n in delta.nodes]},
-                'pending': [s.model_dump(mode='json') for key, s in starts.items() if key not in finished]}
-            if delta.nodes:
-                leader = next((n for n in delta.nodes if n.node_id == delta.best_node_id), None)
-                leader = leader or next(n for n in reversed(delta.nodes) if n.result.status == 'completed')
+                'pending': [s.model_dump(mode='json') for key, s in starts.items() if key not in finished],
+                'available_parents': [n.node_id for n in delta.nodes if n.result.status == 'completed']}
+            leader = next((n for n in delta.nodes if n.node_id == delta.best_node_id), None)
+            leader = leader or next((n for n in reversed(delta.nodes) if n.result.status == 'completed'), None)
+            if leader is not None:
                 snapshot.update(parent=parent_view(leader.node_id),
                     available_parents=[n.node_id for n in delta.nodes if n.result.status == 'completed'])
                 scored = [n for n in delta.nodes if n.node_id != leader.node_id and n.result.value is not None]
@@ -517,7 +538,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 for task in [*active, *([planner] if planner else [])]:
                     if not task.done():
                         task.cancel()
-            while waiting and len(active) < options.executors:
+            while not expired and waiting and len(active) < options.executors:
                 start = waiting.popleft()
                 context = {**shared, **({'parent': parent_view(start.parent_id)} if start.parent_id else {})}
                 local = JSONAgents(settings, deadline, IMPLEMENTATION_CALLS, shared=agents, node_id=start.node_id)
@@ -544,7 +565,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
                                          return_when=asyncio.FIRST_COMPLETED)
             # Only the controller merges results and publishes a winner; workers never write shared state.
             for task in sorted((t for t in done if t in active), key=lambda t: active[t].node_id):
-                start, finish = active.pop(task), task.result()
+                start = active.pop(task)
+                finish = result_or_failure(task, start)
                 record(start, finish)
                 if start.node_id == baseline_id:
                     baseline_ready = finish.status == 'completed' and finish.evaluation_status != 'failed'
@@ -573,13 +595,54 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     blocked_version = batch_version
                     stop_reason = 'time_budget' if time.monotonic() >= deadline else 'llm_error' if isinstance(error, QwenError) else 'error'
                     if not isinstance(error, asyncio.CancelledError):
-                        message = str(error).replace(settings.api_key, '[REDACTED]')[-5000:]
+                        message = error_message(error)
                         update(warnings=report.warnings + [message])
                         if planning_failed or (not active and not waiting and len(delta.nodes) <= blocked_version):
                             update(errors=report.errors + [message])
                 planner = asyncio.create_task(anext(planning)) if planning is not None and time.monotonic() < deadline else None
+    except (Exception, asyncio.CancelledError) as error:
+        stop_reason = ('preparation_failed' if delta is None else 'time_budget' if time.monotonic() >= deadline
+                       else 'llm_error' if isinstance(error, QwenError) else 'error')
+        update(status='partial' if published else 'failed', stop_reason=stop_reason,
+               errors=report.errors + [error_message(error)])
+    finally:
+        tasks = [*active, *([planner] if planner else [])]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        # A worker can finish while cancellation/cleanup is in progress. Keep its result.
+        for task, start in list(active.items()):
+            active.pop(task)
+            try:
+                record(start, result_or_failure(task, start))
+            except (Exception, asyncio.CancelledError) as error:
+                update(warnings=report.warnings + [f'{start.node_id} cleanup: ' + error_message(error)])
+        while waiting:
+            start = waiting.popleft()
+            try:
+                record(start, failed_finish(start, asyncio.CancelledError('Queued experiment was not started')))
+            except (Exception, asyncio.CancelledError) as error:
+                update(warnings=report.warnings + [f'{start.node_id} cleanup: ' + error_message(error)])
+        if planning is not None:
+            try:
+                await planning.aclose()
+            except (Exception, asyncio.CancelledError) as error:
+                update(warnings=report.warnings + ['Planning cleanup: ' + error_message(error)])
+        planner = planning = None
+
+    # Finalization must run after both normal search and recovered controller failures.
+    try:
+        if published:
+            selected = next(n.result for n in delta.nodes if n.node_id == published)
+            output = within(directory / 'nodes' / published, selected.submission_file)
+            from .worker import validate_submission
+            validate_submission(output, preparation.output, preparation.profile['test']['rows'],
+                                id_columns=preparation.data.id_columns)
+            atomic_bytes(within(task_path.parent, preparation.output.filename), output.read_bytes())
         blended = False
-        if (options.autopilot and published and baseline_ready and options.final_refit and time.monotonic() < final_deadline
+        if (options.autopilot and published and options.final_refit and time.monotonic() < final_deadline
                 and sum(n.result.value is not None for n in delta.nodes) > 1):
             # A validation-chosen blend replaces the single winner only when it measurably improves the shared split.
             update(stage='finalization')
@@ -603,9 +666,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     update(checks=report.checks + ['validated_blend', 'final_submission_validated'],
                            warnings=report.warnings + [f'Blend member refit failed, fit-only predictions used: {str(e)[-300:]}'
                                                        for e in failures if isinstance(e, Exception)])
-            except (ValueError, OSError, TimeoutError, KeyError) as error:
-                update(warnings=report.warnings + ['Blend skipped; refitting the single winner: ' + str(error)[-1000:]])
-        if not blended and published and baseline_ready and options.final_refit and time.monotonic() < final_deadline:
+            except (Exception, asyncio.CancelledError) as error:
+                update(warnings=report.warnings + ['Blend skipped; refitting the single winner: ' + error_message(error)[-1000:]])
+        if not blended and published and options.final_refit and time.monotonic() < final_deadline:
             selected = next(n.result for n in delta.nodes if n.node_id == published)
             final = Finalization(status='running', node_id=published, preparation_sha256=selected.preparation_sha256,
                                  start_sha256=selected.start_sha256, code_sha256=selected.code_sha256)
@@ -630,26 +693,24 @@ async def run(task_path: Path, options: Options, settings: Settings):
                                 refit_on_full_train=True, refit_scored=False)
                     atomic_bytes(directory / 'best.json', canonical(best).encode())
                 update(checks=report.checks + ['final_refit', 'final_submission_validated'])
-            except (ValueError, OSError, TimeoutError) as error:
+            except (Exception, asyncio.CancelledError) as error:
                 final = final.model_copy(update={'status': 'timeout' if isinstance(error, TimeoutError) else 'failed',
-                    'error': str(error)[-2000:], 'duration_seconds': time.monotonic() - started})
+                    'error': error_message(error)[-2000:], 'duration_seconds': time.monotonic() - started})
                 save(directory / 'finalization.json', final)
-                update(warnings=report.warnings + ['Final refit failed; preserved validated winner: ' + str(error)[-1000:]])
-        update(status='ready' if delta.best_node_id and stop_reason == 'node_limit' else 'partial' if published else 'failed',
-               stage='complete', stop_reason=stop_reason,
-               checks=report.checks + ['saved_starts', 'recorded_finishes', 'computed_deltas'] + (['submission_written'] if published else []))
-    except Exception as error:
-        message = str(error).replace(settings.api_key, '[REDACTED]')[-5000:]
-        reason = ('preparation_failed' if delta is None else 'time_budget' if time.monotonic() >= deadline
-                  else 'llm_error' if isinstance(error, QwenError) else 'error')
-        update(status='partial' if published else 'failed', stop_reason=reason, errors=report.errors + [message])
-    finally:
-        tasks = [*active, *([planner] if planner else [])]
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        if planning is not None:
-            await planning.aclose()
+                update(warnings=report.warnings + ['Final refit failed; preserved validated winner: ' + error_message(error)[-1000:]])
+    except (Exception, asyncio.CancelledError) as error:
+        update(warnings=report.warnings + ['Finalization interrupted: ' + error_message(error)])
+    valid_output = False
+    if published:
+        try:
+            from .worker import validate_submission
+            validate_submission(within(task_path.parent, preparation.output.filename), preparation.output,
+                                preparation.profile['test']['rows'], id_columns=preparation.data.id_columns)
+            valid_output = True
+        except (Exception, asyncio.CancelledError) as error:
+            update(errors=report.errors + ['Final output invalid: ' + error_message(error)])
+    update(status='ready' if valid_output and delta.best_node_id and stop_reason == 'node_limit'
+           else 'partial' if valid_output else 'failed', stage='complete', stop_reason=stop_reason,
+           checks=report.checks + (['saved_starts', 'recorded_finishes', 'computed_deltas'] if delta is not None else [])
+                  + (['submission_written', 'final_submission_validated'] if valid_output else []))
     return directory, report

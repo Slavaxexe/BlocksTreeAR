@@ -17,7 +17,7 @@ from .config import Settings
 from .library_docs import DOCS, library_notes
 from .contracts import (CodeReview, DataFacts, Extraction, Hypotheses, Hypothesis, LLMCall, MetricFacts, OutputFacts,
                         PreparationDraft, ProblemFacts, Program, RunReport)
-from .qwen import QwenError, reply_text
+from .qwen import QwenError, api_error_details, reply_text
 from .storage import save
 
 BAKER_ATTEMPTS = 10
@@ -171,6 +171,7 @@ class JSONAgents:
             {"role": "user", "content": prompt},
         ]
         invalid, feedback = 0, None
+        quota_failures = rate_failures = 0
         # Provider JSON-mode for every role that returns plain JSON; code roles keep free text inside their schema.
         json_mode = not code
         initial_tokens = min(self.settings.max_tokens, 8192) if reviewing else self.settings.max_tokens
@@ -178,7 +179,9 @@ class JSONAgents:
         token_growth_rejected = False
         limit = min(self.max_calls, request_limit) if request_limit is not None else self.max_calls
         attempt = 0
-        while attempt < attempts:  # 429 waits may extend attempts
+        while attempt < attempts:
+            if self.budget.get('api_error'):
+                raise QwenError(self.budget['api_error'])
             attempt += 1
             remaining = self.deadline - time.monotonic()
             if remaining <= 0 or self.requests >= limit or self.budget['requests'] >= self.budget['limit']:
@@ -191,12 +194,15 @@ class JSONAgents:
             self.requests += 1
             self.budget['requests'] += 1
             try:
-                async with self.gate or contextlib.nullcontext():
+                async with asyncio.timeout(remaining), self.gate or contextlib.nullcontext():
                     remaining = self.deadline - time.monotonic()  # waiting for the gate is not request time
                     self.began = time.monotonic()
+                    if self.budget.get('api_error'):
+                        raise QwenError(self.budget['api_error'])
                     if remaining <= 0:
                         raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
-                    async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url, max_retries=0,
+                    async with asyncio.timeout(min(self.settings.timeout_seconds or remaining, remaining)), AsyncOpenAI(
+                            api_key=self.settings.api_key, base_url=self.settings.base_url, max_retries=0,
                                            timeout=min(self.settings.timeout_seconds or remaining, remaining)) as client:
                         response = await client.chat.completions.create(
                             model=self.settings.model, messages=messages, temperature=temperature,
@@ -206,10 +212,10 @@ class JSONAgents:
             except asyncio.CancelledError:
                 self.record(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status='api_error', error='cancelled'))
                 raise
-            except (APIStatusError, APITimeoutError, APIConnectionError) as error:
+            except (APIStatusError, APITimeoutError, APIConnectionError, TimeoutError) as error:
                 status = error.status_code if isinstance(error, APIStatusError) else None
                 suffix = f"HTTP {status}" if status else (
-                    "таймаут" if isinstance(error, APITimeoutError) else "ошибка соединения")
+                    "таймаут" if isinstance(error, (APITimeoutError, TimeoutError)) else "ошибка соединения")
                 if status is None and error.__cause__ is not None:
                     suffix += ' / ' + type(error.__cause__).__name__
                 self.record(LLMCall(role=role, node_id=self.node_id, attempt=attempt, status="api_error", error=suffix))
@@ -219,14 +225,21 @@ class JSONAgents:
                 if status == 400 and token_limit != initial_tokens and attempt < attempts:
                     token_limit, token_growth_rejected = initial_tokens, True
                     continue
-                if status == 429 and self.deadline - time.monotonic() > 30:
-                    # A shared server may refuse while its owner has priority: wait while the run budget allows,
-                    # without spending the request budget.
-                    self.requests -= 1
-                    self.budget['requests'] -= 1
-                    await asyncio.sleep(min(10 * attempt + random.uniform(0, 10), 60, max(0., self.deadline - time.monotonic() - 30)))
-                    attempts += 1
-                    continue
+                details = api_error_details(error) if isinstance(error, APIStatusError) else {}
+                if details.get('kind') == 'quota_exceeded':
+                    quota_failures += 1
+                    if quota_failures >= 3:
+                        self.budget['api_error'] = 'Qwen API: quota/budget unavailable after 3 attempts; further LLM calls stopped.'
+                        raise QwenError(self.budget['api_error']) from None
+                    if attempt < attempts and self.deadline - time.monotonic() > 0:
+                        await asyncio.sleep(min(2 ** quota_failures, max(0., self.deadline - time.monotonic())))
+                        continue
+                elif status == 429:
+                    rate_failures += 1
+                    if rate_failures < 3 and attempt < attempts and self.deadline - time.monotonic() > 0:
+                        delay = details.get('retry_after_seconds', min(10 * rate_failures + random.uniform(0, 10), 60))
+                        await asyncio.sleep(min(delay, max(0., self.deadline - time.monotonic())))
+                        continue
                 if attempt < attempts and (status is None or status >= 500):
                     await asyncio.sleep(min(2 ** attempt, 30, max(0., self.deadline - time.monotonic())))  # 2, 4, 8, 16, 30 s
                     continue
@@ -311,8 +324,16 @@ class JSONAgents:
             return result
         output.mkdir(parents=True, exist_ok=True)
         warnings = self.extraction_warnings = []
-        results = await asyncio.gather(*(one(*role) for role in roles), return_exceptions=True)
-        errors = [str(result) for result in results if isinstance(result, Exception)]
+        tasks = [asyncio.create_task(one(*role)) for role in roles]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        errors = [f'{role[0]}: {type(result).__name__}: {str(result) or "cancelled"}'
+                  for role, result in zip(roles, results) if isinstance(result, (Exception, asyncio.CancelledError))]
         if errors:
             raise QwenError("; ".join(errors))
         return Extraction(**dict(zip((r[0] for r in roles), results)))
@@ -555,8 +576,10 @@ async def extract_task(task_path: Path, output: Path, settings: Settings, *, age
         waived = getattr(agents, 'extraction_warnings', [])
         report = report.model_copy(update={"status": "ready", "warnings": list(waived),
                                            "checks": ["four_typed_blocks"] + ([] if waived else ["source_quotes"])})
-    except (ValueError, OSError, QwenError) as error:
-        report = report.model_copy(update={"status": "failed", "errors": [str(error).replace(settings.api_key, "[REDACTED]")]})
+    except (Exception, asyncio.CancelledError) as error:
+        message = f'{type(error).__name__}: {str(error) or "cancelled"}'.replace(settings.api_key, "[REDACTED]")
+        report = report.model_copy(update={"status": "failed", "stage": "complete",
+            "stop_reason": "llm_error" if isinstance(error, QwenError) else "error", "errors": [message]})
     report = report.model_copy(update={"llm_calls": list(agents.calls)})
     save(output / "report.json", report)
     return report
