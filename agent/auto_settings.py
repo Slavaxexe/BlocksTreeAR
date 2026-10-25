@@ -30,6 +30,10 @@ def model_settings(plan, smoke=False):
     if smoke:
         return (['lgbm'], {}) if plan.engine == 'flaml' else (['GBM'], {'GBM': {'num_boost_round': 20}})
     if plan.engine == 'flaml':
+        # FLAML supplies these constructor resources itself; custom_hp would duplicate them.
+        for fields in parameters.values():
+            fields.pop('n_jobs', None)
+            fields.pop('thread_count', None)
         parameters = {name: {key: {'domain': value} for key, value in fields.items()}
                       for name, fields in parameters.items() if fields}
         # FLAML's single-trial path reads init_value, not the search domain.

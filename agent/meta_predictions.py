@@ -25,6 +25,12 @@ def available(root, node_id, memo=None):
         if call is None:
             result = False
             break
+        if call['kind'] == 'automl':
+            from .model_evidence import frozen_available
+            path = root / 'nodes' / node_id / f"{call['parameters']['engine']}_full_diagnostics.json"
+            if not path.exists() or not frozen_available(json.loads(path.read_text(encoding='utf-8'))):
+                result = False
+                break
         if call['kind'] == 'saved_ensemble':
             parameters = call['parameters']
             if parameters['method'] in {'stacking', 'gating'} or parameters.get('optimize_weights'):
@@ -73,6 +79,7 @@ def ensure(root, node_id, preparation_sha256, deadline):
         metadata['runtime'] = {'deadline': deadline, 'time_budget_seconds': deadline - time.monotonic(),
             'num_cpus': 1, 'num_gpus': 0, 'is_smoke_check': False, 'is_meta_fit': True,
             'work_directory': str(directory), 'run_directory': str(root),
+            'source_node_id': node_id,
             'preparation_sha256': preparation_sha256, 'fit_row_positions': train_rows,
             'meta_rows': 0, 'outer_validation_rows': len(query)}
         auxiliary = {key: value for key, value in tables.items() if key not in {'train', 'test'}}

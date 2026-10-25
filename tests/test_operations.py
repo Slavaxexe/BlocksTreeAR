@@ -15,6 +15,127 @@ from agent.contracts import NodePlan
 
 
 class OperationTests(unittest.TestCase):
+    def test_automl_multiple_targets_freeze_and_refit_without_target_inputs(self):
+        import tempfile
+        from pathlib import Path
+        import cloudpickle
+        from agent.finalize import FinalRefit
+        state = self.state()
+        state['fit']['second'] = state['fit'].target * 2
+        state['preparation']['data']['target_columns'] = ['target', 'second']
+        state['preparation']['output']['columns'] = ['id', 'target', 'second']
+        defaults = {'task_type': 'multioutput_regression'}
+        plan = AutoMLPlan(engine='flaml', models=['lgbm'], num_trials=1)
+        with tempfile.TemporaryDirectory() as temporary:
+            state['preparation']['runtime'].update(work_directory=temporary,
+                fit_row_positions=np.arange(len(state['fit'])))
+            result = run_operation(state, {'kind': 'automl', 'parameters': plan.model_dump()}, defaults)
+            for target in result['automl_diagnostics']['targets']:
+                snapshot = cloudpickle.loads(Path(target['diagnostics']['model_file']).read_bytes())
+                self.assertFalse({'target', 'second'} & set(snapshot['columns']))
+            refitter = FinalRefit.__new__(FinalRefit)
+            refitter.defaults = defaults
+            refitted = refitter.multi_target(plan, result['automl_diagnostics'], state)
+            self.assertEqual(list(refitted['test_predictions']), ['target', 'second'])
+
+    def test_native_automl_forecast_keeps_snapshot_and_query_order(self):
+        import tempfile
+        from agent.selected_model import refit_saved
+        state = self.state()
+        state['fit'] = pd.DataFrame({'period': range(60), 'target': np.sin(np.arange(60) / 4)})
+        state['validation'] = pd.DataFrame({'period': [60, 61, 62]})
+        state['test'] = pd.DataFrame({'period': [65, 63, 64]})
+        state['preparation']['data'].update(time_column='period', id_columns=[])
+        state['preparation']['output']['columns'] = ['target']
+        plan = AutoMLPlan(engine='flaml', models=['lgbm'], num_trials=1,
+                          model_parameters={'lgbm': {'n_estimators': 8, 'lags': 3}})
+        defaults = {'task_type': 'forecasting'}
+        with tempfile.TemporaryDirectory() as temporary:
+            state['preparation']['runtime']['work_directory'] = temporary
+            result = run_operation(state, {'kind': 'automl', 'parameters': plan.model_dump()}, defaults)
+            frozen = refit_saved(state, plan, result['automl_diagnostics']['selected_model_file'], defaults)
+            np.testing.assert_allclose(frozen['test_predictions'], result['test_predictions'])
+            self.assertEqual(len(frozen['test_predictions']), 3)
+
+    def test_multiple_targets_and_label_spaces(self):
+        from agent.task_types import task_score
+        for task in ('multioutput_regression', 'multioutput_classification', 'multilabel_classification'):
+            state = self.state(task != 'multioutput_regression')
+            if task == 'multioutput_regression':
+                state['fit']['second'] = state['fit'].a - state['fit'].b * 2
+                estimator, metric = 'sklearn.linear_model.Ridge', 'RMSE'
+            else:
+                state['fit']['second'] = np.where(state['fit'].b > 0, 10, 20)
+                if task.startswith('multilabel'):
+                    state['fit']['target'] = (state['fit'].a > 0).astype(int)
+                    state['fit']['second'] = (state['fit'].b > 0).astype(int)
+                estimator, metric = 'sklearn.linear_model.LogisticRegression', 'Macro F1'
+            state['preparation']['data']['target_columns'] = ['target', 'second']
+            state['preparation']['output']['columns'] = ['id', 'target', 'second']
+            state['preparation']['metric']['name'] = metric
+            defaults = {'task_type': task}
+            state.update(run_operation(state, {'kind': 'preprocess'}, defaults))
+            state.update(run_operation(state, {'kind': 'fit', 'parameters': {'estimator': estimator}}, defaults))
+            import cloudpickle
+            state['model'] = cloudpickle.loads(cloudpickle.dumps(state['model']))
+            result = run_operation(state, {'kind': 'predict'}, defaults)['test_predictions']
+            self.assertEqual(list(result), ['target', 'second'])
+            score = task_score(state['fit'].iloc[:12], result, state['preparation'], task)
+            self.assertTrue(np.isfinite(score))
+            if task.startswith('multilabel'):
+                probability = run_operation(state, {'kind': 'predict', 'parameters': {'output': 'probabilities'}}, defaults)['test_predictions']
+                self.assertTrue(((probability >= 0) & (probability <= 1)).all().all())
+            proxy = analyze_features(state, {'name': 'multi', 'kind': 'task_predictive', 'columns': ['a', 'b']}, task_type=task)
+            self.assertEqual(proxy['status'], 'completed')
+
+    def test_rankers_keep_complete_query_groups_and_prediction_order(self):
+        from agent.task_types import task_score
+        state = self.state()
+        state['fit']['query'] = np.arange(len(state['fit'])) % 15
+        state['fit']['target'] = (state['fit'].a > 0).astype(int)
+        for scope in ('validation', 'test'):
+            state[scope]['query'] = np.arange(12) % 3
+        state['preparation']['data']['query_columns'] = ['query']
+        state['preparation']['metric'] = {'name': 'NDCG@5', 'direction': 'maximize'}
+        defaults = {'task_type': 'ranking'}
+        state.update(run_operation(state, {'kind': 'preprocess', 'parameters': {'feature_columns': ['a', 'b']}}, defaults))
+        for estimator, parameters in [('lightgbm.LGBMRanker', {'n_estimators': 5, 'verbosity': -1}),
+                                       ('xgboost.XGBRanker', {'n_estimators': 5}),
+                                       ('catboost.CatBoostRanker', {'iterations': 5, 'verbose': False, 'allow_writing_files': False})]:
+            state.update(run_operation(state, {'kind': 'fit', 'parameters': {'estimator': estimator, 'parameters': parameters}}, defaults))
+            result = run_operation(state, {'kind': 'predict'}, defaults)['test_predictions']
+            reference = state['fit'].iloc[:12].copy()
+            reference['query'] = state['test']['query'].to_numpy()
+            self.assertTrue(0 <= task_score(reference, result, state['preparation'], 'ranking') <= 1)
+        measured = analyze_features(state, {'name': 'rank', 'kind': 'task_predictive', 'columns': ['a', 'b']}, task_type='ranking')
+        self.assertEqual(measured['task_family'], 'ranking')
+
+    def test_target_free_clustering_and_recursive_forecast(self):
+        from agent.task_types import task_score
+        state = self.state()
+        state['fit'] = state['fit'].drop(columns='target')
+        state['preparation']['data']['target_columns'] = []
+        state['preparation']['output']['columns'] = ['id', 'cluster']
+        state['preparation']['metric']['name'] = 'Silhouette'
+        defaults = {'task_type': 'clustering'}
+        state.update(run_operation(state, {'kind': 'preprocess', 'parameters': {'feature_columns': ['a', 'b']}}, defaults))
+        state.update(run_operation(state, {'kind': 'fit', 'parameters': {'estimator': 'sklearn.cluster.KMeans', 'parameters': {'n_clusters': 2, 'n_init': 1}}}, defaults))
+        result = run_operation(state, {'kind': 'predict'}, defaults)['test_predictions']
+        self.assertTrue(np.isfinite(task_score(state['test'], result, state['preparation'], 'clustering')))
+        fit = pd.DataFrame({'period': range(40), 'target': np.arange(40) % 2})
+        query = pd.DataFrame({'period': [43, 40, 42, 41]})
+        metadata = {'data': {'target_columns': ['target'], 'time_column': 'period'},
+                    'output': {'columns': ['target']}, 'metric': {'name': 'RMSE'},
+                    'validation': {'strategy': 'time', 'time_column': 'period'}}
+        state = {'fit': fit, 'validation': query, 'test': query, 'preparation': metadata}
+        call = {'kind': 'forecast', 'parameters': {'estimator': 'sklearn.tree.DecisionTreeRegressor',
+                'lags': [1], 'feature_columns': ['period']}}
+        result = run_operation(state, call, {'task_type': 'forecasting'})
+        np.testing.assert_array_equal(result['test_predictions'].target, [1, 0, 0, 1])
+        np.testing.assert_array_equal(result['validation_predictions'], result['test_predictions'])
+        measured = analyze_features(state, {'name': 'time', 'kind': 'task_predictive'}, task_type='forecasting')
+        self.assertEqual(measured['task_family'], 'forecasting')
+
     def state(self, classification=False):
         rng = np.random.default_rng(42)
         fit = pd.DataFrame({'id': range(180), 'a': rng.normal(size=180), 'b': rng.normal(size=180),

@@ -57,6 +57,8 @@ def inspect(root):
               'test_only_columns': sorted(set(test) - set(train)),
               'target_columns': targets, 'id_columns': ids,
               'scope': 'Marginal profiles may summarize targets; structural probes receive no row-level targets'}
+    from .entity_candidates import discover
+    result['entity_key_candidates'] = discover(train, test, targets + ids)
     save(root / 'research' / 'profile.json', result)
     save(root / 'preparation.json', preparation.model_copy(update={
         'source_hashes': input_hashes(Path(preparation.task_directory), preparation.data.files)}))

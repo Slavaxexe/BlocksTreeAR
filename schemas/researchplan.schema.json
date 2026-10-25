@@ -23,7 +23,12 @@
             "ablation",
             "feature",
             "stability",
-            "entities"
+            "entities",
+            "targets",
+            "queries",
+            "series",
+            "clusters",
+            "task_predictive"
           ],
           "title": "Kind",
           "type": "string"
@@ -194,6 +199,35 @@
           "title": "Key Candidates",
           "type": "array"
         },
+        "query_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Query Columns",
+          "type": "array"
+        },
+        "series_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Series Columns",
+          "type": "array"
+        },
+        "lags": {
+          "description": "Positive observation lags for series analysis",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Lags",
+          "type": "array"
+        },
+        "n_clusters": {
+          "default": 3,
+          "description": "Number of clusters in the exploratory fit-only proxy",
+          "minimum": 2,
+          "title": "N Clusters",
+          "type": "integer"
+        },
         "filters": {
           "items": {
             "$ref": "#/$defs/RowFilter"
@@ -306,7 +340,7 @@
     "parent_id": {
       "anyOf": [
         {
-          "pattern": "^research_[0-9]{3}$",
+          "pattern": "^research_[0-9]{3,}$",
           "type": "string"
         },
         {

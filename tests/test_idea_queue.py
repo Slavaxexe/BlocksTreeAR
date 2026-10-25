@@ -33,6 +33,19 @@ def delta():
 
 
 class QueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unlimited_nodes_have_finite_json_and_accept_long_ids(self):
+        from pydantic import TypeAdapter
+        from agent.contracts import NodeID, ResearchID
+        with tempfile.TemporaryDirectory() as temporary:
+            search = self.make_search(temporary)
+            search.options = Options(max_experiments=None, max_research_nodes=None)
+            search.next_node = 1500
+            context = search.baker_context()
+            self.assertIsNone(context['remaining_experiments'])
+            json.dumps(context, allow_nan=False)
+            self.assertEqual(TypeAdapter(NodeID).validate_python('node_1500'), 'node_1500')
+            self.assertEqual(TypeAdapter(ResearchID).validate_python('research_1500'), 'research_1500')
+
     def make_search(self, directory, shared=None):
         agents = JSONAgents(Settings('fake', 'https://qwen.example/v1', 'model'), time.monotonic()+20, 100)
         return Search(agents, Path(directory), Options(parallel=2, max_experiments=10, automl=False),
@@ -208,7 +221,9 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
             history = SimpleNamespace(nodes=[row], metric=SimpleNamespace(direction='minimize'))
             occupied = [SimpleNamespace(purpose=p) for p in ('improve', 'explore')]
             with patch('agent.search.block_catalog', return_value={}), \
-                    patch('agent.search.idea_history_view', side_effect=lambda item: {'analysis': item.analysis}), \
+                    patch('agent.search.idea_history_view', side_effect=lambda item: {'analysis': item.analysis,
+                        'hypothesis': {'pipeline': {'model': {'name': 'constant'}}},
+                        'result': {'status': 'completed', 'value': item.result.value}}), \
                     patch.object(search.agents, 'propose_ideas', return_value=Ideas()) as propose:
                 search.fill(history, occupied, 1)
                 await self.collect_baker(search)
@@ -245,7 +260,9 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
                                                 reason='Supported by measured evidence')])
 
             with patch('agent.search.block_catalog', return_value={}), \
-                    patch('agent.search.idea_history_view', side_effect=lambda item: {'analysis': item.analysis}), \
+                    patch('agent.search.idea_history_view', side_effect=lambda item: {'analysis': item.analysis,
+                        'hypothesis': {'pipeline': {'model': {'name': 'constant'}}},
+                        'result': {'status': 'completed', 'value': item.result.value}}), \
                     patch.object(search.agents, 'propose_ideas', side_effect=propose) as mock:
                 search.fill(history, occupied, 1)
                 await asyncio.wait_for(entered.wait(), 2)

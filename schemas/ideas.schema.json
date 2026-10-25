@@ -158,6 +158,60 @@
             }
           ],
           "default": null
+        },
+        "target_metrics": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional per-target AutoML selection metrics; the joint outer metric stays fixed",
+          "title": "Target Metrics",
+          "type": "object"
+        },
+        "time_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Column"
+        },
+        "series_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Series Columns",
+          "type": "array"
+        },
+        "horizon": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "FLAML native forecast horizon in observations; defaults to the largest query horizon",
+          "title": "Horizon"
+        },
+        "frequency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Forecast calendar frequency, e.g. D/MS/h. Integer period codes use this frequency (D by default) on a synthetic calendar",
+          "title": "Frequency"
         }
       },
       "required": [
@@ -397,7 +451,7 @@
         "parent_id": {
           "anyOf": [
             {
-              "pattern": "^node_[0-9]{3}$",
+              "pattern": "^node_[0-9]{3,}$",
               "type": "string"
             },
             {

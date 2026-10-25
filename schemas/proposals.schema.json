@@ -49,7 +49,7 @@
         "source_node": {
           "anyOf": [
             {
-              "pattern": "^node_[0-9]{3}$",
+              "pattern": "^node_[0-9]{3,}$",
               "type": "string"
             },
             {
@@ -166,7 +166,7 @@
         "parent_id": {
           "anyOf": [
             {
-              "pattern": "^node_[0-9]{3}$",
+              "pattern": "^node_[0-9]{3,}$",
               "type": "string"
             },
             {
@@ -203,7 +203,8 @@
             "predict",
             "automl",
             "ensemble",
-            "saved_ensemble"
+            "saved_ensemble",
+            "forecast"
           ],
           "title": "Kind",
           "type": "string"

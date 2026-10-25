@@ -64,7 +64,8 @@ def _features(fit, validation, test, targets, ids):
     return frames
 
 
-def _fit_flaml(x, y, metric, classification, runtime, seed, plan, validation=None, weights=None):
+def _fit_flaml(x, y, metric, classification, runtime, seed, plan, validation=None, weights=None,
+               *, task=None, groups=None, groups_val=None):
     from flaml import AutoML
     from flaml.automl.model import CatBoostEstimator
 
@@ -106,9 +107,13 @@ def _fit_flaml(x, y, metric, classification, runtime, seed, plan, validation=Non
                           'split_ratio': 0.2, 'retrain_full': 'budget',
                           'train_time_limit': min(30., budget / 4)}
     if plan.validation == 'cv' and not smoke:
-        splitter = StratifiedKFold if classification else KFold
-        validation_options = {'eval_method': 'cv', 'split_type': splitter(
-            n_splits=plan.folds, shuffle=True, random_state=seed), 'retrain_full': 'budget',
+        if task == 'rank':
+            from sklearn.model_selection import GroupKFold
+            splitter = GroupKFold(n_splits=plan.folds)
+        else:
+            factory = StratifiedKFold if classification else KFold
+            splitter = factory(n_splits=plan.folds, shuffle=True, random_state=seed)
+        validation_options = {'eval_method': 'cv', 'split_type': splitter, 'retrain_full': 'budget',
             'train_time_limit': min(30., budget / 4)}
     else:
         validation_options['split_ratio'] = plan.holdout_fraction
@@ -117,7 +122,11 @@ def _fit_flaml(x, y, metric, classification, runtime, seed, plan, validation=Non
                               'retrain_full': False, 'sample': False,
                               'train_time_limit': min(30., budget / 4)}
     models, parameters = model_settings(plan, smoke)
-    model.fit(X_train=x, y_train=y, task='classification' if classification else 'regression',
+    if task == 'rank':
+        validation_options.update(groups=groups, groups_val=groups_val)
+        if validation_options['eval_method'] != 'cv':
+            validation_options['split_type'] = 'group'
+    model.fit(X_train=x, y_train=y, task=task or ('classification' if classification else 'regression'),
               metric=metric, time_budget=budget,
               estimator_list=models, custom_hp=parameters, max_iter=plan.num_trials,
               ensemble=False if smoke or plan.ensemble is None else plan.ensemble,
@@ -200,6 +209,33 @@ def _probabilities(model, frame):
 
 
 def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, class_labels=None, config=None):
+    from .task_types import family
+    from .automl_tasks import run_targets, run_ranking, run_forecast
+    plan = AutoMLPlan.model_validate(config or {'engine': engine})
+    if plan.engine != engine:
+        raise ValueError('Configuration engine differs from the requested engine')
+    preparation = state['preparation']
+    requirements = preparation.get('requirements', {})
+    defaults = {'task_type': task_type or requirements.get('problem', {}).get('task_type'),
+                'prediction_type': prediction_type or requirements.get('output', {}).get('prediction_type'),
+                'class_labels': class_labels or requirements.get('problem', {}).get('class_labels')}
+    kind = family(defaults['task_type'], preparation['data']['target_columns'], state['fit'])
+    runtime = dict(preparation.get('runtime', {}))
+    runtime['deadline'] = time.monotonic() + _remaining(runtime) * plan.budget_fraction
+    state = {**state, 'preparation': {**preparation, 'runtime': runtime}}
+    plan = plan.model_copy(update={'budget_fraction': 1.})
+    if kind == 'clustering':
+        raise ValueError('FLAML/AutoGluon Tabular do not search clustering models; use the clustering fit pipeline')
+    if kind == 'ranking':
+        return run_ranking(state, plan, defaults)
+    if len(preparation['data']['target_columns']) > 1:
+        return run_targets(state, plan, defaults)
+    if kind == 'forecasting':
+        return run_forecast(state, plan, defaults)
+    return _run_single(state, engine, config=plan.model_dump(), **defaults)
+
+
+def _run_single(state, engine='flaml', *, task_type=None, prediction_type=None, class_labels=None, config=None):
     """Return standard assembly updates for one supervised tabular target.
 
     task_type/prediction_type/class_labels should come from extracted requirements.
@@ -240,18 +276,19 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
         if any(word in requested for word in ('classif', 'binary', 'multiclass')) and family != 'classification':
             raise ValueError('AutoML task type conflicts with its metric')
     target = targets[0]
+    feature_targets = preparation.get('all_target_columns', targets)
     ids = binding.get('id_columns', [])
     inherited = state['fit'].attrs.get('feature_recipes', [])
     recipes = [*inherited, *(feature.model_dump() for feature in plan.features)]
     created = [recipe['name'] for recipe in inherited]
     raw = [state[scope].drop(columns=created) for scope in ('fit', 'validation', 'test')]
-    fit, validation, test = create_features(raw, recipes, forbidden=targets, policy=validation_policy)
-    columns = plan.columns or [c for c in fit if c not in {*targets, *ids}]
+    fit, validation, test = create_features(raw, recipes, forbidden=feature_targets, policy=validation_policy)
+    columns = plan.columns or [c for c in fit if c not in {*feature_targets, *ids}]
     columns = list(dict.fromkeys([*columns, *(feature.name for feature in plan.features)]))
-    if set(columns) & set(targets):
+    if set(columns) & set(feature_targets):
         raise ValueError('AutoML input columns cannot include targets')
     columns = [c for c in columns if c not in plan.drop_columns]
-    x, valid_x, test_x = _features(fit[columns], validation[columns], test[columns], targets, ids)
+    x, valid_x, test_x = _features(fit[columns], validation[columns], test[columns], feature_targets, ids)
     y = fit[target].reset_index(drop=True)
     if y.isna().any():
         raise ValueError('AutoML fit target contains missing values')
@@ -280,8 +317,8 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
                                   validation_fraction=plan.holdout_fraction)
         train_rows, valid_rows = _inner_split(raw[0], y, request, validation_policy, classification)
         inner_fit, inner_valid = create_features([raw[0].iloc[train_rows], raw[0].iloc[valid_rows]],
-                                                 recipes, forbidden=targets, policy=validation_policy)
-        selection_x, tune_x, _ = _features(inner_fit[columns], inner_valid[columns], inner_valid[columns], targets, ids)
+                                                 recipes, forbidden=feature_targets, policy=validation_policy)
+        selection_x, tune_x, _ = _features(inner_fit[columns], inner_valid[columns], inner_valid[columns], feature_targets, ids)
         selection_y = y.iloc[train_rows].reset_index(drop=True)
         tuning = (tune_x, y.iloc[valid_rows].reset_index(drop=True))
         selection_runtime = {**runtime, 'deadline': time.monotonic() + _remaining(runtime) * .6}
@@ -302,17 +339,32 @@ def run_automl(state, engine='flaml', *, task_type=None, prediction_type=None, c
         from .selected_model import freeze
         from .storage import atomic_bytes
         model = freeze(model, engine, classification).refit(x, y, runtime, refit_weights)
+        if engine == 'flaml' and len(model.models) == 1:
+            from .model_evidence import estimator_facts
+            diagnostics.update(estimator_facts(model.models[0].model))
+        diagnostics['selected_model_count'] = len(model.models)
         selected_file = Path(runtime['work_directory']) / 'selected_model.pkl'
         atomic_bytes(selected_file, cloudpickle.dumps(model))
         diagnostics.update(selected_model_file=str(selected_file), refitted_on_fit=True,
                            inner_fit_rows=len(train_rows), inner_validation_rows=len(valid_rows),
                            inner_validation='explicit_holdout', recipe_statistics='inner_train_only',
                            full_fit_rows=len(fit))
+    elif not runtime.get('is_smoke_check') and not plan.bag_folds and not plan.stack_levels:
+        import cloudpickle
+        from .selected_model import freeze
+        from .storage import atomic_bytes
+        frozen = freeze(model, engine, classification)
+        selected_file = Path(runtime['work_directory']) / 'selected_model.pkl'
+        atomic_bytes(selected_file, cloudpickle.dumps(frozen))
+        diagnostics.update(selected_model_file=str(selected_file), selected_model_count=len(frozen.models))
+        if engine == 'flaml' and len(frozen.models) == 1:
+            from .model_evidence import estimator_facts
+            diagnostics.update(estimator_facts(frozen.models[0].model))
     columns = [column for column in preparation['output'].get('columns', []) if column not in ids]
     if not columns:
         columns = [target]
-    probability = classification and (name in {'auc', 'rocauc', 'logloss', 'crossentropy'}
-        or any(word in str(prediction_type).lower() for word in ('probab', 'вероят')))
+    from .operations import _requires_probabilities
+    probability = classification and _requires_probabilities(state, {'prediction_type': prediction_type})
 
     def predict(frame):
         if not probability:

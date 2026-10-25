@@ -38,7 +38,8 @@ def optimize(pairs, state, defaults, plan):
         candidate = initial if number == 0 else (np.eye(len(pairs))[number - 1]
                     if number <= len(pairs) else rng.dirichlet(1. + weights * 8))
         prediction = blend(inner_pairs, inner, defaults, candidate.tolist(), plan.method)['validation_predictions']
-        value = float(reader.score(meta, prediction, config))
+        from .task_types import score_predictions
+        value = score_predictions(reader, meta, prediction, config, defaults.get('task_type'))
         if not np.isfinite(value):
             continue
         measured.append(value)

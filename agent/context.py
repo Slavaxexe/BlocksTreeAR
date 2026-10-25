@@ -116,7 +116,7 @@ def research_memory_view(memory, *, review=False):
         for facts in source.get('evidence', {}).values():
             if not isinstance(facts, dict):
                 continue
-            values = {key: facts[key] for key in ('kind', 'scope', 'rows_used', 'improvement_percent', 'candidates') if key in facts}
+            values = {key: facts[key] for key in ('kind', 'scope', 'rows_used', 'improvement_percent') if key in facts}
             for side in ('baseline', 'candidate'):
                 if side in facts:
                     values[side] = {key: facts[side][key] for key in ('metric', 'value', 'inner_train_rows',
@@ -126,7 +126,9 @@ def research_memory_view(memory, *, review=False):
         if measured:
             insight['measured'] = measured
     if not review:
-        result['feature_candidates'] = [{key: value for key, value in item.items() if key != 'measurement_key'}
+        result['feature_candidates'] = [{key: value for key, value in item.items() if key in {
+            'id', 'research_node', 'features', 'columns', 'metric', 'improvement', 'relative_improvement',
+            'scope', 'trial_status', 'trials', 'decision'}}
                                         for item in memory.get('feature_candidates', [])]
     return result
 
@@ -177,6 +179,15 @@ def repair_context(context):
         'data_research': context.get('data_research')})
 
 
+def automl_facts(value):
+    if isinstance(value, dict):
+        return {key: automl_facts(item) for key, item in value.items()
+                if key not in {'configuration', 'model_directory', 'model_file', 'selected_model_file'}}
+    if isinstance(value, list):
+        return [automl_facts(item) for item in value]
+    return value
+
+
 def analyzer_context(context):
     row = context['experiment']
     context = node_context(context, row['hypothesis'].get('research_ids', []))
@@ -199,8 +210,8 @@ def analyzer_context(context):
                        'hypothesis': {'rationale': row['hypothesis']['rationale'],
                                       'pipeline': row['hypothesis']['pipeline']}, 'result': row['result']},
         'saved_operations': operations, 'comparisons': comparisons,
-        'automl_diagnostics': [{key: value for key, value in facts.items() if key not in {'configuration', 'model_directory', 'model_file'}}
-                              for facts in context.get('automl_diagnostics', [])],
+        'comparison_facts': context.get('comparison_facts', {}),
+        'automl_diagnostics': automl_facts(context.get('automl_diagnostics', [])),
         'repair_attempts': context.get('repair_attempts', []), 'execution_stages': context.get('execution_stages', []),
         'input_facts': context.get('input_facts', {}), 'data_research': context.get('data_research')})
 
@@ -214,16 +225,31 @@ def research_history(nodes):
         'summary': row.get('review', {}).get('summary'), 'error': row.get('error'),
         'probes': [{'kind': value['kind'], 'columns': value.get('columns'),
                     'baseline_columns': value.get('baseline_columns'),
-                    'baseline_features': value.get('baseline_features'),
-                    'features': [{key: recipe[key] for key in ('operation', 'columns', 'parameters')}
-                                 for recipe in value.get('features', [])],
+                    'features': [recipe['name'] for recipe in value.get('features', [])],
                     'sample_rows': value.get('sample_rows'), 'filters': value.get('filters')}
                    for value in row.get('analyses', [])]}) for row in [*recent, *active]]
 
 
+def research_columns(profile, direction, focus, offset=0, limit=10):
+    """All columns stay discoverable; detailed statistics follow the current focus."""
+    source = profile['tables']['train']
+    excluded = set(profile.get('target_columns', []) + profile.get('id_columns', []))
+    names = [name for name in source['columns'] if name not in excluded]
+    mentioned = [name for name in names if re.search(r'(?<!\w)' + re.escape(name) + r'(?!\w)', str(focus), re.I)]
+    if direction == 'quality':
+        ranked = sorted(names, key=lambda name: source['columns'][name]['missing'], reverse=True)
+    elif direction == 'entities':
+        ranked = sorted(names, key=lambda name: 1 < source['columns'][name]['unique'] < source['rows'], reverse=True)
+    else:
+        shift = offset % max(1, len(names))
+        ranked = names[shift:] + names[:shift]
+    return set([*mentioned, *ranked[:limit]])
+
+
 def model_feedback(row):
-    return compact({'node_id': row.node_id, 'change': row.hypothesis.rationale,
-                    'model': row.hypothesis.pipeline.model, 'result': result_view(row.result),
+    return compact({'node_id': row.node_id,
+                    'model': {key: value for key, value in row.hypothesis.pipeline.model.items() if key in {'name', 'engine'}},
+                    'result': result_view(row.result),
                     'analysis': row.analysis.summary if row.analysis else None})
 
 
@@ -324,7 +350,7 @@ def node_context(context, research_ids):
     return result
 
 
-def research_profile_view(profile, *, detailed=True):
+def research_profile_view(profile, *, detailed=True, focus_columns=None):
     """Keep measured values and column names while removing repeated per-column JSON keys."""
     result = {key: value for key, value in profile.items() if key != 'tables'}
     result['quantile_levels'] = [0, .25, .5, .75, 1] if detailed else [0, .5, 1]
@@ -338,6 +364,8 @@ def research_profile_view(profile, *, detailed=True):
             unique[name] = column['unique']
             if column['missing']:
                 missing[name] = column['missing']
+            if focus_columns is not None and name not in focus_columns:
+                continue
             if column.get('nonfinite'):
                 nonfinite[name] = column['nonfinite']
             if column.get('quantiles'):

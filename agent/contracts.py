@@ -7,7 +7,7 @@ from .plans import AutoMLPlan, AnalysisRequest, ToolCall, EnsemblePlan, SplitPla
 from .validation import metadata
 
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-NodeID = Annotated[str, Field(pattern=r"^node_[0-9]{3}$")]
+NodeID = Annotated[str, Field(pattern=r"^node_[0-9]{3,}$")]
 INITIAL_STATE = frozenset({'fit', 'validation', 'test', 'preparation', 'auxiliary'})
 
 
@@ -107,6 +107,7 @@ class Metric(Contract):
     name: str | None = None
     direction: Literal["minimize", "maximize"] | None = None
     definition: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict, description='Explicit metric semantics: top_k, gain=linear/exponential for NDCG, average for classification, rmse_aggregation=global/mean_target_rmse')
     status: Literal["ready", "needs_implementation"] = "needs_implementation"
 
 
@@ -114,12 +115,16 @@ class DataBinding(Contract):
     files: dict[str, str] = Field(description="Input roles to paths relative to the task directory")
     target_columns: list[str] = Field(default_factory=list)
     id_columns: list[str] = Field(default_factory=list)
+    query_columns: list[str] = Field(default_factory=list, description='Ranking query key; never the document ID')
+    time_column: str | None = Field(default=None, description='Ordered observation time for forecasting')
+    series_columns: list[str] = Field(default_factory=list, description='Forecast series key; [] means one series')
 
 
 class OutputBinding(Contract):
     filename: str = Field(min_length=1)
     format: str | None = None
     columns: list[str] = Field(default_factory=list)
+    class_columns: dict[str, dict[str, str]] = Field(default_factory=dict, description='Optional target -> class label -> probability output column for multi-output classification')
 
 
 class PreparationDraft(Contract):
@@ -486,7 +491,7 @@ class Program(Contract):
         return self
 
 
-ResearchID = Annotated[str, Field(pattern=r'^research_[0-9]{3}$')]
+ResearchID = Annotated[str, Field(pattern=r'^research_[0-9]{3,}$')]
 
 
 class ResearchPlan(Contract):

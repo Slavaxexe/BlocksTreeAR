@@ -13,6 +13,17 @@ from agent.contracts import Ideas
 
 
 class ContextTests(unittest.TestCase):
+    def test_research_focus_keeps_schema_but_limits_detailed_statistics(self):
+        from agent.context import research_profile_view
+        profile = {'tables': {'train': {'rows': 10, 'columns': {
+            name: {'dtype': 'float', 'unique': 4, 'missing': 1,
+                   'quantiles': {'0.0': 0, '0.5': 2, '1.0': 4}}
+            for name in ['relevant', 'other']}}}}
+        view = research_profile_view(profile, detailed=False, focus_columns={'relevant'})
+        facts = view['tables']['train']
+        self.assertEqual(facts['columns_by_dtype']['float'], ['relevant', 'other'])
+        self.assertEqual(set(facts['quantiles']), {'relevant'})
+
     def test_guidance_is_selected_by_actual_work_not_the_whole_catalog(self):
         from agent.guidance import augment_prompt, observed_rules
         prompt = 'Plan.\n' + json.dumps({'idea': {'change': 'Train CatBoostRegressor'},

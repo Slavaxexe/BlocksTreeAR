@@ -170,6 +170,11 @@ def learned(pairs, state, defaults, plan, classes):
 def run_saved_ensemble(state, value, defaults):
     from .operations import _classification, _requires_probabilities
     plan = value if isinstance(value, EnsemblePlan) else EnsemblePlan.model_validate(value)
+    from .task_types import family
+    if family(defaults.get('task_type')) == 'clustering':
+        raise ValueError('Cluster IDs are not aligned between independently fitted models; select one clustering solution')
+    if plan.method in {'stacking', 'gating'} and len(state['preparation']['data']['target_columns']) != 1:
+        raise ValueError('Use mean/vote/conditional for multiple targets; learned stacking/gating requires one target')
     runtime = state['preparation']['runtime']
     root = Path(runtime['run_directory']).resolve()
     pairs = [load_pair(root, source, runtime['preparation_sha256'], defaults,

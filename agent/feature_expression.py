@@ -76,9 +76,12 @@ class FeatureExpression:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
             name = node.func.id
             if name == 'col':
-                if len(node.args) != 1 or not isinstance(node.args[0], ast.Constant) or node.args[0].value not in self.columns:
+                argument = node.args[0] if len(node.args) == 1 else None
+                column = argument.id if isinstance(argument, ast.Name) else (
+                    argument.value if isinstance(argument, ast.Constant) else None)
+                if column not in self.columns:
                     raise ValueError('col() must name one of the declared feature columns')
-                return frame[node.args[0].value]
+                return frame[column]
             args = [evaluate(arg) for arg in node.args]
             if name in {'frequency', 'group_mean', 'group_std', 'group_count'}:
                 key = ast.dump(node)

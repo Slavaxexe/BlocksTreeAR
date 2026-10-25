@@ -26,7 +26,9 @@ def directions(requests):
              'shift': 'distribution', 'stability': 'distribution', 'entities': 'entities',
              'association': 'relationships', 'correlation': 'relationships', 'groups': 'relationships',
              'interactions': 'relationships', 'predictive': 'model_checks',
-             'permutation': 'model_checks', 'ablation': 'model_checks'}
+             'permutation': 'model_checks', 'ablation': 'model_checks',
+             'targets': 'relationships', 'queries': 'entities', 'series': 'history',
+             'clusters': 'model_checks', 'task_predictive': 'model_checks'}
     for request in requests:
         value = request.model_dump() if hasattr(request, 'model_dump') else request
         if value['kind'] == 'feature':

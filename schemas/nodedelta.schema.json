@@ -80,7 +80,7 @@
         "source_node": {
           "anyOf": [
             {
-              "pattern": "^node_[0-9]{3}$",
+              "pattern": "^node_[0-9]{3,}$",
               "type": "string"
             },
             {
@@ -147,7 +147,7 @@
       "additionalProperties": false,
       "properties": {
         "reference_id": {
-          "pattern": "^node_[0-9]{3}$",
+          "pattern": "^node_[0-9]{3,}$",
           "title": "Reference Id",
           "type": "string"
         },
@@ -205,7 +205,7 @@
         },
         "node_id": {
           "default": "node_000",
-          "pattern": "^node_[0-9]{3}$",
+          "pattern": "^node_[0-9]{3,}$",
           "title": "Node Id",
           "type": "string"
         },
@@ -423,6 +423,11 @@
           "default": null,
           "title": "Definition"
         },
+        "parameters": {
+          "description": "Explicit metric semantics: top_k, gain=linear/exponential for NDCG, average for classification, rmse_aggregation=global/mean_target_rmse",
+          "title": "Parameters",
+          "type": "object"
+        },
         "status": {
           "default": "needs_implementation",
           "enum": [
@@ -477,7 +482,8 @@
             "predict",
             "automl",
             "ensemble",
-            "saved_ensemble"
+            "saved_ensemble",
+            "forecast"
           ],
           "title": "Kind",
           "type": "string"
@@ -513,14 +519,14 @@
   "additionalProperties": false,
   "properties": {
     "node_id": {
-      "pattern": "^node_[0-9]{3}$",
+      "pattern": "^node_[0-9]{3,}$",
       "title": "Node Id",
       "type": "string"
     },
     "parent_id": {
       "anyOf": [
         {
-          "pattern": "^node_[0-9]{3}$",
+          "pattern": "^node_[0-9]{3,}$",
           "type": "string"
         },
         {

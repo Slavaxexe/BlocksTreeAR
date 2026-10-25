@@ -12,7 +12,15 @@ def candidate_id(candidate):
 
 
 def recipe_keys(features):
-    return {fingerprint(FeatureSpec.model_validate(feature).model_dump()) for feature in features}
+    result = set()
+    for feature in features:
+        value = FeatureSpec.model_validate(feature).model_dump()
+        if value['operation'] == 'history':
+            # Omitted executor defaults and explicit defaults describe the same recipe.
+            defaults = {'window': None, 'max_age': None, 'lag': 1, 'min_history': 1, 'fallback': 'global'}
+            value['parameters'] = {**defaults, **value['parameters']}
+        result.add(fingerprint(value))
+    return result
 
 
 def assembly_recipes(assembly):
@@ -85,10 +93,11 @@ def prediction_features(assembly):
             used = source('fit_features')
         elif kind == 'predict':
             used = source('model')
-        elif kind == 'automl':
+        elif kind in {'automl', 'forecast'}:
             used = source('fit')
-            if parameters.get('columns'):
-                used &= set(parameters['columns'])
+            selected = parameters.get('feature_columns' if kind == 'forecast' else 'columns')
+            if selected:
+                used &= set(selected)
             used |= {recipe['name'] for recipe in parameters.get('features', [])}
             used -= set(parameters.get('drop_columns', []))
         else:

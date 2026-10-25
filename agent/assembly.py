@@ -111,8 +111,8 @@ def execute(node: Path, fit, validation, test, preparation, auxiliary=None):
         name = block['name']
         state['preparation'] = preparation
         runtime = preparation.get('runtime', {})
-        if (block.get('operation') or {}).get('kind') in {'fit', 'automl'} and runtime.get('deadline'):
-            stages = sum((item.get('operation') or {}).get('kind') in {'fit', 'automl'}
+        if (block.get('operation') or {}).get('kind') in {'fit', 'automl', 'forecast'} and runtime.get('deadline'):
+            stages = sum((item.get('operation') or {}).get('kind') in {'fit', 'automl', 'forecast'}
                          for item in manifest['blocks'][position:])
             # Each model gets a share of the remaining training time, not the full node budget.
             remaining = max(0., runtime['deadline'] - time.monotonic()) / stages

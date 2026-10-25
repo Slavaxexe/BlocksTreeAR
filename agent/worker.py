@@ -252,7 +252,10 @@ def evaluate(start_path: Path, fit_predict, *, start_sha256=None, code_sha256=No
         value, evaluation, error = None, 'unavailable', None
         if preparation.metric.status == 'ready':
             try:
-                value = float(reader.score(reference, valid_predictions, config))
+                from .task_types import score_predictions
+                extraction = json.loads((preparation_path.parent / preparation.extraction).read_text(encoding='utf-8'))
+                value = score_predictions(reader, reference, valid_predictions, config,
+                                          extraction['problem'].get('task_type'))
                 if not np.isfinite(value):
                     raise ValueError('Metric returned a non-finite value')
                 evaluation = 'completed'

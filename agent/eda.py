@@ -20,6 +20,11 @@ from .plans import AnalysisRequest
 
 
 CATALOG = {
+    'targets': 'Fit-only multi-target distributions, target correlation and binary label prevalence/co-occurrence.',
+    'queries': 'Ranking query sizes, constant/empty relevance groups, within-query feature association and query overlap. query_columns or data.query_columns is the composite query key.',
+    'series': 'Series lengths, duplicate series/time rows, time spacing and fit-only target autocorrelation at observation lags. split_column=time; series_columns optional; lags=[1,...].',
+    'clusters': 'Unsupervised fit-only KMeans proxy on columns; n_clusters controls clusters, with silhouette and cluster sizes. Scale/geometry evidence, not labelled accuracy.',
+    'task_predictive': 'Ready task-aware proxy on an internal fit-only holdout: multi-target/multilabel, pointwise ranking scored per complete query, clustering or recursive forecasting. query_columns/series_columns/split_column/lags identify structure. columns selects inputs; features are fitted inside the holdout. Reports the primary metric and actual holdout sizes.',
     'quality': 'Missing/nonfinite rates, cardinality, constants and numeric quantiles.',
     'association': 'Univariate mutual information with fit target, in nats; not causality or validation quality.',
     'correlation': 'Pairwise numeric Spearman correlation; inspect redundancy, not causality.',
@@ -246,7 +251,7 @@ def analyze_features(state, value, *, task_type=None, cache=None):
     """Tool-like API: dataset state plus a validated request -> scoped measurements."""
     request = value if isinstance(value, AnalysisRequest) else AnalysisRequest.model_validate(value)
     cache = {} if cache is None else cache
-    if request.dataset != 'fit' and request.kind not in {'quality', 'correlation', 'redundancy', 'groups'}:
+    if request.dataset != 'fit' and request.kind not in {'quality', 'correlation', 'redundancy', 'groups', 'queries', 'series'}:
         raise ValueError('Label-dependent and shift analyses must start from fit')
     frame = _population(state[request.dataset], request.filters)
     preparation = state['preparation']
@@ -269,18 +274,26 @@ def analyze_features(state, value, *, task_type=None, cache=None):
     if target is not None and target not in targets:
         raise ValueError('Analysis target must be a declared task target')
     preserve_reference = any(recipe.operation in {'history', 'target_encoding'} for recipe in recipes)
-    if request.kind != 'entities' and not preserve_reference and request.sample_rows and len(frame) > request.sample_rows:
+    if request.kind not in {'entities', 'series', 'queries', 'task_predictive'} and not preserve_reference and request.sample_rows and len(frame) > request.sample_rows:
         frame = frame.sample(request.sample_rows, random_state=request.seed)
-    classification = ('class' in str(task_type).lower() or 'binary' in str(task_type).lower()) if task_type else (
-        target in frame and not pd.api.types.is_numeric_dtype(frame[target]))
+    from .task_types import family
+    classification = family(task_type, [target] if target in frame else [], frame) == 'classification'
     result = {'kind': request.kind, 'scope': request.dataset, 'rows_used': len(frame), 'rows_available': len(state[request.dataset]),
               'target_available': target in frame, 'features': columns,
               'filters': [item.model_dump() for item in request.filters]}
+    if request.kind in {'targets', 'queries', 'series', 'task_predictive'}:
+        result['target_available'] = bool(targets) and all(column in frame for column in targets)
     if frame.empty:
         return {**result, 'status': 'unavailable', 'reason': 'No rows match the selected population'}
     if request.group_by and request.group_by not in frame:
         raise ValueError(f'Unknown grouping column: {request.group_by}')
-    if request.kind == 'entities':
+    if request.kind in {'targets', 'queries', 'series', 'clusters', 'task_predictive'}:
+        from .task_analysis import inspect_task, predictive_task
+        if request.kind == 'task_predictive':
+            result.update(predictive_task(state, frame, request, columns, task_type))
+        else:
+            result.update(inspect_task(state, frame, request, columns, task_type))
+    elif request.kind == 'entities':
         from .entity_analysis import inspect_entities
         other = _population(state[request.compare], request.comparison_filters)
         result.update(inspect_entities(frame, other, request, targets))

@@ -15,6 +15,35 @@ from tests import test_ensembles, test_operations
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_unquoted_col_and_history_defaults_match_executor_meaning(self):
+        from agent.feature_expression import FeatureExpression
+        from agent.feature_trials import recipe_keys
+        frame = pd.DataFrame({'period': [1, 2], 'built': [1990, 2000]})
+        expression = FeatureExpression('col(period) - col(built)', ['period', 'built'])
+        np.testing.assert_array_equal(expression.fit(frame).transform(frame), [-1989, -1998])
+        with self.assertRaises(ValueError):
+            FeatureExpression('col(secret)', ['period']).fit(frame)
+        recipe = {'name': 'past', 'operation': 'history', 'columns': ['entity'],
+                  'parameters': {'time_column': 'period', 'value_column': 'target'}}
+        explicit = {**recipe, 'parameters': {**recipe['parameters'], 'window': None,
+                    'max_age': None, 'lag': 1, 'min_history': 1, 'fallback': 'global'}}
+        self.assertEqual(recipe_keys([recipe]), recipe_keys([explicit]))
+        explicit['parameters']['lag'] = 2
+        self.assertNotEqual(recipe_keys([recipe]), recipe_keys([explicit]))
+
+    def test_key_proposals_exclude_labels_and_report_ambiguity(self):
+        from agent.entity_candidates import discover
+        train = pd.DataFrame({'period': np.repeat([1, 2], 30), 'size': list(range(30)) * 2,
+                              'kind': ['a'] * 60, 'target': list(range(60))})
+        train['region'] = np.tile(['a', 'b'], 30)
+        query = train.iloc[:10].assign(period=3)
+        result = discover(train, query, excluded=['target'], seconds=2)
+        self.assertTrue(result['candidates'])
+        self.assertTrue(all('target' not in row['columns'] for row in result['candidates']))
+        best = result['candidates'][0]
+        self.assertEqual(best['query_row_coverage'], 1)
+        self.assertEqual(best['within_period_ambiguity_fraction'], 0)
+
     def test_expression_statistics_are_fit_only_and_targets_are_unavailable(self):
         fit = pd.DataFrame({'group': ['a', 'a', 'b'], 'value': [2., 4., 12.], 'target': [0, 1, 0]})
         query = pd.DataFrame({'group': ['a', 'new'], 'value': [30., 50.]})

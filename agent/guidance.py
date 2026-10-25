@@ -3,6 +3,9 @@ import json
 
 
 RULES = {
+    'model_comparison': {
+        'roles': {'analyzer'}, 'signals': ('comparison_facts',), 'errors': (),
+        'text': 'Use actual parent/current native parameters, inputs and preprocessing, not the hypothesis claim of sameness. Missing evidence means an isolated feature/weight effect is unverified. AutoML selecting one estimator is not an ensemble; validation=holdout does not execute folds=3 CV. A worse outer score cannot be dismissed because a different inner proxy improved.'},
     'metric_units': {
         'roles': {'data_reviewer', 'analyzer'}, 'signals': ('improvement', 'comparisons'),
         'errors': ('relative_improvement',),
@@ -55,6 +58,8 @@ def augment_prompt(prompt, role, observations):
     focus = {key: context[key] for key in ('idea', 'hypothesis', 'previous_operation', 'execution_error',
         'experiment', 'measurements', 'comparisons', 'plan', 'open_questions') if key in context}
     focus['direction'] = context.get('search', {}).get('direction')
+    if role == 'analyzer' and context.get('comparison_facts'):
+        focus['comparison_facts'] = context['comparison_facts']
     questions = context.get('data_research', {}).get('open_questions')
     if questions:
         focus['open_questions'] = questions

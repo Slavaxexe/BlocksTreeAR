@@ -33,20 +33,28 @@ class Options:
     time_budget: float = 600
     experiment_timeout: float = 240
     output_dir: Path | None = None
-    max_experiments: int = 1
+    max_experiments: int | None = 1
     parallel: int = 6
     parallel_agents: int = 8
     max_llm_calls: int | None = 80
     max_code_attempts: int = 5
     automl: bool = True
     research_parallel: int = 2
-    max_research_nodes: int = 12
+    max_research_nodes: int | None = 12
     research_timeout: float = 60
     final_refit_seconds: float = 300
     eda_fraction: float = .15
     eda_seconds: float | None = None
     research_call_fraction: float = .3
     research_unlimited: bool = False
+
+    @property
+    def experiment_limit(self):
+        return math.inf if self.max_experiments is None else self.max_experiments
+
+    @property
+    def research_limit(self):
+        return math.inf if self.max_research_nodes is None else self.max_research_nodes
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -331,12 +339,12 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
 async def run(task_path: Path, options: Options, settings: Settings):
     if not 0 < options.time_budget <= 10800 or not 0 < options.experiment_timeout <= 10800:
         raise ValueError('Time budgets must be finite, positive and at most three hours')
-    if not 0 < options.research_timeout <= 10800 or not 0 <= options.max_research_nodes <= 1000 or options.research_parallel < 0:
+    if not 0 < options.research_timeout <= 10800 or options.research_limit < 0 or options.research_parallel < 0:
         raise ValueError('Research needs a positive timeout and nonnegative node/parallel limits')
-    if (not 1 <= options.max_experiments <= 1000 or options.parallel < 1
+    if (options.experiment_limit < 1 or options.parallel < 1
             or options.parallel_agents < 1 or (options.max_llm_calls is not None and options.max_llm_calls < 1)
             or options.max_code_attempts < 1):
-        raise ValueError('Use 1..1000 experiments and positive parallel, LLM call and code attempt limits')
+        raise ValueError('Use positive experiment/parallel/call/attempt limits, or None for unlimited nodes/calls')
     task_path = task_path.resolve()
     if not math.isfinite(options.final_refit_seconds) or options.final_refit_seconds < 0:
         raise ValueError('Final refit reserve must be finite and nonnegative')
@@ -393,7 +401,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
         save(directory / 'delta.json', delta)
         save(directory / 'journal.json', {'nodes': [n.model_dump(mode='json') for n in delta.nodes]})
         if research:
-            research.model_feedback = [model_feedback(row) for row in delta.nodes[-8:]]
+            feedback_ids = {delta.best_node_id, *(row.node_id for row in delta.nodes[-2:])}
+            research.model_feedback = [model_feedback(row) for row in delta.nodes if row.node_id in feedback_ids]
         for row in delta.nodes:
             save(directory / 'nodes' / row.node_id / 'delta.json', row)
 
@@ -459,6 +468,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
         context['executed_assembly'] = json.loads(manifest.read_text(encoding='utf-8')) if manifest.exists() else None
         context['automl_diagnostics'] = [json.loads(path.read_text(encoding='utf-8'))
                                         for path in sorted(node.glob('*_full_diagnostics.json'))]
+        from .model_evidence import comparison_facts
+        context['comparison_facts'] = comparison_facts(directory, row.parent_id)
         context['tool_configurations'] = {p.stem: json.loads(p.read_text(encoding='utf-8'))
                                           for p in sorted((node / 'modules').glob('*.json'))}
         context['repair_attempts'] = []
@@ -523,8 +534,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
         if eda_budget is None and not options.research_unlimited:
             eda_budget = options.time_budget * options.eda_fraction
         eda_deadline = deadline if eda_budget is None else min(deadline, time.monotonic() + eda_budget)
-        if (options.research_parallel and options.max_experiments > 1 and
-                eda_budget != 0 and (options.research_unlimited or options.max_research_nodes)):
+        if (options.research_parallel and options.experiment_limit > 1 and
+                eda_budget != 0 and (options.research_unlimited or options.research_limit)):
             shared['preparation'] = preparation_view(preparation)
             save(directory / 'research' / 'structure_preparation.json', preparation)
             atomic_bytes(directory / 'research' / 'structure_prepare.py', (directory / 'prepare.py').read_bytes())

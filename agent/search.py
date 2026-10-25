@@ -3,6 +3,7 @@
 import asyncio
 from collections import Counter, deque
 import json
+import math
 import time
 import traceback
 
@@ -52,28 +53,47 @@ class Search:
         problem = requirements.get('problem', {})
         task = str(problem.get('task_type') or '').lower()
         metric = str(preparation['metric'].get('name') or '').lower().replace('-', '_').replace(' ', '_')
-        if (len(preparation['data']['target_columns']) != 1
-                or not any(kind in task for kind in ('regression', 'classification', 'binary', 'multiclass'))
-                or any(kind in task for kind in ('multioutput', 'multilabel', 'forecast', 'rank'))
-                or metric not in {'rmse', 'root_mean_squared_error', 'mae', 'mean_absolute_error',
+        from .task_types import family
+        kind = family(task, preparation['data']['target_columns'])
+        standard_metric = metric in {'rmse', 'root_mean_squared_error', 'mae', 'mean_absolute_error',
                                   'mse', 'mean_squared_error', 'r2', 'r2_score', 'accuracy', 'accuracy_score',
-                                  'roc_auc', 'auc', 'log_loss', 'logloss', 'f1', 'f1_macro', 'macro_f1'}):
+                                  'roc_auc', 'auc', 'log_loss', 'logloss', 'f1', 'f1_macro', 'macro_f1',
+                                  'f1_micro', 'micro_f1', 'hamming_loss', 'subset_accuracy'}
+        if (not preparation['data']['target_columns'] or kind == 'clustering'
+                or not (standard_metric or kind == 'ranking' and metric.startswith(('ndcg', 'map')))):
             return
         libraries = self.shared['installed_libraries']
         engines = [engine for engine, package in (('flaml', 'flaml'), ('autogluon', 'autogluon.tabular'))
-                   if package in libraries]
-        remaining = self.options.max_experiments - self.next_node
-        for engine in engines[:remaining]:
+                   if package in libraries and (engine == 'flaml' or kind not in {'ranking', 'forecasting'})]
+        remaining = self.options.experiment_limit - self.next_node
+        for engine in engines[:min(len(engines), remaining)]:
             idea = Idea(purpose='improve', parent_id=self.leader,
                         change=f'Dedicated {engine} search using EDA and selected feature recipes',
                         change_blocks=[f'builtin_{engine}'], priority=100,
-                        expected_effect='Compare an automatically selected tabular model on the fixed outer split')
+                        expected_effect='Compare an automatically selected task-compatible model on the fixed outer split')
             record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(),
                       'status': 'queued', 'builtin_engine': engine, 'dedicated_automl': True,
                       'research_revision': self.shared.get('data_research', {}).get('revision', 0)}
             self.records.append(record)
             self.queue.append(record)
             self.used_ideas[fingerprint(idea.model_dump(exclude={'expected_effect'}))] = record['id']
+
+        # Cheap independent reference families complement the configurable AutoML trials.
+        # Qwen still chooses their features/settings; unsupported task families skip these probes.
+        if kind in {'regression', 'classification'} and self.agents.deadline - time.monotonic() > 90:
+            for name in ('ExtraTrees', 'regularized linear'):
+                if len(self.queue) >= remaining:
+                    break
+                idea = Idea(purpose='improve', parent_id=self.leader,
+                    change=f'Test a cheap {name} reference model with suitable preprocessing and promising EDA features; '
+                           'keep the outer split fixed. Use no large hyperparameter search.',
+                    change_blocks=['features', 'preprocess', 'fit', 'predict'], priority=90,
+                    expected_effect='Measure a complementary family; keep it only if its validation evidence is useful')
+                record = {'id': f'idea_{len(self.records):03d}', 'idea': idea.model_dump(),
+                          'status': 'queued', 'reference_family': name,
+                          'research_revision': self.shared.get('data_research', {}).get('revision', 0)}
+                self.records.append(record)
+                self.queue.append(record)
 
         self.save()
 
@@ -201,7 +221,8 @@ class Search:
 
         # A new leader invalidates queued improvements, but never interrupts work already started.
         for record in list(self.queue):
-            stale_parent = (not record.get('builtin_engine') and record['idea']['purpose'] == 'improve'
+            stale_parent = (not record.get('builtin_engine') and not record.get('reference_family')
+                            and record['idea']['purpose'] == 'improve'
                             and record['idea']['parent_id'] != self.leader)
             if stale_parent:
                 record['status'] = 'superseded'
@@ -215,14 +236,14 @@ class Search:
         occupied = [start.purpose for start in running] + [record['idea']['purpose'] for record in self.planners.values()]
         caps = self.slot_limits()
         while (self.queue and len(occupied) < self.parallel_limit
-               and self.next_node < self.options.max_experiments and self.agents.remaining_calls >= 2):
+               and self.next_node < self.options.experiment_limit and self.agents.remaining_calls >= 2):
             record = max((record for record in self.queue
                 if record['idea']['purpose'] == 'baseline'
                 or occupied.count(record['idea']['purpose']) < caps[record['idea']['purpose']]),
                 key=lambda row: (row.get('dedicated_automl', False), row['idea'].get('priority', 50)), default=None)
             if record is None:
                 break
-            if record.get('dedicated_automl'):
+            if record.get('dedicated_automl') or record.get('reference_family'):
                 record['idea']['parent_id'] = self.leader
             idea = Idea.model_validate(record['idea'])
             blocks = max(1, len(idea.change_blocks))
@@ -298,7 +319,7 @@ class Search:
         if self.agents.free_calls < self.estimate_calls(1) + 1:
             self.stop_reason = 'llm_limit'
             return
-        remaining = self.options.max_experiments - self.next_node
+        remaining = self.options.experiment_limit - self.next_node
         if remaining <= 0:
             return
         if not self.parents and (self.next_node or self.queue):
@@ -315,33 +336,44 @@ class Search:
         cards = [{'node_id': row.node_id, 'parent_id': getattr(row, 'parent_id', None),
                   **idea_history_view(row)} for row in self.rows]
         direction = self.shared.get('preparation', {}).get('metric', {}).get('direction')
-        selected = select_experiments(cards, self.leader, direction)
-        fields = {'best_estimator', 'best_model', 'best_config', 'best_parameters', 'inner_score',
-                  'inner_best_loss', 'inner_validation', 'requested_trials', 'completed_trials', 'estimator',
-                  'selected_columns', 'input_feature_count', 'output_feature_count', 'unused_created_features',
-                  'method', 'source_nodes', 'oof_rows', 'fit_rows', 'folds', 'meta_training_scope',
-                  'gate_loss', 'passthrough', 'feature_columns'}
+        selected = select_experiments(cards, self.leader, direction, limit=6)
+        baseline = next((row.get('result', {}).get('value') for row in cards if row['node_id'] == 'node_000'), None)
+        result = []
         for item in selected:
-            manifest = self.directory / 'nodes' / item['node_id'] / 'assembly.json'
-            if manifest.exists():
-                blocks = json.loads(manifest.read_text(encoding='utf-8'))['blocks']
-                if all(block.get('operation') is not None for block in blocks):
-                    item['saved_operations'] = [{'name': block['name'], 'operation': operation_view(block['operation'])}
-                                                for block in blocks]
-                    model = item['hypothesis']['pipeline']['model']
-                    # Configuration appears once in saved_operations; measured tuning stays in execution_facts.
-                    item['hypothesis']['pipeline'] = {'model': {key: model[key] for key in ('name', 'engine') if key in model}}
-            if item.get('analysis') and item['node_id'] not in {self.leader, *(row['node_id'] for row in cards[-2:])}:
-                item['analysis'] = {key: value for key, value in item['analysis'].items() if key != 'next_ideas'}
-            item['execution_facts'] = []
-            for path in sorted((self.directory / 'nodes' / item['node_id']).glob('*_full_diagnostics.json')):
-                facts = json.loads(path.read_text(encoding='utf-8'))
-                item['execution_facts'].append({key: value for key, value in facts.items() if key in fields})
-        return [compact(item) for item in selected], experiment_index(cards)
+            node = self.directory / 'nodes' / item['node_id']
+            facts = [json.loads(path.read_text(encoding='utf-8')) for path in node.glob('*_full_diagnostics.json')]
+            manifest = node / 'assembly.json'
+            blocks = json.loads(manifest.read_text(encoding='utf-8'))['blocks'] if manifest.exists() else []
+            recipes = []
+            for block in blocks:
+                call = block.get('operation') or {}
+                settings = call.get('parameters', {})
+                recipes.extend(settings.get('recipes', settings.get('features', [])))
+            score = item['result'].get('value')
+            model = next((f.get('native_estimator') or f.get('best_estimator') or f.get('best_model')
+                          for f in facts if f.get('native_estimator') or f.get('best_estimator') or f.get('best_model')),
+                         item['hypothesis']['pipeline']['model'].get('name'))
+            card = {'node_id': item['node_id'], 'parent_id': item['parent_id'], 'model': model,
+                    'status': item['result']['status'], 'val_score': score,
+                    'delta_from_baseline': (baseline - score if direction == 'minimize' else score - baseline)
+                        if score is not None and baseline is not None else None,
+                    'key_features': [recipe['name'] for recipe in recipes],
+                    'seconds': item['result'].get('duration_seconds'), 'error': item['result'].get('error')}
+            if item.get('analysis'):
+                card['analysis'] = {'summary': item['analysis'].get('summary')}
+            if item['node_id'] == self.leader:
+                card['feature_recipes'] = recipes
+                card['model_facts'] = [{key: f[key] for key in ('native_estimator', 'native_parameters',
+                    'best_estimator', 'best_config', 'inner_best_loss', 'inner_validation', 'selected_model_count')
+                    if key in f} for f in facts if f.get('best_estimator') or f.get('native_estimator')]
+            result.append(compact(card))
+        # The full journal remains local for duplicate detection. Prompt size is bounded.
+        index = select_experiments(cards, self.leader, direction, limit=16)
+        return result, experiment_index(index)
 
     def baker_context(self):
         from .predictions import prediction_catalog
-        remaining = self.options.max_experiments - self.next_node
+        remaining = self.options.experiment_limit - self.next_node
         problem = self.shared.get('requirements', {}).get('problem', {})
         prediction_sources = prediction_catalog(self.directory, self.rows, self.leader, self.prediction_cache,
             {**problem, **self.shared.get('requirements', {}).get('output', {})},
@@ -357,7 +389,8 @@ class Search:
                 [purpose for purpose, cap in self.caps.items() if cap],
             'max_new_ideas': min(1 if self.next_node == 0 else 3, remaining,
                                  max(0, self.parallel_limit - sum(self.occupied.values()) - len(self.queue))),
-            'queue_capacity': min(self.parallel_limit, remaining), 'remaining_experiments': remaining,
+            'queue_capacity': min(self.parallel_limit, remaining),
+            'remaining_experiments': None if math.isinf(remaining) else remaining,
             'slot_limits': self.slot_limits(), 'occupied_slots': self.occupied,
             'api_budget': self.agents.budget_view(),
             'automl_portfolio': [{'engine': record['builtin_engine'], 'status': record['status'],
@@ -384,7 +417,7 @@ class Search:
         self.baker_candidates = context.get('data_research', {}).get('feature_candidates', [])
         self.baker_feedback = (context['feedback_revision']['experiments'], self.baker_research_revision)
         save(self.directory / 'planning' / f'batch_{self.round:03d}' / 'request.json', context)
-        if context['remaining_experiments'] <= 0:
+        if context['remaining_experiments'] is not None and context['remaining_experiments'] <= 0:
             return Ideas()
         if self.failures:
             context['planning_error'] = self.last_planning_error
@@ -422,7 +455,7 @@ class Search:
                 save(self.directory / 'feature_decisions.json', self.feature_decisions)
                 accepted = 0
                 for idea in response.ideas:
-                    if len(self.queue) >= min(self.parallel_limit, self.options.max_experiments - self.next_node):
+                    if len(self.queue) >= min(self.parallel_limit, self.options.experiment_limit - self.next_node):
                         self.agents.log('idea_capacity_reached')
                         break
                     identity = idea.model_dump(exclude={'expected_effect', 'priority', 'research_ids'})

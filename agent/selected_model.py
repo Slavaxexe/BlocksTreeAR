@@ -83,19 +83,23 @@ def refit_saved(state, plan, filename, defaults):
     from .operations import _classification, _prediction, _requires_probabilities
     from .predictions import attach_probabilities
     from .supervised_features import row_weights
+    frozen = cloudpickle.loads(Path(filename).read_bytes())
+    if callable(getattr(frozen, 'refit_tables', None)):
+        _, result = frozen.refit_tables(state, plan, defaults)
+        return result
     preparation = state['preparation']
     targets, ids = preparation['data']['target_columns'], preparation['data'].get('id_columns', [])
+    feature_targets = preparation.get('all_target_columns', targets)
     inherited = state['fit'].attrs.get('feature_recipes', [])
     recipes = [*inherited, *(feature.model_dump() for feature in plan.features)]
     created = [recipe['name'] for recipe in inherited]
     raw = [state[scope].drop(columns=created) for scope in ('fit', 'test')]
-    fit, query = create_features(raw, recipes, forbidden=targets, policy=preparation.get('validation', {}))
-    columns = plan.columns or [column for column in fit if column not in set(targets + ids)]
+    fit, query = create_features(raw, recipes, forbidden=feature_targets, policy=preparation.get('validation', {}))
+    columns = plan.columns or [column for column in fit if column not in set(feature_targets + ids)]
     columns = list(dict.fromkeys([*columns, *(feature.name for feature in plan.features)]))
     columns = [column for column in columns if column not in plan.drop_columns]
-    x, query, _ = _features(fit[columns], query[columns], query[columns], targets, ids)
+    x, query, _ = _features(fit[columns], query[columns], query[columns], feature_targets, ids)
     weights = row_weights(raw[0], plan.row_weights.model_dump()) if plan.row_weights else None
-    frozen = cloudpickle.loads(Path(filename).read_bytes())
     model = frozen.refit(x, fit[targets[0]], preparation['runtime'], weights)
     probability = _classification(state, defaults) and _requires_probabilities(state, defaults)
     values = model.predict_proba(query) if probability else model.predict(query)

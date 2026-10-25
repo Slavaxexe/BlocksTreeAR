@@ -125,6 +125,11 @@ class AutoMLPlan(Plan):
     drop_columns: list[str] = Field(default_factory=list)
     features: list[FeatureSpec] = Field(default_factory=list)
     row_weights: RowWeights | None = None
+    target_metrics: dict[str, str] = Field(default_factory=dict, description='Optional per-target AutoML selection metrics; the joint outer metric stays fixed')
+    time_column: str | None = None
+    series_columns: list[str] = Field(default_factory=list)
+    horizon: int | None = Field(default=None, ge=1, description='FLAML native forecast horizon in observations; defaults to the largest query horizon')
+    frequency: str | None = Field(default=None, description='Forecast calendar frequency, e.g. D/MS/h. Integer period codes use this frequency (D by default) on a synthetic calendar')
 
     @model_validator(mode='before')
     @classmethod
@@ -186,7 +191,7 @@ class EnsemblePlan(Plan):
     def compatible_sources(self):
         import re
         if len(set(self.source_nodes)) != len(self.source_nodes) or any(
-                not re.fullmatch(r'node_[0-9]{3}', node) for node in self.source_nodes):
+                not re.fullmatch(r'node_[0-9]{3,}', node) for node in self.source_nodes):
             raise ValueError('Select distinct saved node IDs')
         for weights in [self.weights, *(rule.weights for rule in self.rules)]:
             if weights and (len(weights) != len(self.source_nodes) or min(weights) < 0 or sum(weights) <= 0):
@@ -201,7 +206,7 @@ class EnsemblePlan(Plan):
 
 
 class ToolCall(Plan):
-    kind: Literal['constant', 'features', 'preprocess', 'fit', 'predict', 'automl', 'ensemble', 'saved_ensemble']
+    kind: Literal['constant', 'features', 'preprocess', 'fit', 'predict', 'automl', 'ensemble', 'saved_ensemble', 'forecast']
     parameters: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, str] = Field(default_factory=dict, description='Map canonical operation inputs to saved state keys')
     outputs: dict[str, str] = Field(default_factory=dict, description='Map canonical outputs to custom state keys')
@@ -239,7 +244,8 @@ class ToolCall(Plan):
         fields = {
             'constant': set(), 'features': {'recipes'},
             'preprocess': {'feature_columns', 'drop_columns', 'numeric_imputer', 'encoding', 'native_backend', 'scaling', 'pca_components'},
-            'fit': {'estimator', 'parameters', 'search_space', 'num_trials', 'validation', 'group_by', 'split_column', 'row_weights', 'seeds'},
+            'fit': {'estimator', 'parameters', 'search_space', 'num_trials', 'validation', 'group_by', 'split_column', 'row_weights', 'seeds', 'query_columns', 'source_node'},
+            'forecast': {'estimator', 'parameters', 'time_column', 'series_columns', 'lags', 'rolling_windows', 'feature_columns'},
             'predict': {'output'}, 'ensemble': {'sources', 'weights', 'method'},
         }
         if self.kind == 'automl':
@@ -251,11 +257,20 @@ class ToolCall(Plan):
             if unknown:
                 raise ValueError(f'Unknown {self.kind} settings: {sorted(unknown)}')
         if self.kind == 'fit':
+            if self.parameters.get('source_node') is not None:
+                import re
+                if not re.fullmatch(r'node_[0-9]{3,}', str(self.parameters['source_node'])):
+                    raise ValueError('source_node must name a completed node')
             if self.parameters.get('row_weights') is not None:
                 RowWeights.model_validate(self.parameters['row_weights'])
             seeds = self.parameters.get('seeds', [])
             if not isinstance(seeds, list) or any(type(seed) is not int for seed in seeds):
                 raise ValueError('seeds must be a list of integers')
+        if self.kind == 'forecast':
+            for key in ('lags', 'rolling_windows'):
+                values = self.parameters.get(key, [1] if key == 'lags' else [])
+                if not isinstance(values, list) or any(type(value) is not int or value < 1 for value in values):
+                    raise ValueError(f'{key} must contain positive observation counts')
         block = (info.context or {}).get('block')
         if block is not None:
             original = block.get('operation')
@@ -281,7 +296,8 @@ class ToolCall(Plan):
 class AnalysisRequest(Plan):
     name: str = Field(pattern=r'^[a-z][a-z0-9_]{0,63}$')
     kind: Literal['quality', 'association', 'correlation', 'shift', 'groups', 'redundancy',
-                  'missingness', 'interactions', 'predictive', 'permutation', 'ablation', 'feature', 'stability', 'entities']
+                  'missingness', 'interactions', 'predictive', 'permutation', 'ablation', 'feature', 'stability', 'entities',
+                  'targets', 'queries', 'series', 'clusters', 'task_predictive']
     columns: list[str] = Field(default_factory=list, description='Raw model inputs for predictive/feature/permutation/interactions. For ablation ONLY the final input columns to remove, not the retained columns.')
     target: str | None = None
     dataset: Literal['fit', 'validation', 'test'] = Field(default='fit', description='Actual table for descriptive analyses; supervised analyses use fit only')
@@ -299,14 +315,20 @@ class AnalysisRequest(Plan):
     validation_fraction: float = Field(default=0.25, gt=0, lt=1)
     split_column: str | None = None
     key_candidates: list[list[str]] = Field(default_factory=list, description='For entities: proposed single/composite keys; [] uses columns as one key. No target access required.')
+    query_columns: list[str] = Field(default_factory=list)
+    series_columns: list[str] = Field(default_factory=list)
+    lags: list[int] = Field(default_factory=lambda: [1], description='Positive observation lags for series analysis')
+    n_clusters: int = Field(default=3, ge=2, description='Number of clusters in the exploratory fit-only proxy')
     filters: list[RowFilter] = Field(default_factory=list)
     comparison_filters: list[RowFilter] = Field(default_factory=list)
 
     @model_validator(mode='after')
     def executable_comparison(self):
+        if any(lag < 1 for lag in self.lags):
+            raise ValueError('lags must contain positive observation counts')
         if self.kind == 'groups' and not self.group_by:
             raise ValueError('groups requires an explicit group_by column')
-        model_kinds = {'predictive', 'permutation', 'interactions', 'ablation', 'feature'}
+        model_kinds = {'predictive', 'permutation', 'interactions', 'ablation', 'feature', 'task_predictive'}
         if (self.features or self.baseline_features) and self.kind not in model_kinds:
             raise ValueError('Feature recipes require a model-based analysis kind')
         for recipes in (self.features, self.baseline_features):

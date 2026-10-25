@@ -8,7 +8,7 @@ import traceback
 
 from .agents import JSONAgents
 from .contracts import ResearchPlan, ResearchReview
-from .context import (compact, research_history, research_memory_view, research_profile_view, select_research,
+from .context import (compact, research_history, research_memory_view, research_profile_view, select_research, research_columns,
                       table, task_context)
 from .data import file_hash
 from .storage import fingerprint, save
@@ -80,9 +80,9 @@ class Research:
 
     def fill(self, phase='fit', limit=None):
         unlimited = self.options.research_unlimited
-        cap = limit if limit is not None else (float('inf') if unlimited else self.options.max_research_nodes)
+        cap = limit if limit is not None else (math.inf if unlimited else self.options.research_limit)
         if not unlimited:
-            cap = min(cap, self.options.max_research_nodes)
+            cap = min(cap, self.options.research_limit)
         while (not self.stop_reason and len(self.active) < self.options.research_parallel
                and len(self.nodes) < cap and (unlimited or self.failures < 3)):
             spent = sum(client.requests for client in self.clients.values())
@@ -113,7 +113,7 @@ class Research:
             self.nodes.append(row)
             task = asyncio.create_task(self.investigate(row, client))
             self.active[task] = row
-        if not unlimited and len(self.nodes) >= self.options.max_research_nodes and not self.active:
+        if not unlimited and len(self.nodes) >= self.options.research_limit and not self.active:
             self.stop_reason = 'node_limit'
         elif not unlimited and self.failures >= 3:
             self.stop_reason = 'repeated_failures'
@@ -150,12 +150,16 @@ class Research:
         started = time.monotonic()
         node = self.directory / 'research' / 'nodes' / row['node_id']
         node.mkdir(parents=True, exist_ok=True)
+        profile = json.loads((self.directory / 'research' / 'profile.json').read_text(encoding='utf-8'))
+        memory = research_memory_view(select_research(self.view(), [row['focus'], self.model_feedback], limit=5))
+        columns = research_columns(profile, row['direction'], [row['focus'], memory.get('open_questions', [])],
+                                   offset=len(self.nodes) * 5)
         context = {**task_context(self.shared, profile=False), 'phase': row['phase'], 'node_id': row['node_id'],
                    'model_feedback': self.model_feedback,
-                   'data_research': research_memory_view(select_research(self.view(), [row['focus'], self.model_feedback])),
-                   'profile': research_profile_view(json.loads((self.directory / 'research' / 'profile.json').read_text(encoding='utf-8')), detailed=False),
+                   'data_research': memory,
+                   'profile': research_profile_view(profile, detailed=False, focus_columns=columns),
                    'analysis_catalog': {key: value for key, value in CATALOG.items()
-                       if row['phase'] == 'fit' or key in {'quality', 'correlation', 'shift', 'groups', 'redundancy', 'entities'}},
+                       if row['phase'] == 'fit' or key in {'quality', 'correlation', 'shift', 'groups', 'redundancy', 'entities', 'queries', 'series', 'clusters'}},
                    'history': research_history([item for item in self.nodes if item is not row]),
                    'target_access': {'fit': row['phase'] == 'fit', 'validation': False, 'test': False},
                    'search': {'direction': row['direction'], 'mode': row['mode'],

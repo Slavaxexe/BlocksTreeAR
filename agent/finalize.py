@@ -22,6 +22,8 @@ def clone_estimator(model):
     """Freeze selected configurations, preserving estimator-owned preprocessing."""
     from sklearn.base import clone
     from sklearn.ensemble import StackingClassifier, StackingRegressor
+    if type(model).__module__.startswith('flaml.automl.time_series'):
+        return clone(model)
     if isinstance(model, (StackingClassifier, StackingRegressor)):
         result = clone(model)
         result.set_params(estimators=[(name, clone_estimator(fitted))
@@ -60,6 +62,7 @@ class FinalRefit:
         self.metadata = preparation_view(self.preparation)
         self.metadata['runtime'] = {'deadline': self.deadline, 'time_budget_seconds': seconds,
             'run_directory': str(root / 'final'), 'preparation_sha256': file_hash(root / 'preparation.json'),
+            'source_run_directory': str(root),
             'is_final_refit': True, 'is_smoke_check': False, 'num_cpus': 1, 'num_gpus': 0,
             'meta_rows': 0, 'fit_row_positions': np.arange(len(self.train))}
 
@@ -93,6 +96,11 @@ class FinalRefit:
                 state.update({call.outputs.get(key, key): value for key, value in result.items()})
             elif call.kind == 'automl':
                 facts = json.loads((source / f"{params['engine']}_full_diagnostics.json").read_text(encoding='utf-8'))
+                if facts.get('task_family') == 'multi_target':
+                    mapped = {**state, **{key: state[value] for key, value in call.inputs.items()}}
+                    result = self.multi_target(AutoMLPlan.model_validate(params), facts, mapped)
+                    state.update({call.outputs.get(key, key): value for key, value in result.items()})
+                    continue
                 if facts.get('selected_model_file'):
                     from .selected_model import refit_saved
                     mapped = {**state, **{key: state[value] for key, value in call.inputs.items()}}
@@ -112,33 +120,59 @@ class FinalRefit:
         self.memo[node_id] = result
         return result
 
-    def flaml(self, plan, facts, state):
+    def multi_target(self, plan, facts, state):
+        from .automl_tasks import head_state, join_heads, constant_head
+        from .selected_model import refit_saved
+        from .automl import _remaining
+        results = []
+        for index, entry in enumerate(facts['targets']):
+            child, defaults = head_state(state, entry['target'], self.defaults, entry['selection_metric'])
+            runtime = state['preparation']['runtime']
+            directory = Path(runtime['work_directory']) / f'target_{index:03d}'
+            directory.mkdir(parents=True, exist_ok=True)
+            child['preparation']['runtime'] = {**runtime, 'work_directory': str(directory),
+                'deadline': time.monotonic() + _remaining(runtime) / (len(facts['targets']) - index)}
+            detail = entry['diagnostics']
+            if detail.get('constant'):
+                result = constant_head(child, defaults)
+            elif detail.get('selected_model_file'):
+                result = refit_saved(child, plan, detail['selected_model_file'], defaults)
+            elif plan.engine == 'autogluon':
+                result = self.autogluon(plan, detail, child, defaults)
+            else:
+                result = self.flaml(plan, detail, child, defaults)
+            results.append(result)
+        return join_heads(results, state, self.defaults)
+
+    def flaml(self, plan, facts, state, defaults=None):
         from sklearn.base import clone
         from .automl import _features
         from .operations import _classification, _prediction, _requires_probabilities
+        defaults = defaults or self.defaults
         snapshot = cloudpickle.loads(Path(facts['model_file']).read_bytes())
         core = clone_estimator(snapshot['model'])
-        targets = self.preparation.data.target_columns
-        ids = self.preparation.data.id_columns
+        targets = state['preparation']['data']['target_columns']
+        ids = state['preparation']['data'].get('id_columns', [])
+        feature_targets = state['preparation'].get('all_target_columns', targets)
         fit, query, _ = create_features([state['fit'], state['test'], state['test']],
-                                        plan.features, forbidden=targets)
-        columns = plan.columns or [column for column in fit if column not in set(targets + ids)]
+                                        plan.features, forbidden=feature_targets)
+        columns = plan.columns or [column for column in fit if column not in set(feature_targets + ids)]
         columns = list(dict.fromkeys([*columns, *(feature.name for feature in plan.features)]))
         columns = [column for column in columns if column not in plan.drop_columns]
-        fit, query, _ = _features(fit[columns], query[columns], query[columns], targets, ids)
+        fit, query, _ = _features(fit[columns], query[columns], query[columns], feature_targets, ids)
         transformer = snapshot['feature_transformer']
         fit, query = transformer.transform(fit), transformer.transform(query)
         labels = clone(snapshot['label_transformer']) if snapshot['label_transformer'] is not None else None
         target = state['fit'][targets[0]].to_numpy()
         encoded = labels.fit_transform(target) if labels is not None else target
         core.fit(fit, encoded)
-        classification = _classification(state, self.defaults)
-        probability = classification and _requires_probabilities(state, self.defaults)
+        classification = _classification(state, defaults)
+        probability = classification and _requires_probabilities(state, defaults)
         values = core.predict_proba(query) if probability else core.predict(query)
         if labels is not None and not probability:
             values = labels.inverse_transform(np.asarray(values, dtype=int))
         classes = labels.classes_ if labels is not None else getattr(core, 'classes_', None)
-        frame = _prediction(values, state, self.defaults, labels=classes, probabilities=probability)
+        frame = _prediction(values, state, defaults, labels=classes, probabilities=probability)
         if classification and callable(getattr(core, 'predict_proba', None)):
             attach_probabilities(frame, core.predict_proba(query), classes)
         destination = Path(state['preparation']['runtime']['work_directory']) / 'model.pkl'
@@ -147,40 +181,44 @@ class FinalRefit:
         save(destination.with_suffix('.json'), {'training_rows': len(target), 'search': False})
         return {'validation_predictions': frame.copy(), 'test_predictions': frame}
 
-    def autogluon(self, plan, facts, state):
+    def autogluon(self, plan, facts, state, defaults=None):
         from autogluon.tabular import TabularPredictor
         from .automl import _features
         from .operations import _prediction, _requires_probabilities, _classification
+        defaults = defaults or self.defaults
         model_directory = Path(facts['model_directory'])
         with np.load(model_directory.parent / 'training_rows.npz', allow_pickle=False) as saved:
             rows = saved['rows']
         inherited = state['fit'].attrs.get('feature_recipes', [])
         recipes = [*inherited, *(feature.model_dump() for feature in plan.features)]
-        base, full, query = create_features([self.train.iloc[rows], self.train, self.test], recipes,
-                                            forbidden=self.preparation.data.target_columns)
-        excluded = set(self.preparation.data.target_columns + self.preparation.data.id_columns)
+        targets = state['preparation']['data']['target_columns']
+        ids = state['preparation']['data'].get('id_columns', [])
+        feature_targets = state['preparation'].get('all_target_columns', targets)
+        train, test = state['fit'], state['test']
+        base, full, query = create_features([train.iloc[rows], train, test], recipes, forbidden=feature_targets)
+        excluded = set(feature_targets + ids)
         columns = plan.columns or [column for column in full if column not in excluded]
         columns = list(dict.fromkeys([*columns, *(feature.name for feature in plan.features)]))
         columns = [column for column in columns if column not in plan.drop_columns]
         _, full, query = _features(base[columns], full[columns], query[columns],
-                                   self.preparation.data.target_columns, self.preparation.data.id_columns)
+                                   feature_targets, ids)
         predictor = TabularPredictor.load(str(model_directory), verbosity=0)
-        extra_rows = np.setdiff1d(np.arange(len(self.train)), rows)
+        extra_rows = np.setdiff1d(np.arange(len(train)), rows)
         extra = full.iloc[extra_rows].copy()
-        extra[predictor.label] = self.train.iloc[extra_rows][self.preparation.data.target_columns[0]].to_numpy()
+        extra[predictor.label] = train.iloc[extra_rows][targets[0]].to_numpy()
         extra.index = np.arange(len(rows), len(rows) + len(extra))
         # Native refit reuses the selected models and frozen hyperparameters, without a new AutoML search.
         mapping = predictor.refit_full(model=facts['best_model'], set_best_to_refit_full=False,
             train_data_extra=extra, num_cpus=1, num_gpus=0, fit_strategy='sequential')
         model_name = mapping[facts['best_model']]
-        probability = _requires_probabilities(state, self.defaults)
-        if _classification(state, self.defaults):
+        probability = _requires_probabilities(state, defaults)
+        if _classification(state, defaults):
             probabilities = predictor.predict_proba(query, model=model_name)
             values = probabilities.to_numpy() if probability else predictor.predict(query, model=model_name).to_numpy()
-            frame = _prediction(values, state, self.defaults, labels=list(probabilities.columns), probabilities=probability)
+            frame = _prediction(values, state, defaults, labels=list(probabilities.columns), probabilities=probability)
             attach_probabilities(frame, probabilities.to_numpy(), list(probabilities.columns))
         else:
-            frame = _prediction(predictor.predict(query, model=model_name).to_numpy(), state, self.defaults)
+            frame = _prediction(predictor.predict(query, model=model_name).to_numpy(), state, defaults)
         save(Path(state['preparation']['runtime']['work_directory']) / 'autogluon_refit.json',
              {'model_directory': str(model_directory), 'model': model_name, 'rows': len(self.train)})
         return {'validation_predictions': frame.copy(), 'test_predictions': frame}

@@ -43,6 +43,11 @@
           "default": null,
           "title": "Definition"
         },
+        "parameters": {
+          "description": "Explicit metric semantics: top_k, gain=linear/exponential for NDCG, average for classification, rmse_aggregation=global/mean_target_rmse",
+          "title": "Parameters",
+          "type": "object"
+        },
         "status": {
           "default": "needs_implementation",
           "enum": [
@@ -67,7 +72,7 @@
     },
     "node_id": {
       "default": "node_000",
-      "pattern": "^node_[0-9]{3}$",
+      "pattern": "^node_[0-9]{3,}$",
       "title": "Node Id",
       "type": "string"
     },

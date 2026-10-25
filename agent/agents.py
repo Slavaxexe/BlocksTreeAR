@@ -73,6 +73,7 @@ MODULAR_RULES = (
     "a separate prediction block consumes it and produces validation/test predictions without fitting. "
     "Keep independently useful feature preparation or resampling in a reusable block. "
     "The automl operation owns preprocessing, fitting, tuning and prediction in one supported block. "
+    "The forecast operation similarly owns sequential lag construction, fitting and recursive prediction. "
     "For other models use separate preprocess, fit and predict operations. Explain coupled stages "
     "in pipeline.training; convenience alone is not a reason to hide a whole pipeline in predict. "
     "Create only useful boundaries, not aliases, pass-through blocks or one block per trivial operation. "
@@ -374,7 +375,9 @@ class JSONAgents:
                     if reference_key is not None:
                         self.root.reference_rounds[reference_key] = (
                             self.root.reference_rounds.get(reference_key, 0) + 1)
-                    messages.append(message.model_dump(exclude_none=True))
+                    # Provider-specific reasoning is not needed to execute a reference call.
+                    messages.append({'role': 'assistant', 'content': content or '',
+                                     'tool_calls': [call.model_dump() for call in tool_calls]})
                     results = []
                     for index, call in enumerate(tool_calls):
                         if index < MAX_REFERENCE_CALLS:
@@ -453,8 +456,14 @@ class JSONAgents:
                         "from the original task above. Keep reasoning brief and values concise; use the "
                         "shortest sufficient exact quotes for evidence. Return the schema object only.")})
                 else:
-                    messages += [{"role": "assistant", "content": content},
-                                 {"role": "user", "content": "Correct this JSON. Validation errors: " + json.dumps(details)}]
+                    # Retain one failed draft, not every old draft/tool transcript.
+                    messages = [{'role': 'system', 'content': final_system},
+                                {'role': 'user', 'content': prompt}]
+                    if reference_results:
+                        messages.append({'role': 'user', 'content': 'Previously found API facts:\n' +
+                            json.dumps(reference_results, ensure_ascii=False, separators=(',', ':'))})
+                    messages += [{'role': 'assistant', 'content': content},
+                                 {'role': 'user', 'content': 'Correct this JSON. Validation errors: ' + json.dumps(details)}]
             else:
                 self.calls.append(LLMCall(status="completed", **stats))
                 self.log('api_completed', request_id=request_id, duration_seconds=time.monotonic() - started, **stats)
@@ -537,6 +546,22 @@ class JSONAgents:
             "config is the entire preparation object; files are in config['data']['files'] relative to task_directory. "
             "Resolve input paths as task_directory / relative_path, never from the process working directory. "
             "Put target/id column lists in data; actual output filename/format/columns in output. "
+            "Recognize multiple numeric/categorical targets, multilabel indicators, ranking, clustering and forecasting. "
+            "For ranking record data.query_columns (query identity, not document ID); keep complete queries on each "
+            "side of a group split. For forecasting record data.time_column and data.series_columns (empty for one series); "
+            "choose an ordered holdout matching the prediction horizon. For unsupervised clustering target_columns "
+            "may be empty; select a metric appropriate to the stated objective, never invent labels. "
+            "Multiple targets stay as separate columns. Multilabel uses one binary indicator per label; when the source "
+            "uses label lists, load_data must expand the stated vocabulary and write_submission must restore its format. "
+            "Internal prediction DataFrames contain target values, class-probability columns, ranking scores or cluster IDs. "
+            "Extra output metadata/renamed columns belong to write_submission. For multi-output class probabilities "
+            "set output.class_columns as target -> class label -> literal output column; binary multilabel probabilities "
+            "can use target column names directly. Both AutoML adapters support multiple tabular targets and multilabel. "
+            "FLAML additionally supports native grouped ranking and native series forecasts, using these data bindings. "
+            "AutoGluon Tabular does not provide ranking/forecasting/clustering; clustering uses the ready fit operation. "
+            "Record explicit primary-metric semantics in metric.parameters where needed: NDCG top_k and "
+            "gain=linear/exponential, classification average, multi-target rmse_aggregation=global/mean_target_rmse. "
+            "These choices must follow the task definition; a familiar metric name does not override its formula. "
             "Use arbitrary metric.name; mark metric ready only when its definition can be implemented. "
             "Do not put row counts or measured profiles in your JSON; Python will compute them. "
             "No data printing, filesystem changes or top-level file reads in generated code. "
@@ -550,7 +575,7 @@ class JSONAgents:
         from .operations import CATALOG
         from .automl_catalog import CAPABILITIES
         research = research_memory_view(select_research(context.get('data_research', {}),
-                                   [context.get('experiments', []), context.get('queued_ideas', [])]))
+                                   [context.get('experiments', []), context.get('queued_ideas', [])], limit=5))
         fields = ('purposes', 'max_new_ideas', 'queue_capacity', 'remaining_experiments',
                   'slot_limits', 'occupied_slots', 'api_budget', 'automl_portfolio',
                   'queued_ideas', 'leader_id', 'available_parents', 'experiments', 'experiment_index',
@@ -569,11 +594,11 @@ class JSONAgents:
             "zero is valid. Updates may prioritize (0..100) or remove only queued IDs with a reason. "
             "Respect purposes, available_parents, slot limits and remaining time/API budget. Improve extends "
             "leader_id; explore may use another available parent. Prefer a useful queued idea over a duplicate. "
-            "experiments holds selected detailed records: leader, diverse strong candidates, recent results, "
-            "failures and ancestry. experiment_index keeps every node's model, result and duration. "
+            "experiments holds short measured cards: leader, diverse strong candidates, recent results, "
+            "failures and ancestry. Only the leader includes recipes/native settings. experiment_index is a bounded shortlist. "
             "Exact repeat detection still uses the full local journal; you have no archive or reference tool. "
             "Compact tables have columns and rows. Empty metadata/default settings may be omitted. "
-            "Learn from measured results and actual execution_facts; pipeline text is a plan. Do not invent "
+            "Learn from val_score and actual model_facts; hypothesis text is a plan. Do not invent "
             "causes or treat one holdout as proof. Cite only relevant supplied research_ids; interpretations "
             "are unverified, proxy improvements are not outer-validation gains. "
             "For each untested data_research.feature_candidates entry, either select its id in an idea.feature_candidate_ids "
@@ -583,6 +608,9 @@ class JSONAgents:
             "settings fixed. Pending/tested recipes need no duplicate trial without a new concrete reason. "
             "State one coherent change, affected/new block names, concrete settings and expected effect. "
             "Keep the change about the new action, without copying parent configuration or dataset statistics. "
+            "Compare diverse model families when evidence/time permit: boosting, ExtraTrees and a regularized linear model. "
+            "Diversity is a hypothesis, not a guarantee of ensemble gain. Distribution shift alone does not justify dropping features; use matched ablations. "
+            "History may use last/mean/std/count or other supported aggregates. A global fallback fills missing history, so isna(last) is not a coverage flag; use a count with zero fallback. "
             "For ordinary models name useful features/preprocess/fit/predict stages; the planner builds their "
             "interfaces. Native automl and saved ensembles are compiled directly as complete operations. "
             "Set automl for FLAML/AutoGluon: exact model IDs from automl_engines, fixed parameters or typed "
@@ -660,6 +688,9 @@ class JSONAgents:
             'api_reference': self.reference_context(idea.change, focus=idea.change, max_chars=4500)})
         prompt = (
             'Include every exact recipe in selected_feature_candidates, preserving its name, columns and parameters. '
+            'For a controlled change to an ordinary/FLAML winner, fit.source_node inherits its actual native estimator '
+            'and all constructor parameters; parameters contains ONLY intentional overrides. Preserve preprocessing too. '
+            'Do not manually copy rounded FLAML search parameters into a native estimator. '
             'Connect its output tables to preprocessing/model training and retain those new features. '
             'Turn ONE hypothesis into an ordered plan of trusted operations, never Python. Each changed '
             'block selects operation={kind,parameters,inputs,outputs}; Python derives requires/provides. '
@@ -721,10 +752,16 @@ class JSONAgents:
             'inputs. Earlier repair errors may already be fixed. Interrupted training is not proof of a bug. '
             'Diagnostics override planned settings: selected_columns are actual features, completed_trials '
             'are actual trials, single_holdout/splits=1 is not CV. Source prediction blending does not retrain; '
-            'full stacking/gating diagnostics confirm combiner training on saved inner-holdout predictions; sources are never retrained. Gates use per-row loss as a proxy, '
+            'full stacking/gating diagnostics confirm combiner training on inner-holdout predictions. Missing meta predictions require a source refit with fixed settings, cached once; no new AutoML search. Gates use per-row loss as a proxy, '
             'not per-row Macro F1. All supervised selection must use held-out/OOF predictions inside fit; '
             'flag in-sample tuning, separately from outer-label leakage. Freeze settings before full-fit refit. '
             'Use comparisons to explain the measured change without claiming causality from one score. '
+            'validation=holdout ignores the default folds field: folds=3 alone is NOT planned CV. '
+            'An AutoML search across families does NOT imply an ensemble: inspect the selected model count. '
+            'Compare parent_execution_facts with actual parameters/preprocessing before calling a feature change controlled. '
+            'Do not infer target access from a lag description: outer validation labels are not a feature source. '
+            'A parameter transfer must preserve all effective native settings and alias meanings; otherwise identify confounding. '
+            'A period ordinal is not a calendar year; subtracting it from year_built does not establish building age. '
             'Unrecorded correlations, class-weight effects and causes remain explicitly unverified. '
             'Identify omitted requested procedures or repeated implementations. Return 1-2 concise summary '
             'sentences and at most 3 findings/next_ideas each, one concrete new point per item with its block. '

@@ -44,7 +44,7 @@ def save_pair(directory, frames, preparation_sha256, code_sha256, validation_fil
 
 
 def source_node(root, node_id, preparation_sha256):
-    if not re.fullmatch(r'node_[0-9]{3}', node_id):
+    if not re.fullmatch(r'node_[0-9]{3,}', node_id):
         raise ValueError('Source must name a saved node')
     directory = within(root / 'nodes', node_id)
     finish = json.loads((directory / 'finish.json').read_text(encoding='utf-8'))
