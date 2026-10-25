@@ -43,6 +43,9 @@ class Options:
     max_research_nodes: int | None = 12
     research_timeout: float = 60
     final_refit_seconds: float = 300
+    final_validation_seconds: float = 600
+    validation_finalists: int = 3
+    validation_folds: int = 2
     eda_fraction: float = .15
     eda_seconds: float | None = None
     research_call_fraction: float = .3
@@ -348,6 +351,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
     task_path = task_path.resolve()
     if not math.isfinite(options.final_refit_seconds) or options.final_refit_seconds < 0:
         raise ValueError('Final refit reserve must be finite and nonnegative')
+    if (not math.isfinite(options.final_validation_seconds) or options.final_validation_seconds < 0
+            or options.validation_finalists < 2 or options.validation_folds < 2):
+        raise ValueError('Final validation needs a nonnegative reserve and at least two finalists/splits')
     if not 0 <= options.eda_fraction < 1:
         raise ValueError('EDA fraction must be between 0 (disabled) and 1 (exclusive)')
     if options.eda_seconds is not None and (not math.isfinite(options.eda_seconds) or options.eda_seconds < 0):
@@ -356,7 +362,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
         raise ValueError('Research call fraction must be between 0 and 1')
     overall_deadline = time.monotonic() + options.time_budget
     final_reserve = min(options.final_refit_seconds, options.time_budget * .2) if options.time_budget >= 60 else 0.
-    deadline = overall_deadline - final_reserve
+    validation_reserve = (min(options.final_validation_seconds, options.time_budget * .1)
+                          if options.time_budget >= 60 and options.experiment_limit > 1 else 0.)
+    deadline = overall_deadline - final_reserve - validation_reserve
     agents = JSONAgents(settings, deadline, max_calls=options.max_llm_calls, parallel_agents=options.parallel_agents)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     directory = (options.output_dir or Path('artifacts') / f'{task_path.parent.name}-{stamp}-{uuid4().hex[:6]}').resolve()
@@ -367,6 +375,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
     revision, published, search, research = 0, None, None, None
     shared = {}
     delta, stop_reason = None, 'max_experiments'
+    cancelled = False
 
     def update(**values):
         nonlocal report
@@ -654,6 +663,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
         agents.log('search_finished', status=report.status, stop_reason=stop_reason,
                    requests=agents.budget['requests'], experiments=len(starts), best_node=delta.best_node_id)
     except (Exception, asyncio.CancelledError) as error:
+        cancelled = isinstance(error, asyncio.CancelledError)
         agents.log('controller_failed', error_type=type(error).__name__, traceback=traceback.format_exc())
         update(status='ready' if delta and delta.best_node_id else 'partial' if published else 'failed',
                stage='complete', stop_reason='error', errors=report.errors + [str(error).replace(settings.api_key, '[REDACTED]')[-5000:]])
@@ -688,13 +698,38 @@ async def run(task_path: Path, options: Options, settings: Settings):
         for node_id in list(agents.root.call_reservations):
             agents.release_calls(node_id)
         update()
-    # Re-publish the last completed winner even when planning or cleanup failed.
+    # Search/EDA are closed: recheck results never return to Baker.
+    if not cancelled and validation_reserve and delta and delta.best_node_id:
+        from .final_validation import recheck
+        validation_deadline = min(overall_deadline - final_reserve, time.monotonic() + validation_reserve)
+        if validation_deadline > time.monotonic() + 1:
+            update(status='running', stage='final_validation')
+            try:
+                validation = await recheck(directory, delta, options, process, validation_deadline,
+                    lambda values: update(final_validation=values))
+                selected = validation['selected_node']
+                delta = delta.model_copy(update={'best_node_id': selected})
+                save_delta()
+                result = next(row.result for row in delta.nodes if row.node_id == selected)
+                save(directory / 'best.json', {'node_id': selected, 'value': result.value,
+                    'submission_file': f'nodes/{selected}/{result.submission_file}',
+                    'selection_method': 'stability_recheck' if validation['status'] == 'completed'
+                        or selected != validation['search_best_node'] else 'search',
+                    'final_validation': 'final_validation/report.json'})
+                update(status='ready', stage='complete', final_validation=validation,
+                       checks=report.checks + (['final_validation'] if validation['status'] == 'completed' else []))
+                agents.log('final_validation_finished', selected_node=selected, status=validation['status'])
+            except (Exception, asyncio.CancelledError) as error:
+                cancelled = isinstance(error, asyncio.CancelledError)
+                update(status='ready', stage='complete', warnings=report.warnings +
+                       [f'Final validation failed; search winner preserved: {type(error).__name__}: {error}'])
+    # Re-publish the selected winner even when planning or cleanup failed.
     if published and published != 'safety_baseline':
         selected = delta.best_node_id or published
         result = next(row.result for row in delta.nodes if row.node_id == selected)
         source = within(directory / 'nodes' / selected, result.submission_file)
         atomic_bytes(within(task_path.parent, preparation.output.filename), source.read_bytes())
-    if final_reserve and delta and delta.best_node_id and time.monotonic() < overall_deadline:
+    if not cancelled and final_reserve and delta and delta.best_node_id and time.monotonic() < overall_deadline:
         selected = delta.best_node_id
         remaining = min(options.final_refit_seconds, overall_deadline - time.monotonic())
         update(status='running', stage='final_refit')

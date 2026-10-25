@@ -38,6 +38,7 @@ class Search:
         self.feature_decisions = {}
         self.last_planning_error = None
         self.baker_candidates = []
+        self.node_builds = {}
         explore = int(options.parallel > 1)
         self.caps = {'improve': options.parallel - explore, 'explore': explore}
 
@@ -153,6 +154,10 @@ class Search:
                 requires=['fit', 'validation', 'test', 'preparation', 'auxiliary'],
                 provides=['validation_predictions', 'test_predictions'])], write_blocks=['combine']))
 
+    async def ready_plan(self, idea):
+        from .builds import compile_build, load_build
+        return compile_build(load_build(self.directory, idea.build_id), idea.changes, idea)
+
     @property
     def tasks(self):
         return [*self.planners, *([self.baker] if self.baker else [])]
@@ -207,6 +212,15 @@ class Search:
         else:
             self.leader = self.parents[-1] if self.parents else None
         self.catalog = block_catalog(self.directory, rows)
+        from .builds import register_node
+        for row in rows:
+            manifest = self.directory / 'nodes' / row.node_id / 'assembly.json'
+            if row.node_id != 'node_000' and row.node_id not in self.node_builds and manifest.exists():
+                try:
+                    self.node_builds[row.node_id] = register_node(self.directory, row)
+                except (ValueError, OSError, KeyError) as error:
+                    self.node_builds[row.node_id] = None
+                    self.agents.log('build_registration_failed', node_id=row.node_id, error=str(error))
         baseline = next((row for row in eligible if row.node_id == 'node_000'), None)
         leader = next((row for row in eligible if row.node_id == self.leader), None)
         if baseline and leader and delta.metric.direction:
@@ -221,7 +235,7 @@ class Search:
 
         # A new leader invalidates queued improvements, but never interrupts work already started.
         for record in list(self.queue):
-            stale_parent = (not record.get('builtin_engine') and not record.get('reference_family')
+            stale_parent = (not record.get('builtin_engine') and not record.get('reference_family') and not record['idea'].get('build_id')
                             and record['idea']['purpose'] == 'improve'
                             and record['idea']['parent_id'] != self.leader)
             if stale_parent:
@@ -248,7 +262,7 @@ class Search:
             idea = Idea.model_validate(record['idea'])
             blocks = max(1, len(idea.change_blocks))
             calls = (8 if record.get('dedicated_automl') else 2
-                     if record.get('builtin_engine') or record.get('builtin_ensemble') else self.estimate_calls(blocks))
+                     if record.get('builtin_engine') or record.get('builtin_ensemble') or record['idea'].get('build_id') else self.estimate_calls(blocks))
             node_id = f'node_{self.next_node:03d}'
             if not self.agents.reserve_calls(node_id, calls):
                 self.wait_for_budget(calls)
@@ -270,11 +284,15 @@ class Search:
                 'remaining_seconds': max(0., self.agents.deadline - time.monotonic()),
                 'experiment_timeout_seconds': self.options.experiment_timeout,
                 'idea': record['idea']}
+            if not record.get('reference_family'):
+                context['parent_build'] = self.node_builds.get(idea.parent_id)
             if record.get('feature_candidates'):
                 context['data_research'] = {**context.get('data_research', {}),
                     'feature_candidates': record['feature_candidates']}
             save(self.directory / 'planning' / node_id / 'idea.json', record)
-            if record.get('dedicated_automl'):
+            if idea.build_id:
+                task = asyncio.create_task(self.ready_plan(idea))
+            elif record.get('dedicated_automl'):
                 task = asyncio.create_task(self.dedicated_automl_plan(idea, record['builtin_engine'], context, node_id))
             elif record.get('builtin_ensemble'):
                 task = asyncio.create_task(self.ensemble_plan(idea))
@@ -385,11 +403,17 @@ class Search:
         if research.get('feature_candidates'):
             research['feature_candidates'] = candidate_view(research['feature_candidates'],
                 self.directory, self.rows, self.records, self.feature_decisions)
+        from .builds import card, load_build
+        build_lookup = {node: value for node, value in self.node_builds.items() if node in selected and value}
+        for item in research.get('feature_candidates', []):
+            if item.get('build_id'):
+                build_lookup[item['build_id']] = load_build(self.directory, item['build_id'])
+        ready_builds = [card(value) for value in build_lookup.values()]
         return {**self.shared, 'data_research': research, 'purposes': ['baseline'] if self.next_node == 0 else
                 [purpose for purpose, cap in self.caps.items() if cap],
-            'max_new_ideas': min(1 if self.next_node == 0 else 3, remaining,
-                                 max(0, self.parallel_limit - sum(self.occupied.values()) - len(self.queue))),
-            'queue_capacity': min(self.parallel_limit, remaining),
+            'max_new_ideas': min(1 if self.next_node == 0 else 4, remaining,
+                                 max(1 if self.next_node == 0 else 2, self.parallel_limit - len(self.queue))),
+            'queue_capacity': min(self.parallel_limit * 2, remaining),
             'remaining_experiments': None if math.isinf(remaining) else remaining,
             'slot_limits': self.slot_limits(), 'occupied_slots': self.occupied,
             'api_budget': self.agents.budget_view(),
@@ -399,6 +423,8 @@ class Search:
             'prediction_sources': prediction_sources,
             'queued_ideas': self.queued_view(), 'leader_id': self.leader,
             'available_parents': self.parents, 'experiments': experiments, 'experiment_index': index,
+            'ready_builds': ready_builds,
+            '_build_lookup': build_lookup,
             'module_catalog': {node: [{key: block[key] for key in ('name', 'requires', 'provides')} for block in blocks]
                                for node, blocks in catalog_view({node: blocks for node, blocks in self.catalog.items()
                                                                if node in selected}).items()},
@@ -509,7 +535,7 @@ class Search:
                     record.update(status='rejected', duplicate_of=self.used_plans[key])
                     self.notify(f'{node_id}: duplicate plan matching {self.used_plans[key]}')
                     continue
-                calls = 2 if record.get('builtin_engine') or record.get('builtin_ensemble') else self.estimate_calls(len(proposal.assembly.write_blocks), planning=False)
+                calls = 2 if record.get('builtin_engine') or record.get('builtin_ensemble') or record['idea'].get('build_id') else self.estimate_calls(len(proposal.assembly.write_blocks), planning=False)
                 if not self.agents.reserve_calls(node_id, calls):
                     record.update(status='rejected', error='Insufficient API budget for the planned blocks')
                     self.wait_for_budget(calls)

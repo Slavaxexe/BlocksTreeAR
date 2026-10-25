@@ -47,8 +47,9 @@ class SplitPlan(Plan):
 class FeatureSpec(Plan):
     name: str = Field(min_length=1)
     operation: Literal['sum', 'mean', 'product', 'difference', 'ratio', 'signed_log',
-                       'missing', 'frequency', 'clip', 'group_mean', 'datetime', 'expression',
-                       'history', 'target_encoding']
+                       'missing', 'frequency', 'clip', 'group_mean', 'group_std', 'group_min',
+                       'group_max', 'group_nunique', 'group_count', 'group_ratio', 'group_diff',
+                       'datetime', 'expression', 'history', 'target_encoding']
     columns: list[str] = Field(min_length=1)
     parameters: dict[str, Any] = Field(default_factory=dict, description='For expression use {expression: formula}; x0/x1 or col(quoted column) read declared columns. Compose arithmetic, conditions, log1p, abs, sqrt, where, clip, frequency and group_mean/group_std/group_count. Statistics learn only on fit.')
 
@@ -108,6 +109,7 @@ class SearchSpace(Plan):
 
 class AutoMLPlan(Plan):
     engine: Literal['flaml', 'autogluon']
+    reuse_node: str | None = Field(default=None, pattern=r'^node_[0-9]{3,}$', description='Refit the saved selected model with current features; no new AutoML search')
     models: list[str] = Field(default_factory=list)
     model_parameters: dict[str, dict[str, Any]] = Field(default_factory=dict)
     search_space: dict[str, dict[str, SearchSpace]] = Field(default_factory=dict)
@@ -168,11 +170,11 @@ class BlendRule(Plan):
 
 class EnsemblePlan(Plan):
     source_nodes: list[str] = Field(min_length=2, description='Completed nodes from prediction_sources, on the same preparation')
-    method: Literal['mean', 'vote', 'probabilities', 'conditional', 'stacking', 'gating']
+    method: Literal['mean', 'vote', 'probabilities', 'rank_average', 'conditional', 'stacking', 'gating']
     weights: list[float] = Field(default_factory=list)
     optimize_weights: bool = Field(default=False, description='Tune nonnegative blend weights on saved inner-holdout predictions, never outer validation')
     weight_trials: int = Field(default=64, ge=1, description='Maximum local weight candidates, no LLM calls')
-    combine: Literal['mean', 'vote', 'probabilities'] | None = None
+    combine: Literal['mean', 'vote', 'probabilities', 'rank_average'] | None = None
     rules: list[BlendRule] = Field(default_factory=list, description='First matching rule wins; default weights apply otherwise')
     estimator: str | None = Field(default=None, description='Installed sklearn-compatible class path; stacking defaults to LogisticRegression/Ridge, gating to shallow DecisionTreeClassifier with predict_proba')
     parameters: dict[str, Any] = Field(default_factory=dict, description='Combiner constructor kwargs, not source-model settings')
@@ -244,7 +246,7 @@ class ToolCall(Plan):
         fields = {
             'constant': set(), 'features': {'recipes'},
             'preprocess': {'feature_columns', 'drop_columns', 'numeric_imputer', 'encoding', 'native_backend', 'scaling', 'pca_components'},
-            'fit': {'estimator', 'parameters', 'search_space', 'num_trials', 'validation', 'group_by', 'split_column', 'row_weights', 'seeds', 'query_columns', 'source_node'},
+            'fit': {'estimator', 'parameters', 'fixed_parameters', 'search_space', 'num_trials', 'validation', 'group_by', 'split_column', 'row_weights', 'seeds', 'query_columns', 'source_node'},
             'forecast': {'estimator', 'parameters', 'time_column', 'series_columns', 'lags', 'rolling_windows', 'feature_columns'},
             'predict': {'output'}, 'ensemble': {'sources', 'weights', 'method'},
         }

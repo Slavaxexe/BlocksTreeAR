@@ -40,6 +40,9 @@ def blend(pairs, state, defaults, weights, method):
                     raise ValueError('Probability blending needs saved probabilities for every source; use vote for labels')
                 frame = pd.DataFrame(matrix(frame, np.asarray(classes)), columns=classes)
             combined[f'{scope}_{index}'] = frame
+    for scope in ('validation', 'test'):
+        if scope in state:
+            combined[scope] = state[scope]
     result = _ensemble(combined, {'sources': names, 'method': method,
                                   **({'weights': weights} if weights else {})}, defaults)
     for frame in result.values():
@@ -238,3 +241,8 @@ def run_saved_ensemble(state, value, defaults):
         for frame in result.values():
             frame.attrs['meta_held_out'] = False
     return result
+
+
+def rank_average(pairs, state, defaults, weights=None):
+    """Rank-normalized score averaging for ranking models across queries."""
+    return blend(pairs, state, defaults, weights, method='rank_average')

@@ -244,6 +244,16 @@ def _predictive(frame, columns, target, classification, request, metric, cache, 
               'scope': 'Proxy evaluation inside fit only; not the experiment outer-validation score'}
     if slices:
         result['history_slices'] = slices
+    estimator = model.steps[-1][1]
+    result['recipe_configuration'] = {
+        'target_columns': [target],
+        'features': [recipe.model_dump() for recipe in recipes],
+        'preprocess': {'feature_columns': list(valid.columns), 'encoding': 'ordinal',
+                       'numeric_imputer': 'median', 'scaling': 'standard'},
+        'fit': {'estimator': '.'.join(type(estimator).__module__.split('.')[:2]) + '.' + type(estimator).__name__,
+                'parameters': estimator.get_params(deep=False)},
+        'proxy_split_sha256': split_hash, 'proxy_sample_rows': request.sample_rows,
+        'scope': 'Same feature/model recipe; main experiment refits on full fit and scores outer validation'}
     return result, (model, valid, y_valid, scorer)
 
 

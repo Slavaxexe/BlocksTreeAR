@@ -18,7 +18,7 @@ CATALOG = {
     'constant': {'requires': ['fit', 'validation', 'test', 'preparation'],
                  'provides': ['validation_predictions', 'test_predictions'], 'parameters': 'No settings: cheap mean/mode/prior baseline.'},
     'features': {'requires': ['fit', 'validation', 'test', 'preparation'],
-                 'provides': ['fit_table', 'validation_table', 'test_table'], 'parameters': 'recipes: [{name,operation,columns,parameters}]. Operations: sum/mean/product/missing (one or more columns); difference/ratio (two); signed_log/frequency (one); clip (one, lower=.01/upper=.99 quantiles); group_mean ([group,numeric]); datetime (one, part=year/month/day/dayofweek/hour); expression: parameters.expression with x0/x1 or col(column_name), arithmetic, conditions, abs/log1p/log/exp/sqrt/sin/cos/tanh/minimum/maximum/where/clip/isna/fillna/length/lower/contains/concat/frequency/group_mean/group_std/group_count. Statistics are fit-only.'},
+                 'provides': ['fit_table', 'validation_table', 'test_table'], 'parameters': 'recipes: [{name,operation,columns,parameters}]. Operations: sum/mean/product/missing (one or more columns); difference/ratio (two); signed_log/frequency (one); clip (one, lower=.01/upper=.99 quantiles); group aggregations: group_mean/group_std/group_min/group_max/group_diff/group_ratio ([group,numeric]), group_nunique ([group,target]), group_count ([group]); datetime (one, part=year/month/day/dayofweek/hour); expression: parameters.expression with x0/x1 or col(column_name), arithmetic, conditions, abs/log1p/log/exp/sqrt/sin/cos/tanh/minimum/maximum/where/clip/isna/fillna/length/lower/contains/concat/frequency/group_mean/group_std/group_count. Statistics are fit-only.'},
     'preprocess': {'requires': ['fit', 'validation', 'test', 'preparation'],
                    'provides': ['fit_features', 'fit_targets', 'validation_features', 'test_features', 'transformer'],
                    'parameters': 'feature_columns: COMPLETE feature subset, []=all features; NOT a list of categorical columns. Categoricals are detected by dtype automatically. drop_columns removes from that subset. numeric_imputer=median/mean/constant; encoding=ordinal/onehot/native; native_backend=catboost/lightgbm/xgboost; scaling=none/standard/robust/minmax; pca_components optional.'},
@@ -30,13 +30,15 @@ CATALOG = {
                'provides': ['validation_predictions', 'test_predictions'], 'parameters': 'engine=flaml/autogluon; models:[str], model_parameters:{model:{kw:value}}, search_space:{model:{kw:typed_domain}}, num_trials; validation=holdout/cv, folds=3, holdout_fraction=.2; split_column/group_by optionally name the inner time/group column; otherwise use shared validation metadata. bag_folds=0/2+, stack_levels=0 (AutoGluon only); ensemble:bool; budget_fraction in (0,1]; columns/drop_columns, features:FeatureSpec list; row_weights:{time_column,half_life}. With recipes, weights or group/time policy: explicit fit-only holdout, no bagging/stacking (FLAML ensemble=false), then frozen refit on all fit. Without these constraints native CV is available.'},
     'saved_ensemble': {'requires': ['fit', 'validation', 'test', 'preparation', 'auxiliary'],
         'provides': ['validation_predictions', 'test_predictions'],
-        'parameters': 'EnsemblePlan: source_nodes, method=mean/vote/probabilities/conditional/stacking/gating. Cached blending needs no training. Conditional rules use input features. Learned methods use saved shared inner-holdout predictions (meta_ready), or prepare them once on demand (meta_available); estimator/parameters, feature_columns and passthrough control them. optimize_weights=true tunes blend weights on saved meta_ready predictions; weight_trials=64. Ordinary models use all outer-fit rows. Missing meta predictions require one extra held-out source fit, cached for all later ensembles.'},
+        'parameters': 'EnsemblePlan: source_nodes, method=mean/vote/probabilities/rank_average/conditional/stacking/gating. Cached blending needs no training. Conditional rules use input features. Learned methods use saved shared inner-holdout predictions (meta_ready), or prepare them once on demand (meta_available); estimator/parameters, feature_columns and passthrough control them. optimize_weights=true tunes blend weights on saved meta_ready predictions; weight_trials=64. Ordinary models use all outer-fit rows. Missing meta predictions require one extra held-out source fit, cached for all later ensembles.'},
     'ensemble': {'requires': ['preparation'], 'provides': ['validation_predictions', 'test_predictions'],
                  'parameters': 'sources: [[validation_state_key,test_state_key],...]; weights optional; method=mean/vote/probabilities. List every source state key in block.requires.'},
 }
 
 CATALOG['features']['parameters'] += ' ' + SUPERVISED_GUIDE
 CATALOG['fit']['parameters'] += ' source_node=node_... optionally inherits the saved ordinary/FLAML native estimator and exact parameters; parameters then overrides only explicit changes. It does not inherit preprocessing.'
+CATALOG['fit']['parameters'] += ' fixed_parameters holds frozen/deep sklearn set_params values applied after construction; ready builds preserve these automatically.'
+CATALOG['automl']['parameters'] += ' reuse_node refits the saved selected choice with the current recipe and no new search, preserving the adapter preprocessing algorithm.'
 CATALOG['saved_ensemble']['parameters'] += (
     ' Multi-target tasks support column-wise mean/vote/conditional blending; learned stacking/gating currently '
     'requires one supervised target. Cluster IDs are arbitrary across models and cannot be blended.')
@@ -68,6 +70,31 @@ CATALOG['forecast'] = {
         'Validation and test each start from fit history, never from validation labels. '
         'Requires one row per series/time and future query times; supports multiple numeric targets. '
         'Use time validation and series EDA first; regularize missing timestamps upstream when calendar lags are required.'}
+
+
+def operations_summary(catalog=None):
+    """Compact summary of operation purposes and interfaces for idea generation."""
+    catalog = catalog or CATALOG
+    purposes = {
+        'constant': 'Cheap fit-only baseline predicting mean/mode/prior',
+        'features': 'Feature engineering recipes (arithmetic, stats, datetime, groups, encodings)',
+        'preprocess': 'Preprocessing (imputation, scaling, categorical encoding: ordinal/onehot/native)',
+        'fit': 'Fit estimator (LightGBM, CatBoost, ExtraTrees, Ridge, etc.) on fit_features',
+        'predict': 'Generate predictions on validation and test from fitted model',
+        'automl': 'Automated pipeline search & tuning (FLAML / AutoGluon Tabular)',
+        'saved_ensemble': 'Combine predictions from completed nodes (mean, vote, rank_average, blend, stacking, gating)',
+        'ensemble': 'Direct combination of in-pipeline model prediction outputs',
+        'forecast': 'Recursive tabular time-series forecasting with lags and rolling features',
+    }
+    return {
+        kind: {
+            'purpose': purposes.get(kind, ''),
+            'requires': op.get('requires', []),
+            'provides': op.get('provides', [])
+        }
+        for kind, op in catalog.items()
+    }
+
 
 
 def _classification(state, defaults):
@@ -274,6 +301,12 @@ def _fit(state, parameters, defaults):
     if isinstance(state['transformer'], NativeCategories):
         options = state['transformer'].estimator_parameters(parameters['estimator'], options)
     model = _estimator(parameters['estimator'], options, runtime)
+    if parameters.get('fixed_parameters'):
+        model.set_params(**parameters['fixed_parameters'])
+        resources = {key: int(runtime.get('num_cpus', 1)) for key in model.get_params()
+                     if key.rsplit('__', 1)[-1] in {'n_jobs', 'thread_count'}}
+        if resources:
+            model.set_params(**resources)
     source = getattr(state['transformer'], 'fit_source_', state['fit']).reset_index(drop=True)
     weights = row_weights(source, parameters['row_weights']) if parameters.get('row_weights') else None
     query_columns = parameters.get('query_columns') or state['preparation']['data'].get('query_columns', [])
@@ -441,6 +474,37 @@ def _ensemble(state, parameters, defaults):
                         scores[label] = scores.get(label, 0.) + weight
                     voted[row, column] = max(scores, key=scores.get)
             output = pd.DataFrame(voted.tolist(), columns=frames[0].columns)
+        elif parameters.get('method') == 'rank_average':
+            query_cols = state['preparation']['data'].get('query_columns', [])
+            query_frame = state.get(scope)
+            ranked_frames = []
+            for frame in frames:
+                raw_mat = frame.to_numpy(dtype=float)
+                ranked_mat = np.empty_like(raw_mat)
+                for col_idx in range(raw_mat.shape[1]):
+                    raw_col = raw_mat[:, col_idx]
+                    if query_cols and query_frame is not None and all(c in query_frame for c in query_cols):
+                        from .task_types import group_codes
+                        codes = group_codes(query_frame, query_cols)
+                        ranked_col = np.empty_like(raw_col)
+                        for code in np.unique(codes):
+                            mask = (codes == code)
+                            sub = raw_col[mask]
+                            order = np.argsort(sub, kind='stable')
+                            ranks = np.empty_like(order, dtype=float)
+                            denom = max(1, len(sub) - 1)
+                            ranks[order] = np.arange(len(sub), dtype=float) / denom
+                            ranked_col[mask] = ranks
+                        ranked_mat[:, col_idx] = ranked_col
+                    else:
+                        order = np.argsort(raw_col, kind='stable')
+                        ranks = np.empty_like(order, dtype=float)
+                        denom = max(1, len(raw_col) - 1)
+                        ranks[order] = np.arange(len(raw_col), dtype=float) / denom
+                        ranked_mat[:, col_idx] = ranks
+                ranked_frames.append(pd.DataFrame(ranked_mat, columns=frame.columns))
+            values = sum(weight * rf.to_numpy(dtype=float) for weight, rf in zip(weights, ranked_frames))
+            output = _prediction(values, state, defaults, labels=list(frames[0].columns))
         else:
             values = sum(weight * frame.to_numpy(dtype=float) for weight, frame in zip(weights, frames))
             if parameters.get('method') == 'probabilities' and not _requires_probabilities(state, defaults):
@@ -485,12 +549,9 @@ def run_operation(state, value, defaults=None):
         from .training_cache import cached
         from tempfile import TemporaryDirectory
         def train(inputs):
-            if inputs['preparation']['runtime'].get('is_meta_fit'):
+            if plan.reuse_node or inputs['preparation']['runtime'].get('is_meta_fit'):
                 from .model_evidence import refit_automl
                 result = refit_automl(inputs, plan, defaults)
-                result['automl_diagnostics'] = {'selection_reused': True, 'search_repeated': False,
-                    'inner_validation': 'shared meta holdout; model settings fixed from source',
-                    'qualification': 'Meta rows are excluded from fitting; source settings may have been selected using these rows.'}
                 return result
             return run_automl(inputs, engine=plan.engine, config=plan.model_dump(), **defaults)
         runtime = state['preparation'].get('runtime', {})

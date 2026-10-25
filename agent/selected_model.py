@@ -11,17 +11,36 @@ class SelectedModel:
         if classes is not None:
             self.classes_ = np.asarray(classes)
 
-    def refit(self, frame, target, runtime, weights=None):
+    def refit(self, frame, target, runtime, weights=None, parameters=None):
         from .automl import _remaining
         from .finalize import clone_estimator
         from .model_fitting import fit_model
-        features = self.transformer.transform(frame) if self.transformer is not None else frame
-        encoded = self.labels.transform(target) if self.labels is not None else target
+        # Rebuild the same preprocessing algorithm on this fit, including new feature columns.
+        if self.engine == 'flaml':
+            from flaml.automl.data import DataTransformer
+            transformer = DataTransformer()
+            features, encoded = transformer.fit_transform(frame, target,
+                task='classification' if hasattr(self, 'classes_') else 'regression')
+            labels = transformer.label_transformer
+        else:
+            transformer = type(self.transformer)() if self.transformer is not None else None
+            features = transformer.fit_transform(frame, y=target) if transformer is not None else frame
+            labels = self.labels
+            encoded = labels.transform(target) if labels is not None else target
         fitted = []
         for index, original in enumerate(self.models):
             remaining = _remaining(runtime) / (len(self.models) - index)
             if self.engine == 'flaml':
                 model = clone_estimator(original)
+                native = getattr(original, 'model', original)
+                family = {'lightgbm': 'lgbm', 'xgboost': 'xgboost', 'catboost': 'catboost'}.get(type(native).__module__.split('.')[0])
+                overrides = (parameters or {}).get(family, {})
+                if overrides:
+                    options = {**model.get_params(), **overrides}
+                    if hasattr(original, 'config2params'):
+                        options = original.config2params(options)
+                    options['n_jobs'] = int(runtime.get('num_cpus', 1))
+                    model = type(model)(**options)
                 if type(model).__module__.startswith('flaml'):
                     model.fit(features, encoded, budget=remaining,
                               **({'sample_weight': weights} if weights is not None else {}))
@@ -29,13 +48,15 @@ class SelectedModel:
                     model = fit_model(model, features, encoded, weights)
             else:
                 model = original.convert_to_refit_full_template()
+                family = {'LGBModel': 'GBM', 'CatBoostModel': 'CAT', 'XGBoostModel': 'XGB', 'RFModel': 'RF', 'XTModel': 'XT'}.get(type(original).__name__)
+                model.params.update((parameters or {}).get(family, {}))
                 model.set_contexts(str(Path(runtime['work_directory']) / f'selected_{index}'))
                 model.fit(X=features, y=encoded, sample_weight=weights, time_limit=remaining,
                           num_cpus=int(runtime.get('num_cpus', 1)), num_gpus=0)
                 model.save()
             fitted.append(model)
-        return SelectedModel(self.engine, fitted, self.weights, self.transformer, self.labels,
-                             getattr(self, 'classes_', None))
+        classes = getattr(labels, 'classes_', getattr(self, 'classes_', None))
+        return SelectedModel(self.engine, fitted, self.weights, transformer, labels, classes)
 
     def predict_proba(self, frame):
         features = self.transformer.transform(frame) if self.transformer is not None else frame
@@ -93,18 +114,26 @@ def refit_saved(state, plan, filename, defaults):
     inherited = state['fit'].attrs.get('feature_recipes', [])
     recipes = [*inherited, *(feature.model_dump() for feature in plan.features)]
     created = [recipe['name'] for recipe in inherited]
-    raw = [state[scope].drop(columns=created) for scope in ('fit', 'test')]
-    fit, query = create_features(raw, recipes, forbidden=feature_targets, policy=preparation.get('validation', {}))
+    raw = [state[scope].drop(columns=created) for scope in ('fit', 'validation', 'test')]
+    fit, val, test = create_features(raw, recipes, forbidden=feature_targets, policy=preparation.get('validation', {}))
     columns = plan.columns or [column for column in fit if column not in set(feature_targets + ids)]
     columns = list(dict.fromkeys([*columns, *(feature.name for feature in plan.features)]))
     columns = [column for column in columns if column not in plan.drop_columns]
-    x, query, _ = _features(fit[columns], query[columns], query[columns], feature_targets, ids)
+    x, val_x, test_x = _features(fit[columns], val[columns], test[columns], feature_targets, ids)
     weights = row_weights(raw[0], plan.row_weights.model_dump()) if plan.row_weights else None
-    model = frozen.refit(x, fit[targets[0]], preparation['runtime'], weights)
+    model = frozen.refit(x, fit[targets[0]], preparation['runtime'], weights, plan.model_parameters)
     probability = _classification(state, defaults) and _requires_probabilities(state, defaults)
-    values = model.predict_proba(query) if probability else model.predict(query)
+    val_values = model.predict_proba(val_x) if probability else model.predict(val_x)
+    test_values = model.predict_proba(test_x) if probability else model.predict(test_x)
     classes = getattr(model, 'classes_', None)
-    prediction = _prediction(values, state, defaults, labels=classes, probabilities=probability)
+    val_prediction = _prediction(val_values, state, defaults, labels=classes, probabilities=probability)
+    test_prediction = _prediction(test_values, state, defaults, labels=classes, probabilities=probability)
     if classes is not None:
-        attach_probabilities(prediction, model.predict_proba(query), classes)
-    return {'validation_predictions': prediction.copy(), 'test_predictions': prediction}
+        attach_probabilities(val_prediction, model.predict_proba(val_x), classes)
+        attach_probabilities(test_prediction, model.predict_proba(test_x), classes)
+    from .model_evidence import estimator_facts
+    diagnostics = {'selected_model_count': len(model.models), 'feature_count': len(x.columns)}
+    if model.engine == 'flaml' and len(model.models) == 1:
+        diagnostics.update(estimator_facts(getattr(model.models[0], 'model', model.models[0])))
+    return {'validation_predictions': val_prediction, 'test_predictions': test_prediction,
+            'automl_diagnostics': diagnostics}

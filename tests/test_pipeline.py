@@ -363,7 +363,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, 'Input files changed'):
                 smoke(node, root / 'preparation.json')
             self.assertEqual((node / 'finish.json').read_bytes(), original)
-            (node / 'modules/predict.py').write_text('def run(state): return {}', encoding='utf-8')
+            (node / 'modules/constant.py').write_text('def run(state): return {}', encoding='utf-8')
             with self.assertRaises(BlockError):
                 implementation_hash(node)
 

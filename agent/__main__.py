@@ -22,6 +22,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, help="Новый каталог запуска; существующий не перезаписывается.")
     parser.add_argument("--time-budget", type=float, default=600)
     parser.add_argument("--final-refit-seconds", type=float, default=300, help="Резерв на refit лучшего решения; 0 отключает. Входит в общий time-budget.")
+    parser.add_argument('--final-validation-seconds', type=float, default=600, help='Резерв на перепроверку финалистов, до 10% общего времени; 0 отключает.')
+    parser.add_argument('--validation-finalists', type=int, default=3)
+    parser.add_argument('--validation-folds', type=int, default=2)
     parser.add_argument("--experiment-timeout", type=float, default=240)
     parser.add_argument("--max-experiments", type=int, default=10, help="Всего нод, включая baseline.")
     parser.add_argument('--unlimited-nodes', action='store_true', help='Не ограничивать количество модельных и исследовательских нод.')
@@ -64,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
                     max_research_nodes=None if args.unlimited_nodes else args.max_research_nodes,
                     research_timeout=args.research_timeout, automl=args.automl,
                     final_refit_seconds=args.final_refit_seconds, eda_fraction=args.eda_fraction,
+                    final_validation_seconds=args.final_validation_seconds,
+                    validation_finalists=args.validation_finalists, validation_folds=args.validation_folds,
                     eda_seconds=args.eda_seconds,
                     research_call_fraction=args.research_call_fraction,
                     research_unlimited=args.research_unlimited)

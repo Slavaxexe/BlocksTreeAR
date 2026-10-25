@@ -18,8 +18,9 @@ def frozen_available(facts):
 def refit_automl(state, plan, defaults):
     from .selected_model import refit_saved
     runtime = state['preparation']['runtime']
-    root = Path(runtime['run_directory'])
-    node, _ = source_node(root, runtime['source_node_id'], runtime['preparation_sha256'])
+    root = Path(runtime.get('source_run_directory', runtime['run_directory']))
+    source_id = plan.reuse_node or runtime.get('source_node_id')
+    node, _ = source_node(root, source_id, runtime['preparation_sha256'])
     facts = json.loads((node / f'{plan.engine}_full_diagnostics.json').read_text(encoding='utf-8'))
     if not frozen_available(facts):
         raise ValueError('This source has no frozen choice for a meta refit; use a fixed-weight blend instead')
@@ -27,9 +28,17 @@ def refit_automl(state, plan, defaults):
         from .finalize import FinalRefit
         refitter = FinalRefit.__new__(FinalRefit)
         refitter.defaults = defaults
-        return refitter.multi_target(plan, facts, state)
-    filename = within(root, facts['selected_model_file'])
-    return refit_saved(state, plan, filename, defaults)
+        result = refitter.multi_target(plan, facts, state)
+    else:
+        filename = within(root, facts['selected_model_file'])
+        result = refit_saved(state, plan, filename, defaults)
+    result['automl_diagnostics'] = {**facts, **result.get('automl_diagnostics', {}), 'configuration': plan.model_dump(),
+        'search_repeated': False, 'selection_reused': True, 'inherited_from': source_id,
+        'fit_rows': len(state['fit']), 'inner_validation': 'fixed source choice; no new search',
+        'qualification': 'Source model selection is reused; this is not a new independent model-selection estimate.'}
+    if 'inner_best_loss' in result['automl_diagnostics']:
+        result['automl_diagnostics']['source_inner_best_loss'] = result['automl_diagnostics'].pop('inner_best_loss')
+    return result
 
 
 def selected_file(root, node_id, preparation_sha256):

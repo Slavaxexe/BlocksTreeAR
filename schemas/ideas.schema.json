@@ -1,5 +1,50 @@
 {
   "$defs": {
+    "AssemblyChanges": {
+      "additionalProperties": false,
+      "properties": {
+        "edits": {
+          "items": {
+            "$ref": "#/$defs/BlockEdit"
+          },
+          "title": "Edits",
+          "type": "array"
+        },
+        "insert": {
+          "description": "New stages only; use edits to change an existing operation",
+          "items": {
+            "$ref": "#/$defs/Block"
+          },
+          "title": "Insert",
+          "type": "array"
+        },
+        "remove": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Remove",
+          "type": "array"
+        },
+        "order": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Omit to preserve order; required when inserting stages",
+          "title": "Order"
+        }
+      },
+      "title": "AssemblyChanges",
+      "type": "object"
+    },
     "AutoMLPlan": {
       "additionalProperties": false,
       "properties": {
@@ -10,6 +55,20 @@
           ],
           "title": "Engine",
           "type": "string"
+        },
+        "reuse_node": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Refit the saved selected model with current features; no new AutoML search",
+          "title": "Reuse Node"
         },
         "models": {
           "items": {
@@ -245,6 +304,111 @@
         "weights"
       ],
       "title": "BlendRule",
+      "type": "object"
+    },
+    "Block": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolCall"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "source_node": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Node"
+        },
+        "description": {
+          "description": "Behavior and exact input/output types, shapes, column conventions and object APIs",
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "requires": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requires",
+          "type": "array"
+        },
+        "provides": {
+          "description": "Required non-None state outputs; nullable settings belong inside output objects",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Provides",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "provides"
+      ],
+      "title": "Block",
+      "type": "object"
+    },
+    "BlockEdit": {
+      "additionalProperties": false,
+      "properties": {
+        "block": {
+          "title": "Block",
+          "type": "string"
+        },
+        "parameters": {
+          "description": "Recursive merge into operation parameters; unspecified settings are preserved",
+          "title": "Parameters",
+          "type": "object"
+        },
+        "features": {
+          "description": "Add/replace recipes by name, preserving all other recipes",
+          "items": {
+            "$ref": "#/$defs/FeatureSpec"
+          },
+          "title": "Features",
+          "type": "array"
+        },
+        "feature_parameters": {
+          "additionalProperties": {
+            "type": "object"
+          },
+          "description": "Merge only changed parameters into existing named recipes, preserving key/time/fallback settings",
+          "title": "Feature Parameters",
+          "type": "object"
+        },
+        "remove_features": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Remove Features",
+          "type": "array"
+        }
+      },
+      "required": [
+        "block"
+      ],
+      "title": "BlockEdit",
       "type": "object"
     },
     "EnsemblePlan": {
@@ -512,6 +676,32 @@
           "title": "Feature Candidate Ids",
           "type": "array"
         },
+        "build_id": {
+          "anyOf": [
+            {
+              "pattern": "^(node_[0-9]{3,}|eda_[a-f0-9]{12,64})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ready assembly ID. With changes omitted, execute the exact saved assembly; no node-planner call.",
+          "title": "Build Id"
+        },
+        "changes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssemblyChanges"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit changes to build_id; all other operations/settings remain identical"
+        },
         "priority": {
           "default": 50,
           "description": "Queue priority; higher runs first, not an expected score",
@@ -685,6 +875,51 @@
         "kind"
       ],
       "title": "SearchSpace",
+      "type": "object"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "constant",
+            "features",
+            "preprocess",
+            "fit",
+            "predict",
+            "automl",
+            "ensemble",
+            "saved_ensemble",
+            "forecast"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "parameters": {
+          "title": "Parameters",
+          "type": "object"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map canonical operation inputs to saved state keys",
+          "title": "Inputs",
+          "type": "object"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map canonical outputs to custom state keys",
+          "title": "Outputs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ToolCall",
       "type": "object"
     }
   },

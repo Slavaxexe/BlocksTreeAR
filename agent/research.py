@@ -329,7 +329,7 @@ class Research:
                 for request in row.get('analyses', []):
                     facts = measured.get(request['name'], {})
                     gain = facts.get('improvement') if isinstance(facts, dict) else None
-                    if request['kind'] != 'feature' or not isinstance(gain, (int, float)) or not math.isfinite(gain) or gain <= 0:
+                    if request['kind'] not in {'feature', 'ablation'} or not isinstance(gain, (int, float)) or not math.isfinite(gain) or gain <= 0:
                         continue
                     supporting = [item for item in review['insights'] if request['name'] in item['evidence_keys']]
                     assessment = max(supporting, key=importance_score) if supporting else {}
@@ -345,6 +345,17 @@ class Research:
                         'scope': 'Internal proxy holdout; not outer-validation evidence'}
                     identity = measurement_key(request)
                     candidate['measurement_key'] = identity
+                    configuration = facts['candidate'].get('recipe_configuration')
+                    targets = self.shared.get('preparation', {}).get('data', {}).get('target_columns')
+                    if configuration and not request.get('filters') and configuration['target_columns'] == targets:
+                        from .builds import register_eda
+                        candidate['build_id'] = 'eda_' + identity[:16]
+                        register_eda(self.directory, candidate['build_id'], configuration,
+                            {'research_node': row['node_id'], 'measurement': request['name'],
+                             'metric': candidate['metric'], 'proxy_score': facts['candidate']['value'],
+                             'improvement': gain, 'inner_split_sha256': facts['candidate']['inner_split_sha256']})
+                    if request['kind'] == 'ablation' and not candidate.get('build_id'):
+                        continue
                     self.feature_candidates = [item for item in self.feature_candidates if item.get('measurement_key') != identity]
                     self.feature_candidates.append(candidate)
                 self.questions = list(dict.fromkeys([q for q in self.questions if q not in review['resolves']]

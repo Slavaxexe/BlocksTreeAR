@@ -3,7 +3,7 @@
 from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-from .plans import AutoMLPlan, AnalysisRequest, ToolCall, EnsemblePlan, SplitPlan
+from .plans import AutoMLPlan, AnalysisRequest, ToolCall, EnsemblePlan, SplitPlan, FeatureSpec
 from .validation import metadata
 
 SHA256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
@@ -213,7 +213,7 @@ class Block(Contract):
 
 class Assembly(Contract):
     blocks: list[Block] = Field(min_length=1)
-    write_blocks: list[str] = Field(min_length=1)
+    write_blocks: list[str] = Field(default_factory=list)
 
     @model_validator(mode='before')
     @classmethod
@@ -252,6 +252,29 @@ class Proposal(Contract):
     assembly: Assembly
 
 
+class BlockEdit(Contract):
+    block: str
+    parameters: dict[str, Any] = Field(default_factory=dict, description='Recursive merge into operation parameters; unspecified settings are preserved')
+    features: list[FeatureSpec] = Field(default_factory=list, description='Add/replace recipes by name, preserving all other recipes')
+    feature_parameters: dict[str, dict[str, Any]] = Field(default_factory=dict, description='Merge only changed parameters into existing named recipes, preserving key/time/fallback settings')
+    remove_features: list[str] = Field(default_factory=list)
+
+
+class AssemblyChanges(Contract):
+    edits: list[BlockEdit] = Field(default_factory=list)
+    insert: list[Block] = Field(default_factory=list, description='New stages only; use edits to change an existing operation')
+    remove: list[str] = Field(default_factory=list)
+    order: list[str] | None = Field(default=None, description='Omit to preserve order; required when inserting stages')
+
+    @model_validator(mode='after')
+    def executable_changes(self, info: ValidationInfo):
+        context = info.context or {}
+        if context.get('build') is not None:
+            from .builds import compile_build
+            compile_build(context['build'], self, context['idea'])
+        return self
+
+
 class Idea(Contract):
     purpose: Literal['baseline', 'improve', 'explore']
     parent_id: NodeID | None = None
@@ -261,6 +284,8 @@ class Idea(Contract):
     automl: AutoMLPlan | None = Field(default=None, description='Executable AutoML configuration; null for composed trusted operations')
     ensemble: EnsemblePlan | None = Field(default=None, description='Combine completed prediction sources; compiled without a node-planner call')
     feature_candidate_ids: list[str] = Field(default_factory=list, description='Exact measured feature candidates selected for this experiment; planner must include their recipes')
+    build_id: str | None = Field(default=None, pattern=r'^(node_[0-9]{3,}|eda_[a-f0-9]{12,64})$', description='Ready assembly ID. With changes omitted, execute the exact saved assembly; no node-planner call.')
+    changes: AssemblyChanges | None = Field(default=None, description='Explicit changes to build_id; all other operations/settings remain identical')
     priority: int = Field(default=50, ge=0, le=100, description='Queue priority; higher runs first, not an expected score')
     research_ids: list[str] = Field(default_factory=list, description='IDs of only the research insights needed for this change; empty when unrelated')
 
@@ -318,6 +343,15 @@ class Ideas(Contract):
         candidates = context.get('feature_candidates', [])
         from .feature_trials import candidate_id, selected_candidates
         for idea in self.ideas:
+            if idea.build_id and (idea.automl is not None or idea.ensemble is not None):
+                raise ValueError('Choose either a ready build or a new AutoML/ensemble configuration')
+            if idea.changes is not None and idea.build_id is None:
+                raise ValueError('Explicit assembly changes need a build_id')
+            if 'build_ids' in context and idea.build_id and idea.build_id not in context['build_ids']:
+                raise ValueError('Choose a supplied ready build ID')
+            if idea.build_id and idea.build_id in context.get('builds', {}):
+                from .builds import compile_build
+                compile_build(context['builds'][idea.build_id], idea.changes, idea)
             selected_candidates(candidates, idea.feature_candidate_ids)
             if idea.feature_candidate_ids and idea.ensemble is not None:
                 raise ValueError('Feature candidates require a model experiment, not a saved-prediction ensemble')
@@ -354,6 +388,8 @@ class Ideas(Contract):
         if 'feature_candidates' in context:
             pending = {candidate_id(item) for item in candidates if item.get('trial_status') == 'untested'}
             addressed = {identity for idea in self.ideas for identity in idea.feature_candidate_ids}
+            chosen_builds = {idea.build_id for idea in self.ideas if idea.build_id}
+            addressed.update(candidate_id(item) for item in candidates if item.get('build_id') in chosen_builds)
             for decision in self.feature_decisions:
                 if decision.action == 'test' and decision.candidate_id not in addressed:
                     raise ValueError('A test decision needs an idea selecting that feature_candidate_id')
@@ -645,7 +681,7 @@ class LLMCall(Contract):
 class RunReport(Contract):
     schema_version: Literal[2] = 2
     status: Literal["running", "ready", "partial", "failed"]
-    stage: Literal["extraction", "preparation", "data_research", "baseline", "search", "final_refit", "complete"] = "extraction"
+    stage: Literal["extraction", "preparation", "data_research", "baseline", "search", "final_validation", "final_refit", "complete"] = "extraction"
     mode: Literal["qwen"] = "qwen"
     task_sha256: SHA256
     checks: list[str] = Field(default_factory=list)
@@ -673,7 +709,8 @@ class RunReport(Contract):
     research_revision: int = 0
     research_insights: int = 0
     research_stop_reason: str | None = None
+    final_validation: dict[str, Any] = Field(default_factory=dict)
 
 
 SCHEMAS = (Extraction, Preparation, Start, Finish, RunReport, Proposals, Ideas, NodePlan, Analysis, Assembly,
-           NodeDelta, Delta, ResearchPlan, ResearchReview, SplitPlan)
+           NodeDelta, Delta, ResearchPlan, ResearchReview, SplitPlan, AssemblyChanges)

@@ -13,6 +13,25 @@ from agent.contracts import Ideas
 
 
 class ContextTests(unittest.TestCase):
+    def test_baker_can_select_a_ready_eda_build_without_copying_its_recipes(self):
+        from agent.builds import register_eda
+        from pathlib import Path
+        import tempfile
+        from agent.contracts import Ideas
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration = {'features': [], 'preprocess': {'feature_columns': ['x']},
+                'fit': {'estimator': 'sklearn.linear_model.Ridge', 'parameters': {'alpha': 1.}}}
+            build = register_eda(Path(temporary), 'eda_' + 'b' * 16, configuration, {})
+            context = {'purposes': ['improve'], 'parents': ['node_000'], 'leader': 'node_000',
+                'max_new_ideas': 1, 'build_ids': [build['id']], 'builds': {build['id']: build},
+                'feature_candidates': [{'id': 'feature_test', 'features': [], 'build_id': build['id'],
+                                        'trial_status': 'untested'}]}
+            answer = Ideas.model_validate({'ideas': [{'purpose': 'improve', 'parent_id': 'node_000',
+                'change': 'Check measured recipe on outer validation', 'expected_effect': 'Measure transfer',
+                'build_id': build['id']}]}, context=context)
+            self.assertEqual(answer.ideas[0].feature_candidate_ids, [])
+            self.assertEqual(answer.ideas[0].build_id, build['id'])
+
     def test_research_focus_keeps_schema_but_limits_detailed_statistics(self):
         from agent.context import research_profile_view
         profile = {'tables': {'train': {'rows': 10, 'columns': {
@@ -106,3 +125,52 @@ class BakerTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(ask.call_args.args[1].rsplit('\n', 1)[1])
         self.assertNotIn('archive_tool', payload)
         self.assertEqual(ask.call_args.kwargs['validation']['parents'], ['node_000'])
+        self.assertIn('operations', payload)
+        self.assertIn('purpose', payload['operations']['fit'])
+        self.assertNotIn('source_node=node_...', payload['operations']['fit'].get('purpose', ''))
+        self.assertNotIn('profile', payload.get('preparation', {}))
+
+    def test_research_memory_view_optimizations_for_baker_and_researcher(self):
+        from agent.context import research_memory_view
+        memory = {
+            'revision': 1,
+            'open_questions': ['How to cluster?'],
+            'coverage': {'entities': 1},
+            'insights': [{
+                'id': 'res_1:0',
+                'phase': 'fit',
+                'statement': 'Target encoding building_class improves proxy score',
+                'kind': 'feature',
+                'importance': 'high',
+                'confidence': 'high',
+                'implication': 'Add target encoding',
+                'evidence': {
+                    'stat': {
+                        'kind': 'feature',
+                        'scope': 'fit',
+                        'rows_used': 5000,
+                        'improvement_percent': 12.3456,
+                        'baseline': {'metric': 'rmse', 'value': 45.123456, 'inner_train_rows': 5000, 'inner_validation_rows': 1000},
+                        'candidate': {'metric': 'rmse', 'value': 39.54321, 'inner_train_rows': 5000, 'inner_validation_rows': 1000}
+                    }
+                }
+            }]
+        }
+        # Baker view: clean insight with improvement_percent, no open_questions/coverage, no raw measured tables
+        baker_view = research_memory_view(memory, baker=True)
+        self.assertNotIn('open_questions', baker_view)
+        self.assertNotIn('coverage', baker_view)
+        self.assertEqual(baker_view['insights'][0]['improvement_percent'], 12.35)
+        self.assertNotIn('measured', baker_view['insights'][0])
+
+        # Researcher view: keeps open_questions, coverage, and measured, but strips redundant inner_ split keys and rounds floats
+        res_view = research_memory_view(memory, baker=False)
+        self.assertIn('open_questions', res_view)
+        self.assertIn('coverage', res_view)
+        self.assertIn('measured', res_view['insights'][0])
+        measured = res_view['insights'][0]['measured'][0]
+        self.assertEqual(measured['improvement_percent'], 12.35)
+        self.assertEqual(measured['baseline']['value'], 45.1235)
+        self.assertNotIn('inner_train_rows', measured['baseline'])
+        self.assertNotIn('inner_validation_rows', measured['candidate'])
+

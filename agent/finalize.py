@@ -59,6 +59,7 @@ class FinalRefit:
                          for key in ('task_type', 'class_labels', 'prediction_type')}
         self.deadline = time.monotonic() + seconds
         self.memo = {}
+        self.destination = root / 'final'
         self.metadata = preparation_view(self.preparation)
         self.metadata['runtime'] = {'deadline': self.deadline, 'time_budget_seconds': seconds,
             'run_directory': str(root / 'final'), 'preparation_sha256': file_hash(root / 'preparation.json'),
@@ -76,7 +77,7 @@ class FinalRefit:
         source, finish = source_node(self.root, node_id, self.metadata['runtime']['preparation_sha256'])
         if implementation_hash(source) != finish['code_sha256']:
             raise ValueError('Refit source changed after evaluation')
-        directory = self.root / 'final' / node_id
+        directory = self.destination / node_id
         directory.mkdir(parents=True, exist_ok=True)
         preparation = {**self.metadata, 'runtime': {**self.metadata['runtime'], 'work_directory': str(directory)}}
         state = {'fit': self.train, 'validation': self.test, 'test': self.test,
@@ -162,23 +163,43 @@ class FinalRefit:
         fit, query, _ = _features(fit[columns], query[columns], query[columns], feature_targets, ids)
         transformer = snapshot['feature_transformer']
         fit, query = transformer.transform(fit), transformer.transform(query)
-        labels = clone(snapshot['label_transformer']) if snapshot['label_transformer'] is not None else None
-        target = state['fit'][targets[0]].to_numpy()
-        encoded = labels.fit_transform(target) if labels is not None else target
-        core.fit(fit, encoded)
+        from .task_types import family, fit_ranker, fit_targets, multi_probabilities
+        task = family(defaults.get('task_type'), targets, state['fit'])
         classification = _classification(state, defaults)
-        probability = classification and _requires_probabilities(state, defaults)
-        values = core.predict_proba(query) if probability else core.predict(query)
-        if labels is not None and not probability:
-            values = labels.inverse_transform(np.asarray(values, dtype=int))
-        classes = labels.classes_ if labels is not None else getattr(core, 'classes_', None)
-        frame = _prediction(values, state, defaults, labels=classes, probabilities=probability)
-        if classification and callable(getattr(core, 'predict_proba', None)):
-            attach_probabilities(frame, core.predict_proba(query), classes)
+        ranked = task == 'ranking' or 'ranker' in type(core).__name__.lower()
+        if ranked:
+            query_columns = state['preparation']['data'].get('query_columns', [])
+            core = fit_ranker(core, fit, state['fit'][targets[0]].to_numpy(), state['fit'], query_columns)
+            values = core.predict(query)
+            frame = _prediction(values, state, defaults)
+            labels = None
+        elif len(targets) > 1:
+            core = fit_targets(core, fit, state['fit'][targets].to_numpy(), weights=None, seeds=[42],
+                               classification=classification, runtime=state['preparation']['runtime'])
+            probability = classification and _requires_probabilities(state, defaults)
+            if probability and hasattr(core, 'models'):
+                frame = multi_probabilities(core, query, getattr(core, 'models', []), state, defaults)
+            else:
+                values = core.predict(query)
+                frame = _prediction(values, state, defaults, probabilities=probability)
+            labels = None
+        else:
+            labels = clone(snapshot['label_transformer']) if snapshot['label_transformer'] is not None else None
+            target = state['fit'][targets[0]].to_numpy()
+            encoded = labels.fit_transform(target) if labels is not None else target
+            core.fit(fit, encoded)
+            probability = classification and _requires_probabilities(state, defaults)
+            values = core.predict_proba(query) if probability else core.predict(query)
+            if labels is not None and not probability:
+                values = labels.inverse_transform(np.asarray(values, dtype=int))
+            classes = labels.classes_ if labels is not None else getattr(core, 'classes_', None)
+            frame = _prediction(values, state, defaults, labels=classes, probabilities=probability)
+            if classification and callable(getattr(core, 'predict_proba', None)):
+                attach_probabilities(frame, core.predict_proba(query), classes)
         destination = Path(state['preparation']['runtime']['work_directory']) / 'model.pkl'
         atomic_bytes(destination, cloudpickle.dumps({'model': core, 'feature_transformer': transformer,
                                                     'label_transformer': labels, 'columns': columns}))
-        save(destination.with_suffix('.json'), {'training_rows': len(target), 'search': False})
+        save(destination.with_suffix('.json'), {'training_rows': len(state['fit']), 'search': False})
         return {'validation_predictions': frame.copy(), 'test_predictions': frame}
 
     def autogluon(self, plan, facts, state, defaults=None):

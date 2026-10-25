@@ -411,7 +411,7 @@ function drawExtraction(r) {
   c.replaceChildren(); marker(c); c.setAttribute('viewBox', '0 0 735 680'); c.style.width = '735px'; c.style.height = '680px';
   $('summary').replaceChildren();
   for (const [label, value] of [['Статус запуска', extractionStatus(r)], ['Сохранено блоков', accepted+'/4'],
-    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',search:'Поиск гипотез',final_refit:'Финальное обучение',complete:'Завершён'}[report?.stage]??'Извлечение'],
+    ['Этап', {extraction:'Извлечение',preparation:'Подготовка',baseline:'Baseline',search:'Поиск гипотез',final_validation:'Перепроверка финалистов',final_refit:'Финальное обучение',complete:'Завершён'}[report?.stage]??'Извлечение'],
     ['Вызовов в отчёте', report?.llm_calls?.length ?? '—']]) {
     const item = element('div', '', label); item.append(element('strong', '', value)); $('summary').append(item);
   }

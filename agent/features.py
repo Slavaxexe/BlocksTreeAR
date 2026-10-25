@@ -55,12 +55,34 @@ def create_features(frames, recipes, *, forbidden=(), policy=None):
         elif op == 'clip':
             bounds = pd.to_numeric(fit[columns[0]], errors='coerce').quantile(
                 [parameters.get('lower', 0.01), parameters.get('upper', 0.99)]).to_numpy()
-        elif op == 'group_mean':
-            if len(columns) != 2:
-                raise ValueError('group_mean needs [group_column, numeric_column]')
-            values = pd.to_numeric(fit[columns[1]], errors='coerce')
-            averages = values.groupby(fit[columns[0]].astype('string').fillna('__missing__')).mean()
-            fallback = values.mean()
+        elif op in {'group_mean', 'group_std', 'group_min', 'group_max', 'group_nunique', 'group_count', 'group_ratio', 'group_diff'}:
+            group_key = fit[columns[0]].astype('string').fillna('__missing__')
+            if op == 'group_count':
+                stat_map = group_key.value_counts()
+                fallback = 0
+            elif op == 'group_nunique':
+                if len(columns) != 2:
+                    raise ValueError('group_nunique needs [group_column, target_column]')
+                val_key = fit[columns[1]].astype('string').fillna('__missing__')
+                stat_map = val_key.groupby(group_key).nunique()
+                fallback = 1
+            else:
+                if len(columns) != 2:
+                    raise ValueError(f'{op} needs [group_column, numeric_column]')
+                values = pd.to_numeric(fit[columns[1]], errors='coerce')
+                grouped = values.groupby(group_key)
+                if op in {'group_mean', 'group_ratio', 'group_diff'}:
+                    stat_map = grouped.mean()
+                    fallback = values.mean()
+                elif op == 'group_std':
+                    stat_map = grouped.std().fillna(0)
+                    fallback = 0.0 if np.isnan(values.std()) else values.std()
+                elif op == 'group_min':
+                    stat_map = grouped.min()
+                    fallback = values.min()
+                elif op == 'group_max':
+                    stat_map = grouped.max()
+                    fallback = values.max()
         for frame in frames:
             if op == 'expression':
                 result = expression.transform(frame)
@@ -68,8 +90,17 @@ def create_features(frames, recipes, *, forbidden=(), policy=None):
                 result = frame[columns].isna().any(axis=1).astype(int)
             elif op == 'frequency':
                 result = frame[columns[0]].astype('string').fillna('__missing__').map(frequencies).fillna(0)
-            elif op == 'group_mean':
-                result = frame[columns[0]].astype('string').fillna('__missing__').map(averages).fillna(fallback)
+            elif op in {'group_mean', 'group_std', 'group_min', 'group_max', 'group_nunique', 'group_count', 'group_ratio', 'group_diff'}:
+                grp = frame[columns[0]].astype('string').fillna('__missing__')
+                mapped = grp.map(stat_map).fillna(fallback)
+                if op == 'group_diff':
+                    num = pd.to_numeric(frame[columns[1]], errors='coerce')
+                    result = num - mapped
+                elif op == 'group_ratio':
+                    num = pd.to_numeric(frame[columns[1]], errors='coerce')
+                    result = num / mapped.replace(0, np.nan)
+                else:
+                    result = mapped
             elif op == 'datetime':
                 part = parameters.get('part', 'month')
                 result = getattr(pd.to_datetime(frame[columns[0]], errors='coerce').dt, part)

@@ -104,30 +104,39 @@ def select_research(memory, query, limit=8):
             'omitted_insight_count': memory.get('omitted_insight_count', 0) + len(insights) - len(selected)}
 
 
-def research_memory_view(memory, *, review=False):
+def research_memory_view(memory, *, review=False, baker=False):
     """Keep claims and applicable recipes; detailed evidence remains in the research archive."""
     keys = ('id', 'phase', 'statement', 'kind', 'importance', 'confidence')
     if not review:
         keys += ('implication',)
-    result = {key: memory[key] for key in ('revision', 'open_questions', 'coverage', 'omitted_insight_count') if key in memory}
+    result_keys = ('revision', 'omitted_insight_count') if baker else ('revision', 'open_questions', 'coverage', 'omitted_insight_count')
+    result = {key: memory[key] for key in result_keys if key in memory}
     result['insights'] = [{key: item[key] for key in keys if key in item} for item in memory.get('insights', [])]
     for source, insight in zip(memory.get('insights', []), result['insights']):
+        if baker:
+            improvements = [facts['improvement_percent'] for facts in source.get('evidence', {}).values()
+                            if isinstance(facts, dict) and facts.get('improvement_percent') is not None]
+            if improvements:
+                insight['improvement_percent'] = round(improvements[0], 2) if len(improvements) == 1 else [round(x, 2) for x in improvements]
+            continue
         measured = []
         for facts in source.get('evidence', {}).values():
             if not isinstance(facts, dict):
                 continue
             values = {key: facts[key] for key in ('kind', 'scope', 'rows_used', 'improvement_percent') if key in facts}
+            if 'improvement_percent' in values and isinstance(values['improvement_percent'], float):
+                values['improvement_percent'] = round(values['improvement_percent'], 2)
             for side in ('baseline', 'candidate'):
                 if side in facts:
-                    values[side] = {key: facts[side][key] for key in ('metric', 'value', 'inner_train_rows',
-                        'inner_validation_rows', 'inner_reference_rows') if key in facts[side]}
+                    values[side] = {key: (round(facts[side][key], 4) if isinstance(facts[side][key], float) else facts[side][key])
+                                    for key in ('metric', 'value') if key in facts[side]}
             if values:
                 measured.append(values)
         if measured:
             insight['measured'] = measured
     if not review:
         result['feature_candidates'] = [{key: value for key, value in item.items() if key in {
-            'id', 'research_node', 'features', 'columns', 'metric', 'improvement', 'relative_improvement',
+            'id', 'build_id', 'research_node', 'features', 'columns', 'metric', 'improvement', 'relative_improvement',
             'scope', 'trial_status', 'trials', 'decision'}}
                                         for item in memory.get('feature_candidates', [])]
     return result
@@ -247,9 +256,14 @@ def research_columns(profile, direction, focus, offset=0, limit=10):
 
 
 def model_feedback(row):
+    res = result_view(row.result)
+    if 'value' in res and isinstance(res['value'], float):
+        res['value'] = round(res['value'], 4)
+    if 'duration_seconds' in res and isinstance(res['duration_seconds'], float):
+        res['duration_seconds'] = round(res['duration_seconds'], 2)
     return compact({'node_id': row.node_id,
                     'model': {key: value for key, value in row.hypothesis.pipeline.model.items() if key in {'name', 'engine'}},
-                    'result': result_view(row.result),
+                    'result': res,
                     'analysis': row.analysis.summary if row.analysis else None})
 
 
@@ -353,6 +367,13 @@ def node_context(context, research_ids):
 def research_profile_view(profile, *, detailed=True, focus_columns=None):
     """Keep measured values and column names while removing repeated per-column JSON keys."""
     result = {key: value for key, value in profile.items() if key != 'tables'}
+    if 'entity_key_candidates' in result and isinstance(result['entity_key_candidates'], dict):
+        cands = [dict(c) for c in result['entity_key_candidates'].get('candidates', [])]
+        for c in cands:
+            for k, v in c.items():
+                if isinstance(v, float):
+                    c[k] = round(v, 4)
+        result['entity_key_candidates'] = {**result['entity_key_candidates'], 'candidates': cands}
     result['quantile_levels'] = [0, .25, .5, .75, 1] if detailed else [0, .5, 1]
     if not detailed:
         result['frequent_values_limit'] = 3
@@ -369,7 +390,10 @@ def research_profile_view(profile, *, detailed=True, focus_columns=None):
             if column.get('nonfinite'):
                 nonfinite[name] = column['nonfinite']
             if column.get('quantiles'):
-                quantiles[name] = [column['quantiles'][str(float(q))] for q in result['quantile_levels']]
+                quantiles[name] = [round(column['quantiles'][str(float(q))], 4)
+                                   if isinstance(column['quantiles'][str(float(q))], float)
+                                   else column['quantiles'][str(float(q))]
+                                   for q in result['quantile_levels']]
             if 'frequent_values' in column:
                 frequent[name] = column['frequent_values'] if detailed else dict(
                     sorted(column['frequent_values'].items(), key=lambda item: item[1], reverse=True)[:3])

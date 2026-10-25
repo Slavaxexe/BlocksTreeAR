@@ -1,7 +1,7 @@
 """Track measured feature recipes through planning and actual model experiments."""
 import json
 
-from .plans import FeatureSpec
+from .plans import FeatureSpec, HistorySettings, TargetEncodingSettings
 from .storage import fingerprint
 
 
@@ -16,9 +16,9 @@ def recipe_keys(features):
     for feature in features:
         value = FeatureSpec.model_validate(feature).model_dump()
         if value['operation'] == 'history':
-            # Omitted executor defaults and explicit defaults describe the same recipe.
-            defaults = {'window': None, 'max_age': None, 'lag': 1, 'min_history': 1, 'fallback': 'global'}
-            value['parameters'] = {**defaults, **value['parameters']}
+            value['parameters'] = HistorySettings.model_validate(value['parameters']).model_dump()
+        elif value['operation'] == 'target_encoding':
+            value['parameters'] = TargetEncodingSettings.model_validate(value['parameters']).model_dump()
         result.add(fingerprint(value))
     return result
 
@@ -48,10 +48,13 @@ def candidate_view(candidates, directory, rows, records, decisions):
         identity = candidate_id(candidate)
         wanted = recipe_keys(candidate['features'])
         trials = [{'node_id': row.node_id, 'status': row.result.status, 'value': row.result.value}
-                  for row, recipes in measured if wanted <= recipes]
+                  for row, recipes in measured if (row.hypothesis.pipeline.data.get('build_id') == candidate['build_id']
+                      and not row.hypothesis.pipeline.training.get('changes')
+                      if candidate.get('build_id') else wanted <= recipes)]
         pending = [record.get('node_id') or record['id'] for record in records
                    if record['status'] in {'queued', 'planning', 'planned'}
-                   and identity in record['idea'].get('feature_candidate_ids', [])
+                   and (identity in record['idea'].get('feature_candidate_ids', [])
+                        or candidate.get('build_id') and record['idea'].get('build_id') == candidate['build_id'])
                    and not any(trial['node_id'] == record.get('node_id') for trial in trials)]
         status = ('tested' if any(trial['status'] == 'completed' for trial in trials)
                   else 'pending' if pending else 'failed' if trials else 'untested')

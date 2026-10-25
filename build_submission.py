@@ -19,17 +19,18 @@ from config import Settings
 from runner import Options, run
 
 
-def submission_options(time_budget=10500):
+def submission_options(time_budget=10800):
     return Options(time_budget=time_budget, experiment_timeout=600,
         final_refit_seconds=900, eda_seconds=900,
         max_experiments=None, max_research_nodes=None, max_llm_calls=None,
-        parallel=6, parallel_agents=8, research_parallel=2, research_timeout=120)
+        parallel=6, parallel_agents=8, research_parallel=2, research_timeout=120,
+        research_unlimited=True)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('task', nargs='?', type=Path, default=Path('task.md'))
-    parser.add_argument('--time-budget', type=float, default=10500)
+    parser.add_argument('--time-budget', type=float, default=10800)
     args = parser.parse_args(argv)
     settings = None
     try:
@@ -116,5 +117,5 @@ def build(archive):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, default=Path(__file__).with_name('submission_6.zip'))
+    parser.add_argument('--output', type=Path, default=Path('C:/Projects/AlfaHakaton/submission_9.zip'))
     print(json.dumps(build(parser.parse_args().output)))

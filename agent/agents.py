@@ -93,10 +93,20 @@ def json_text(content):
         body = body[:-1] if closing else body
         candidate = '\n'.join(body).strip()
         try:
-            json.loads(candidate)
+            json.loads(candidate, strict=False)
+            return candidate
         except ValueError:
-            return text
-        return candidate
+            pass
+    if '{' in text:
+        first = text.find('{')
+        last = text.rfind('}')
+        if last > first:
+            candidate = text[first:last + 1].strip()
+            try:
+                json.loads(candidate, strict=False)
+                return candidate
+            except ValueError:
+                pass
     return text
 
 
@@ -406,9 +416,17 @@ class JSONAgents:
                              result_characters=sum(len(row['content']) for row in messages[-len(tool_calls):]),
                              duration_seconds=time.monotonic() - started, **stats)
                     continue
-                payload = json.loads(document)
+                if '{' in document and not document.startswith('{'):
+                    first = document.find('{')
+                    last = document.rfind('}')
+                    if last > first:
+                        document = document[first:last + 1].strip()
+                payload = json.loads(document, strict=False)
                 json.dumps(payload, allow_nan=False)
-                result = schema.model_validate_json(document, context={"source": source, **(validation or {})})
+                try:
+                    result = schema.model_validate_json(document, context={"source": source, **(validation or {})})
+                except ValidationError:
+                    result = schema.model_validate(payload, context={"source": source, **(validation or {})})
                 if isinstance(result, Ideas) and len(payload.get('ideas', [])) != len(result.ideas):
                     self.log('api_ideas_normalized', request_id=request_id,
                              received=len(payload['ideas']), accepted=len(result.ideas))
@@ -463,7 +481,7 @@ class JSONAgents:
                         messages.append({'role': 'user', 'content': 'Previously found API facts:\n' +
                             json.dumps(reference_results, ensure_ascii=False, separators=(',', ':'))})
                     messages += [{'role': 'assistant', 'content': content},
-                                 {'role': 'user', 'content': 'Correct this JSON. Validation errors: ' + json.dumps(details)}]
+                                 {'role': 'user', 'content': 'Output the COMPLETE corrected JSON object from start to finish, beginning with "{" and ending with "}". Do not continue from the error location. Validation errors: ' + json.dumps(details)}]
             else:
                 self.calls.append(LLMCall(status="completed", **stats))
                 self.log('api_completed', request_id=request_id, duration_seconds=time.monotonic() - started, **stats)
@@ -572,23 +590,30 @@ class JSONAgents:
                 and bool((context.get('data_profile') or {}).get('ordered_query_ranges'))})
 
     async def propose_ideas(self, context: dict):
-        from .operations import CATALOG
+        from .operations import operations_summary
         from .automl_catalog import CAPABILITIES
         research = research_memory_view(select_research(context.get('data_research', {}),
-                                   [context.get('experiments', []), context.get('queued_ideas', [])], limit=5))
+                                   [context.get('experiments', []), context.get('queued_ideas', [])], limit=5),
+                                   baker=True)
         fields = ('purposes', 'max_new_ideas', 'queue_capacity', 'remaining_experiments',
                   'slot_limits', 'occupied_slots', 'api_budget', 'automl_portfolio',
                   'queued_ideas', 'leader_id', 'available_parents', 'experiments', 'experiment_index',
-                  'module_catalog', 'previous_ideas', 'idea_coverage', 'remaining_seconds',
+                  'module_catalog', 'ready_builds', 'previous_ideas', 'idea_coverage', 'remaining_seconds',
                   'feedback_revision', 'experiment_timeout_seconds', 'trigger', 'planning_error')
-        payload = compact({'operations': CATALOG, 'automl_engines': CAPABILITIES,
-            **task_context(context), **{key: context[key] for key in fields if key in context},
+        payload = compact({'operations': operations_summary(), 'automl_engines': CAPABILITIES,
+            **task_context(context, profile=False), **{key: context[key] for key in fields if key in context},
             'prediction_sources': table(context.get('prediction_sources', [])),
             'data_research': {key: research[key] for key in ('revision', 'insights', 'feature_candidates', 'omitted_insight_count') if key in research}})
         for key in ('queued_ideas', 'previous_ideas', 'experiments', 'available_parents'):
             payload.setdefault(key, context.get(key, []))
         payload.setdefault('occupied_slots', context.get('occupied_slots', {}))
         payload['leader_id'] = context.get('leader_id')
+        if 'feature_candidates' in payload.get('data_research', {}):
+            payload['data_research']['feature_candidates'] = [dict(item) for item in research['feature_candidates']]
+        for candidate in payload.get('data_research', {}).get('feature_candidates', []):
+            if candidate.get('build_id'):
+                candidate['feature_names'] = [item['name'] for item in candidate.pop('features', [])]
+                candidate.pop('columns', None)
         prompt = (
             "Choose the next concrete ML hypotheses and manage queued_ideas. Return up to max_new_ideas; "
             "zero is valid. Updates may prioritize (0..100) or remove only queued IDs with a reason. "
@@ -607,6 +632,12 @@ class JSONAgents:
             "not automatic acceptance. Test a candidate as a controlled change on a suitable parent; keep unrelated "
             "settings fixed. Pending/tested recipes need no duplicate trial without a new concrete reason. "
             "State one coherent change, affected/new block names, concrete settings and expected effect. "
+            "Prefer ready_builds: an EDA build needs only a short change rationale and build_id, no changes to reproduce it. "
+            "A node build needs build_id plus explicit changes. edits recursively merge only specified parameters; "
+            "features adds/replaces named recipes, remove_features removes named recipes. Unmentioned settings/stages are preserved. "
+            "feature_parameters merges only changed settings into an existing recipe, preserving its key/time/fallback. "
+            "To replace a model family, remove and insert the fit stage with explicit order instead of carrying incompatible old kwargs. "
+            "A ready build is compiled locally without a node-planner request. Do not copy its entire configuration. "
             "Keep the change about the new action, without copying parent configuration or dataset statistics. "
             "Compare diverse model families when evidence/time permit: boosting, ExtraTrees and a regularized linear model. "
             "Diversity is a hypothesis, not a guarantee of ensemble gain. Distribution shift alone does not justify dropping features; use matched ablations. "
@@ -644,7 +675,9 @@ class JSONAgents:
                         'installed_libraries': context.get('installed_libraries', {}),
                         'prediction_sources': context.get('prediction_sources', []),
                         'research_ids': [item['id'] for item in research.get('insights', [])],
-                        'feature_candidates': research.get('feature_candidates', [])})
+                        'feature_candidates': research.get('feature_candidates', []),
+                        'build_ids': [item['id'] for item in context.get('ready_builds', [])],
+                        'builds': context.get('_build_lookup', {})})
 
     async def configure_automl(self, context: dict, engine: str):
         from .plans import AutoMLPlan
@@ -679,6 +712,27 @@ class JSONAgents:
         from .feature_trials import selected_candidates
         selected = selected_candidates(context.get('data_research', {}).get('feature_candidates', []), idea.feature_candidate_ids)
         context = node_context(context, idea.research_ids)
+        if context.get('parent_build') is not None and idea.purpose == 'improve':
+            from .contracts import AssemblyChanges
+            from .builds import compile_build
+            build = context['parent_build']
+            payload = compact({**task_context(context, profile=False), 'idea': idea.model_dump(exclude_defaults=True),
+                'build': build, 'selected_feature_candidates': selected, 'operations': CATALOG,
+                'experiment_timeout_seconds': context['experiment_timeout_seconds']})
+            changes = await self.ask(AssemblyChanges,
+                'Return only explicit changes to this immutable assembly. Never rewrite unmodified stages or settings. '
+                'edits.parameters recursively merges dictionaries; omitted values are inherited. For fit model kwargs '
+                'use parameters={parameters:{name:value}}. features adds/replaces recipes by name; remove_features removes them. '
+                'feature_parameters maps recipe names to partial parameter changes, preserving every other recipe setting. '
+                'Insert stages explicitly with a complete order; remove+insert to replace a model family. '
+                'Preserve preprocessing and every unrelated model parameter. The AutoML reuse_node freezes selection; '
+                'do not remove it unless this hypothesis explicitly requests a new search. Keep the hypothesis concise.\n' +
+                json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
+                'node_planner', reference=False, validation={'build': build, 'idea': idea})
+            proposal = compile_build(build, changes, idea)
+            from .feature_trials import check_recipes
+            check_recipes(proposal, selected)
+            return proposal
         payload = compact({**task_context(context), 'idea': idea.model_dump(exclude_defaults=True),
             'parent': context.get('parent'), 'module_catalog': planner_catalog(catalog, idea),
             'remaining_seconds': context['remaining_seconds'],

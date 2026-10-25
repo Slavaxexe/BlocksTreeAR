@@ -15,6 +15,62 @@ from tests import test_ensembles, test_operations
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_eda_build_executes_without_replanning_and_changes_preserve_settings(self):
+        from agent.builds import register_eda, compile_build, store
+        from agent.contracts import Idea, Assembly, AssemblyChanges, BlockEdit
+        from agent.plans import FeatureSpec
+        from agent.eda import analyze_features
+        state = test_operations.OperationTests().state()
+        facts = analyze_features(state, {'name': 'sum', 'kind': 'feature', 'columns': ['a'],
+            'features': [{'name': 'sum_ab', 'operation': 'sum', 'columns': ['a', 'b']}],
+            'sample_rows': None}, task_type='regression')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ready = register_eda(root, 'eda_' + 'a' * 16, facts['candidate']['recipe_configuration'], {})
+            idea = Idea(purpose='improve', parent_id='node_000', change='Test the measured recipe', expected_effect='Measure')
+            proposal = compile_build(ready, None, idea)
+            for block in proposal.assembly.blocks:
+                state.update(run_operation(state, block.operation, {'task_type': 'regression'}))
+            self.assertEqual(len(state['test_predictions']), 12)
+            self.assertEqual(state['model']['estimator'].n_estimators, 64)
+            parent = store(root, 'node_001', proposal.assembly, ready['model'])
+            extra = FeatureSpec(name='delta', operation='difference', columns=['a', 'b'])
+            changed = compile_build(parent, AssemblyChanges(edits=[BlockEdit(block='features', features=[extra])]), idea)
+            calls = {block.name: block.operation for block in changed.assembly.blocks}
+            self.assertEqual(calls['fit'], proposal.assembly.blocks[2].operation)
+            self.assertEqual(calls['preprocess'].parameters['scaling'], 'standard')
+            self.assertEqual(calls['preprocess'].parameters['feature_columns'], ['a', 'sum_ab', 'delta'])
+            self.assertEqual(parent['assembly']['blocks'][1]['operation']['parameters']['feature_columns'], ['a', 'sum_ab'])
+            tuned = compile_build(parent, AssemblyChanges(edits=[BlockEdit(block='fit', parameters={
+                'parameters': {'min_samples_leaf': 5}})]), idea)
+            for block in tuned.assembly.blocks:
+                state.update(run_operation(state, block.operation, {'task_type': 'regression'}))
+            self.assertEqual(state['model']['estimator'].min_samples_leaf, 5)
+            self.assertEqual(state['model']['estimator'].n_estimators, 64)
+
+    def test_finalist_splits_keep_time_groups_and_original_positions(self):
+        from agent.final_validation import extra_splits
+        frame = pd.DataFrame({'period': np.repeat([1, 2, 3, 4, 5], 8),
+                              'person': np.tile(np.arange(8), 5)})
+        available = np.arange(32)
+        timed = extra_splits(frame, available, {'strategy': 'time', 'time_column': 'period'}, [], 2)
+        self.assertEqual(len(timed), 2)
+        for train, valid in timed:
+            self.assertLess(frame.iloc[train].period.max(), frame.iloc[valid].period.min())
+            self.assertTrue(set(train) | set(valid) <= set(available))
+            self.assertFalse(set(train) & set(valid))
+        grouped = extra_splits(frame, available, {'strategy': 'group', 'group_columns': ['person']}, [], 2)
+        for train, valid in grouped:
+            self.assertFalse(set(frame.iloc[train].person) & set(frame.iloc[valid].person))
+
+    def test_finalist_promotion_needs_matched_consistent_results(self):
+        from agent.final_validation import choose
+        candidates = [{'node_id': 'a', 'value': 40.}, {'node_id': 'b', 'value': 41.}]
+        self.assertEqual(choose('a', candidates, {'a': [40., 40.], 'b': [30., 31.]}, 'minimize', 2), 'b')
+        self.assertEqual(choose('a', candidates, {'a': [40., 40.], 'b': [20., 41.]}, 'minimize', 2), 'a')
+        self.assertEqual(choose('a', candidates, {'a': [40., None], 'b': [20., 21.]}, 'minimize', 2), 'a')
+        self.assertEqual(choose('a', candidates, {'a': [40.], 'b': [20.]}, 'minimize', 2), 'a')
+
     def test_unquoted_col_and_history_defaults_match_executor_meaning(self):
         from agent.feature_expression import FeatureExpression
         from agent.feature_trials import recipe_keys
@@ -26,7 +82,7 @@ class UpgradeTests(unittest.TestCase):
         recipe = {'name': 'past', 'operation': 'history', 'columns': ['entity'],
                   'parameters': {'time_column': 'period', 'value_column': 'target'}}
         explicit = {**recipe, 'parameters': {**recipe['parameters'], 'window': None,
-                    'max_age': None, 'lag': 1, 'min_history': 1, 'fallback': 'global'}}
+                    'max_age': None, 'lag': 1, 'min_history': 1, 'fallback': 'missing'}}
         self.assertEqual(recipe_keys([recipe]), recipe_keys([explicit]))
         explicit['parameters']['lag'] = 2
         self.assertNotEqual(recipe_keys([recipe]), recipe_keys([explicit]))

@@ -123,14 +123,12 @@
       "items": {
         "type": "string"
       },
-      "minItems": 1,
       "title": "Write Blocks",
       "type": "array"
     }
   },
   "required": [
-    "blocks",
-    "write_blocks"
+    "blocks"
   ],
   "title": "Assembly",
   "type": "object"

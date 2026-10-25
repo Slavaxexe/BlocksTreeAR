@@ -107,6 +107,7 @@
         "data_research",
         "baseline",
         "search",
+        "final_validation",
         "final_refit",
         "complete"
       ],
@@ -297,6 +298,10 @@
       ],
       "default": null,
       "title": "Research Stop Reason"
+    },
+    "final_validation": {
+      "title": "Final Validation",
+      "type": "object"
     }
   },
   "required": [
