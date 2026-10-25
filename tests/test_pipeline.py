@@ -1356,12 +1356,12 @@ class SubmissionTests(unittest.TestCase):
         with patch('solution.cli', return_value=0) as cli:
             main(['task.md'])
             arguments = cli.call_args.args[0]
-            for option, value in {'--time-budget': '9900', '--experiment-timeout': '1200', '--max-nodes': '1000',
-                                  '--executors': '6', '--threads': '2'}.items():
+            for option, value in {'--time-budget': '9600', '--experiment-timeout': '900', '--max-nodes': '1000',
+                                  '--executors': '6', '--threads': '1', '--llm-concurrency': '8'}.items():
                 self.assertEqual(arguments[arguments.index(option) + 1], value)
             main(['task.md', '--time-budget=300', '--experiment-timeout', '60', '--max-nodes', '1'])
             self.assertEqual(cli.call_args.args[0], ['baseline', '--task', 'task.md', '--platform-output', '--time-budget=300',
-                '--experiment-timeout', '60', '--max-nodes', '1', '--executors', '6', '--threads', '2'])
+                '--experiment-timeout', '60', '--max-nodes', '1', '--executors', '6', '--threads', '1', '--llm-concurrency', '8'])
 
     def test_default_entry_never_uses_fallback_or_masks_agent_exit(self):
         import solution

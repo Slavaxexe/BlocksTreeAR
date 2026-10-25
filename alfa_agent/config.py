@@ -19,7 +19,7 @@ class Settings:
     api_key: str = field(repr=False)
     base_url: str
     model: str
-    timeout_seconds: float | None = 1200  # None waits for the answer; the run budget bounds a request either way
+    timeout_seconds: float | None = 600  # None waits for the answer; the run budget bounds a request either way
     max_tokens: int | None = None
 
     @classmethod
@@ -33,7 +33,7 @@ class Settings:
         values = dict(dotenv_values(path, encoding="utf-8", interpolate=False))
         values.update(os.environ if environ is None else environ)
         try:
-            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "1200")
+            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "600")
         except (ValueError, TypeError):
             raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть числом.") from None
         return cls(

@@ -42,7 +42,7 @@ class ConfigurationTests(unittest.TestCase):
                 'OPENAI_API_KEY': 'fake-secret', 'OPENAI_BASE_URL': 'https://proxy.example/v1'})
             settings.validate()
             self.assertEqual(settings.model, 'qwen/qwen3.8-27b')
-            self.assertEqual(settings.timeout_seconds, 1200)
+            self.assertEqual(settings.timeout_seconds, 600)
 
     def test_platform_http_and_https_proxies_are_accepted(self):
         for url in ["http://llm-proxy:8080/v1", "http://10.0.0.2:8000/v1/",
