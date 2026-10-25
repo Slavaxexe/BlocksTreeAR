@@ -22,6 +22,7 @@ from .config import Settings
 from .contracts import (Change, Comparison, Delta, Extraction, Finalization, Finish, Hypothesis, NodeDelta, Preparation,
                         Program, ReviewRecord, Start)
 from .qwen import QwenError
+from .research import Research
 from .data import check_code, file_hash, inventory, library_context, within
 from .storage import atomic_bytes, canonical, load, save
 
@@ -104,6 +105,7 @@ class Options:
     executors: int = 2  # concurrent experiment processes
     threads: int | None = None  # library threads per process; default 4 with autopilot, else 2
     llm_concurrency: int = 0  # simultaneous LLM requests per run; 0 = unbounded
+    research_parallel: int = 0  # optional advisory workers, enabled by the platform entry
 
 
 async def process(arguments: list[str], cwd: Path, log: Path, deadline: float, timeout: float):
@@ -326,6 +328,8 @@ async def run(task_path: Path, options: Options, settings: Settings):
         raise ValueError('Time budgets must be finite, positive and at most three hours')
     if type(options.max_nodes) is not int or not 1 <= options.max_nodes <= 1000:
         raise ValueError('max_nodes must be an integer between 1 and 1000')
+    if type(options.research_parallel) is not int or not 0 <= options.research_parallel <= 2:
+        raise ValueError("research_parallel must be 0, 1 or 2")
     task_path = task_path.resolve()
     CHILD.update(threads=options.threads or (4 if options.autopilot else 2), shift_check=options.autopilot)
     final_deadline = time.monotonic() + options.time_budget
@@ -343,13 +347,14 @@ async def run(task_path: Path, options: Options, settings: Settings):
 
     active, waiting, starts, planner, planning = {}, deque(), {}, None, None
     sources, baseline_id, references = {}, None, set()  # controller code by node; search gate; AutoML nodes
+    research = None
     measured = {}  # AST hash of every completed node's code -> node id
 
     def update(**changes):
         nonlocal report
         report = report.model_copy(update={**changes, 'llm_calls': list(agents.calls),
             'running_nodes': [s.node_id for s in active.values()], 'queued_nodes': [s.node_id for s in waiting],
-            'planning': planner is not None})
+            'planning': planner is not None, 'research': research.report() if research else {}})
         try:
             save(directory / 'report.json', report)
         except OSError as error:
@@ -466,6 +471,10 @@ async def run(task_path: Path, options: Options, settings: Settings):
         def checkpoint(warning=None):
             update(warnings=report.warnings + ([warning] if warning else []))
 
+        if options.research_parallel and options.max_nodes > 1:
+            research = Research(agents, directory, shared, process, checkpoint, options.research_parallel)
+            research.start()
+
         def parent_view(node_id):
             node = directory / 'nodes' / node_id
             return {'start': load(node / 'start.json', Start).model_dump(mode='json'),
@@ -497,6 +506,10 @@ async def run(task_path: Path, options: Options, settings: Settings):
                     atomic_bytes(directory / 'best.json', json.dumps({'node_id': selected, 'value': result.value,
                                  'submission_file': output_file.relative_to(directory).as_posix()}).encode())
                 published = selected
+            if research is not None:
+                research.feedback = [{'node_id': n.node_id, 'pipeline': n.hypothesis.pipeline.model_dump(),
+                    'status': n.result.status, 'score': n.result.value, 'diagnostics': n.result.diagnostics}
+                    for n in delta.nodes[-4:]]
             completed = sum(n.result.status == 'completed' for n in delta.nodes)
             update(completed_nodes=completed, failed_nodes=len(delta.nodes) - completed,
                    warnings=report.warnings + ([f'{start.node_id}: {finish.error}'] if finish.error else []))
@@ -615,6 +628,11 @@ async def run(task_path: Path, options: Options, settings: Settings):
         update(status='partial' if published else 'failed', stop_reason=stop_reason,
                errors=report.errors + [error_message(error)])
     finally:
+        if research is not None:
+            try:
+                await research.close()
+            except (Exception, asyncio.CancelledError) as error:
+                update(warnings=report.warnings + ["Research cleanup: " + error_message(error)])
         tasks = [*active, *([planner] if planner else [])]
         for task in tasks:
             if not task.done():

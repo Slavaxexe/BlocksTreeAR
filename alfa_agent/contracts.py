@@ -373,7 +373,7 @@ class Delta(Contract):
 
 class LLMCall(Contract):
     role: str
-    node_id: NodeID | None = None
+    node_id: Annotated[str, Field(pattern=r"^(node|research)_[0-9]{3}$")] | None = None
     attempt: int
     status: Literal["completed", "invalid_json", "api_error"]
     prompt_tokens: int = 0
@@ -397,6 +397,7 @@ class RunReport(Contract):
     running_nodes: list[NodeID] = Field(default_factory=list)
     queued_nodes: list[NodeID] = Field(default_factory=list)
     planning: bool = False
+    research: dict[str, Any] = Field(default_factory=dict)
 
 
 SCHEMAS = (Extraction, Preparation, Start, Finish, NodeDelta, Delta, RunReport, Finalization)

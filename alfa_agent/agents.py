@@ -45,7 +45,7 @@ def runtime_contract(preparation):
 def implementation_context(context):
     """Keep the current plan authoritative; ancestor refusals are not execution facts."""
     threads = context.get('runtime_limits', {}).get('threads_per_executor', 2)
-    keys = ('task_text', 'preparation', 'runtime_limits', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error',
+    keys = ('task_text', 'preparation', 'data_research', 'runtime_limits', 'installed_libraries', 'allowed_libraries', 'previous_code', 'execution_error',
             'error_location', 'api_reference', 'repair_mode', 'failed_stage',
             'last_refusal', 'requests_left', 'review_findings', 'repair_progress')
     result = {'start': context['start'], 'runtime_contract': runtime_contract(context['preparation']),
@@ -110,7 +110,7 @@ def baker_context(context):
             'error_source': ('model_request' if result.get('replan') else 'model_claim' if error.startswith('Implementation blocked:') else
                              'review' if result.get('stage') == 'review' else
                              'runtime' if result.get('stage') in ('check', 'execution') else 'controller') if error else None}
-    keys = ('task_text', 'preparation', 'runtime_limits', 'installed_libraries', 'allowed_libraries', 'remaining_nodes', 'remaining_seconds',
+    keys = ('task_text', 'preparation', 'data_research', 'runtime_limits', 'installed_libraries', 'allowed_libraries', 'remaining_nodes', 'remaining_seconds',
             'experiment_timeout_seconds', 'available_parents')
     def brief(node):
         measured = node['result'].get('diagnostics', {})
@@ -388,6 +388,8 @@ class JSONAgents:
             "target_stats) so encoding/validation code stays short and correct; gbdt() is only a LightGBM shortcut and "
             "cannot host other models. Use target_stats for target-derived entity features (never the rows' own targets). "
             "CURRENT NODE: only context.start defines your assignment; parent_reference is optional reference code. "
+            "data_research is advisory measured context, not permission to change this saved plan. "
+            "Never use validation/test labels for feature construction or replace the fixed split/scorer. "
             "On repair, correct previous_code using execution_error and failed_stage; do not repeat the same error. "
             "api_reference gives the REAL signatures of the library calls in previous_code (installed versions): use only "
             "parameters that exist there. When repair_mode is 'edits', previous_code is numbered: return code empty and only "
@@ -476,6 +478,9 @@ class JSONAgents:
             "not proof that a plan is impossible. error_source=review is a code-review judgment, not an observed runtime failure. "
             "Runtime failures describe that execution, not a permanent ban on a family. "
             "Use profile missing/distinct counts, observed errors and time costs to justify the next experiment; do not invent diagnostics. "
+            "When data_research is supplied, consider its evidence and open questions for feature/model hypotheses. "
+            "Cite relevant research IDs in rationale. Findings are sampled descriptive evidence, not model-score gains; "
+            "test suggestions in new experiments, respect limitations and avoid repeating pending/tried plans. "
             "Use measured diagnostics (weak-class precision/recall/support and parent deltas); rising recall with falling precision may hurt the primary score. "
             "replan_requests preserve immutable failed plans. Propose a corrected NEW plan; unavailable outer validation labels "
             "can be replaced by a task-appropriate INTERNAL labeled split of fit. Claims from the model are requests, not proven impossibility. "

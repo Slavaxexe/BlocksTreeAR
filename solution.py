@@ -36,7 +36,7 @@ def main(argv=None):
 def run(task, args):
     # Leave twenty minutes before the platform's three-hour stop; time, not a node count, ends the search.
     for option, value in {'--time-budget': '9600', '--experiment-timeout': '900', '--max-nodes': '1000',
-                          '--executors': '6', '--threads': '1', '--llm-concurrency': '8'}.items():
+                          '--executors': '6', '--threads': '1', '--llm-concurrency': '8', '--research-parallel': '2'}.items():
         if not any(arg == option or arg.startswith(option + '=') for arg in args):
             args.extend((option, value))
     return cli(['baseline', '--task', task, '--platform-output', *args])

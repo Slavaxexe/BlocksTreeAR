@@ -10,7 +10,7 @@
         "node_id": {
           "anyOf": [
             {
-              "pattern": "^node_[0-9]{3}$",
+              "pattern": "^(node|research)_[0-9]{3}$",
               "type": "string"
             },
             {
@@ -187,6 +187,10 @@
       "default": false,
       "title": "Planning",
       "type": "boolean"
+    },
+    "research": {
+      "title": "Research",
+      "type": "object"
     }
   },
   "required": [

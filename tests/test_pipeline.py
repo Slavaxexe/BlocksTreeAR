@@ -1357,11 +1357,11 @@ class SubmissionTests(unittest.TestCase):
             main(['task.md'])
             arguments = cli.call_args.args[0]
             for option, value in {'--time-budget': '9600', '--experiment-timeout': '900', '--max-nodes': '1000',
-                                  '--executors': '6', '--threads': '1', '--llm-concurrency': '8'}.items():
+                                  '--executors': '6', '--threads': '1', '--llm-concurrency': '8', '--research-parallel': '2'}.items():
                 self.assertEqual(arguments[arguments.index(option) + 1], value)
             main(['task.md', '--time-budget=300', '--experiment-timeout', '60', '--max-nodes', '1'])
             self.assertEqual(cli.call_args.args[0], ['baseline', '--task', 'task.md', '--platform-output', '--time-budget=300',
-                '--experiment-timeout', '60', '--max-nodes', '1', '--executors', '6', '--threads', '1', '--llm-concurrency', '8'])
+                '--experiment-timeout', '60', '--max-nodes', '1', '--executors', '6', '--threads', '1', '--llm-concurrency', '8', '--research-parallel', '2'])
 
     def test_default_entry_never_uses_fallback_or_masks_agent_exit(self):
         import solution
@@ -1432,7 +1432,7 @@ class SubmissionTests(unittest.TestCase):
             with ZipFile(archive) as bundle:
                 self.assertEqual(set(bundle.namelist()), {'solution.py', 'requirements.txt', 'alfa_cli.py',
                     'alfa_agents.py', 'alfa_autopilot.py', 'alfa_fallback.py', 'alfa_library_docs.py', 'alfa_toolkit.py', 'alfa_config.py', 'alfa_contracts.py', 'alfa_data.py',
-                    'alfa_qwen.py', 'alfa_runner.py', 'alfa_storage.py', 'alfa_worker.py'})
+                    'alfa_qwen.py', 'alfa_runner.py', 'alfa_research.py', 'alfa_storage.py', 'alfa_worker.py'})
                 self.assertEqual(bundle.read('requirements.txt'), Path('vendor/requirements_data_folder.txt').read_bytes())
                 for name in bundle.namelist():
                     if name.endswith('.py'):
@@ -1501,7 +1501,7 @@ def handler(request):
         'choices':[{'index':0,'finish_reason':'stop','message':{'role':'assistant','content':json.dumps(answer)}}]})
 def client(**kwargs):
     return AsyncOpenAI(**kwargs,http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-sys.argv=['solution.py','task.md','--max-nodes','3']
+sys.argv=['solution.py','task.md','--max-nodes','3','--research-parallel','0']
 with patch('alfa_agents.AsyncOpenAI',side_effect=client):
     runpy.run_path('solution.py',run_name='__main__')
 '''

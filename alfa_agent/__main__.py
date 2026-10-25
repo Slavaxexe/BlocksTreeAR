@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--executors", type=int, default=2, help="Одновременных экспериментов.")
     parser.add_argument("--threads", type=int, help="Потоков библиотек на эксперимент; по умолчанию 4 (autopilot) / 2.")
     parser.add_argument("--llm-concurrency", type=int, default=0, help="Одновременных запросов к LLM на прогон; 0 — без лимита.")
+    parser.add_argument("--research-parallel", type=int, default=0, choices=(0, 1, 2),
+                        help="Фоновые исследователи данных; 0 — выключить, максимум 2.")
     parser.add_argument("--no-autopilot", action="store_true",
                         help="Без shift-проверки split, GBDT-baseline контроллера и с блокирующим Reviewer.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
@@ -49,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
                 options = Options(time_budget=args.time_budget, experiment_timeout=args.experiment_timeout,
                                   output_dir=output, max_nodes=args.max_nodes, platform_output=args.platform_output,
                                   autopilot=not args.no_autopilot, executors=args.executors, threads=args.threads,
-                                  llm_concurrency=args.llm_concurrency)
+                                  llm_concurrency=args.llm_concurrency, research_parallel=args.research_parallel)
                 output, report = asyncio.run(run(args.task, options, settings))
             print(report.model_dump_json(indent=2))
             print(f"Artifacts: {output.resolve()}")
