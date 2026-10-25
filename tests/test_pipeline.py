@@ -341,7 +341,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(report.status, 'ready', report.errors)
             self.assertNotIn('Program', seen)
             self.assertNotIn('Hypothesis', seen)
-            self.assertEqual(seen.count('CodeReview'), 1)  # preparation review only
+            self.assertEqual(seen.count('CodeReview'), 2)  # preparation AND experiment, even in autopilot
+            self.assertEqual(load(root / 'nodes/node_000/review.json', ReviewRecord).result.status, 'pass')
             start, finish = load(root / 'nodes/node_000/start.json', Start), load(root / 'nodes/node_000/finish.json', Finish)
             self.assertEqual((start.source, finish.status), ('controller', 'completed'))
             self.assertTrue(np.isfinite(finish.value))
@@ -359,6 +360,21 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(report.status, 'ready', report.errors)
             self.assertEqual(seen.count('Program'), 1)
             self.assertEqual(load(root / 'nodes/node_000/finish.json', Finish).value, 47.)
+
+    async def test_autopilot_semantic_error_passes_smoke_then_reviewer_requests_repair(self):
+        from alfa_agent import autopilot
+        original = autopilot.template
+        def wrong_statistic(preparation, threads):
+            return PROGRAM.replace('mean()', 'median()'), original(preparation, threads)[1]
+        with tempfile.TemporaryDirectory() as temporary, patch('alfa_agent.runner.template', side_effect=wrong_statistic):
+            (root, report), seen = await self.exercise(Path(temporary), autopilot=True, semantic_error=True)
+            self.assertEqual(report.status, 'ready', report.errors)
+            self.assertGreaterEqual(seen.count('CodeReview'), 3)
+            self.assertIn('Program', seen)
+            node = root / 'nodes/node_000'
+            self.assertNotIn('median()', (node / 'experiment.py').read_text())
+            self.assertEqual(load(node / 'review.json', ReviewRecord).result.status, 'pass')
+            self.assertEqual(load(node / 'finish.json', Finish).status, 'completed')
 
     def test_shift_split_detects_later_test_period_and_strong_covariate_shift(self):
         from alfa_agent.contracts import DataBinding

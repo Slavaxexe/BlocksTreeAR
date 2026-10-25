@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--research-parallel", type=int, default=0, choices=(0, 1, 2),
                         help="Фоновые исследователи данных; 0 — выключить, максимум 2.")
     parser.add_argument("--no-autopilot", action="store_true",
-                        help="Без shift-проверки split, GBDT-baseline контроллера и с блокирующим Reviewer.")
+                        help="Без shift-проверки split и GBDT-baseline контроллера; Reviewer работает в обоих режимах.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
     args = parser.parse_args(argv)
     if args.command == "ask" and not args.prompt:

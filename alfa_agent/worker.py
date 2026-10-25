@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import pickle
+import re
 import sys
 import time
 import tempfile
@@ -427,25 +428,84 @@ def refit(start_path: Path, member: bool = False):
         raise ValueError(result.error)
 
 
-def combine(frames, weights, classification):
-    """Weighted mean of numeric predictions; weighted vote for labels (and integer class codes)."""
-    result = frames[0].copy()
+def combine(frames, weights, classification, *, id_columns=(), reference=None, prediction_type=None):
+    """Combine aligned predictions, preserving IDs; ties in votes favor the first member.
+
+    Explicit probability/score mode averages even integer 0/1. Explicit labels vote
+    even for floating class codes. Without IDs, the worker's positional row contract
+    applies: model frames must have equal indexes as well as equal lengths.
+    """
+    if not frames or len(frames) != len(weights):
+        raise ValueError('Blend needs one weight per prediction frame')
+    weights = np.asarray(weights, dtype=float)
+    if not np.isfinite(weights).all() or (weights <= 0).any() or not np.isfinite(weights.sum()):
+        raise ValueError('Blend weights must be finite and positive')
+    if prediction_type not in (None, 'numeric', 'labels'):
+        raise ValueError('Unknown blend prediction type')
+    first = frames[0]
+    if not isinstance(first, pd.DataFrame) or not first.columns.is_unique or not len(first.columns):
+        raise ValueError('Blend expects DataFrames with unique columns')
+    for frame in frames:
+        if (not isinstance(frame, pd.DataFrame) or not frame.columns.equals(first.columns)
+                or not frame.index.equals(first.index)):
+            raise ValueError('Blend columns, row counts or row order differ')
+        if frame.isna().any().any():
+            raise ValueError('Blend predictions contain missing values')
+    if reference is not None and len(reference) != len(first):
+        raise ValueError('Blend row count differs from reference')
+    result = first.copy()
     for column in result.columns:
-        values = [frame[column].to_numpy() for frame in frames]
-        numeric = all(np.issubdtype(v.dtype, np.number) and not np.issubdtype(v.dtype, np.bool_) for v in values)
-        whole = numeric and all(np.all(np.mod(v, 1) == 0) for v in values)
-        if numeric and not (classification and whole):
-            result[column] = sum(w * v.astype(float) for w, v in zip(weights, values)) / sum(weights)
+        series = [frame[column] for frame in frames]
+        if column in id_columns:
+            expected = reference[column] if reference is not None and column in reference else series[0]
+            if any(not s.reset_index(drop=True).equals(expected.reset_index(drop=True)) for s in series):
+                raise ValueError(f'Blend identifier/order differs in {column}')
             continue
-        votes = pd.DataFrame({i: v for i, v in enumerate(values)})
-        tally = {}
-        for i, weight in enumerate(weights):
-            for label in pd.unique(votes[i]):
-                tally[label] = tally.get(label, 0) + weight * (votes[i] == label).to_numpy()
-        labels = list(tally)
-        result[column] = np.array(labels, dtype=object)[np.argmax(np.vstack([tally[l] for l in labels]), axis=0)]
-        result[column] = result[column].astype(frames[0][column].dtype, errors='ignore')
+        numeric = all(pd.api.types.is_numeric_dtype(s.dtype) and not pd.api.types.is_bool_dtype(s.dtype) for s in series)
+        if numeric and any(not np.isfinite(s.to_numpy(dtype=float)).all() for s in series):
+            raise ValueError(f'Blend predictions are not finite in {column}')
+        # Legacy direct callers can infer labels; production always supplies an explicit mode.
+        whole = numeric and all(np.all(np.mod(s.to_numpy(dtype=float), 1) == 0) for s in series)
+        vote = prediction_type == 'labels' or (prediction_type is None and (not numeric or classification and whole))
+        if not vote:
+            if not numeric:
+                # Identical non-prediction metadata is preserved, never voted or averaged.
+                if not all(s.equals(series[0]) for s in series):
+                    raise ValueError(f'Non-numeric blend column differs: {column}')
+                continue
+            result[column] = sum((w / weights.sum()) * s.to_numpy(dtype=float) for w, s in zip(weights, series))
+            continue
+        values = [s.to_numpy() for s in series]
+        # O(rows * members**2), O(rows) temporary memory; independent of label cardinality.
+        best = np.full(len(first), -np.inf)
+        chosen = np.empty(len(first), dtype=object)
+        for candidate in values:
+            tally = sum(w * (candidate == other) for w, other in zip(weights, values))
+            better = tally > best
+            chosen[better], best[better] = candidate[better], tally[better]
+        result[column] = pd.Series(chosen, index=first.index).infer_objects()
     return result
+
+
+def blend_prediction_type(root, preparation):
+    """Use output semantics, never the accidental presence of integer probabilities."""
+    if preparation.prediction_scope != 'row':
+        raise ValueError('Automatic blend requires row-wise predictions')
+    extraction = json.loads(within(root, preparation.extraction).read_text())
+    kind = (extraction.get('output', {}).get('prediction_type') or '').casefold()
+    if re.search(r'probab|proba|вероятн|logit|score', kind):
+        return 'numeric'
+    if re.search(r'label|class|метк|класс', kind):
+        return 'labels'
+    task = (preparation.task_type or '').casefold()
+    if re.search(r'regress|регресс', task):
+        return 'numeric'
+    metric = (preparation.metric.name or '').casefold()
+    if re.search(r'auc|roc|log.?loss|cross.?entropy|brier', metric):
+        return 'numeric'
+    if re.search(r'accuracy|f1|precision|recall|kappa|matthews|точност', metric):
+        return 'labels'
+    raise ValueError('Prediction semantics are ambiguous; retain the best individual model')
 
 
 def blend(root: Path, limit: int):
@@ -456,6 +516,7 @@ def blend(root: Path, limit: int):
     train = reader.load_data(Path(preparation.task_directory), config)['train']
     with np.load(within(root, preparation.validation['split_file']), allow_pickle=False) as split:
         reference = train.iloc[split['valid']].reset_index(drop=True)
+    prediction_type = blend_prediction_type(root, preparation)
     sign = -1. if preparation.metric.direction == 'minimize' else 1.
     classification = 'classif' in (preparation.task_type or '').casefold() or 'классиф' in (preparation.task_type or '').casefold()
     delta = json.loads((root / 'delta.json').read_text())
@@ -463,7 +524,8 @@ def blend(root: Path, limit: int):
                      and (root / 'nodes' / n['node_id'] / 'predictions.pkl').exists()), key=lambda n: -sign * n['result']['value'])[:10]
     frames = {n['node_id']: pickle.loads((root / 'nodes' / n['node_id'] / 'predictions.pkl').read_bytes())['validation'] for n in scored}
     score = lambda counts: sign * float(reader.score(reference, combine([frames[k] for k in counts], list(counts.values()),
-                                                                        classification), config))
+                                                                        classification, id_columns=preparation.data.id_columns,
+                                                                        reference=reference, prediction_type=prediction_type), config))
     counts, best = {}, -np.inf
     for _ in range(15):
         trials = {}
@@ -500,7 +562,9 @@ def blend_final(root: Path):
                       pickle.loads((root / 'nodes' / node / 'predictions.pkl').read_bytes())['test'])
         sources[node] = 'refit_all_train' if refit_path.exists() else 'fit_only'
     kind = (preparation.task_type or '').casefold()
-    predictions = combine(frames, list(plan['weights'].values()), 'classif' in kind or 'классиф' in kind)
+    predictions = combine(frames, list(plan['weights'].values()), 'classif' in kind or 'классиф' in kind,
+                          id_columns=preparation.data.id_columns, reference=tables['test'],
+                          prediction_type=blend_prediction_type(root, preparation))
     destination = within(root / 'final', preparation.output.filename)
     destination.parent.mkdir(parents=True, exist_ok=True)
     reader.write_submission(tables['test'], predictions, tables, config, destination)

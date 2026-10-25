@@ -208,7 +208,7 @@ async def review_source(agents, path: Path, source: Path, context: dict, *, requ
 
 
 async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents, deadline: float, checkpoint,
-                     *, code: str | None = None, blocking_review: bool = True, repairable: bool = True,
+                     *, code: str | None = None, repairable: bool = True,
                      check_seconds: float = 45, measured: dict | None = None) -> Finish:
     """code: controller-written first source; the implementer repairs it only when repairable."""
     start_hash, started = file_hash(node / 'start.json'), time.monotonic()
@@ -270,7 +270,7 @@ async def experiment(node: Path, start: Start, shared: dict, agents: JSONAgents,
                 if file_hash(node / 'start.json') != start_hash or file_hash(preparation_path) != start.preparation_sha256:
                     raise ValueError('Saved plan or preparation changed during implementation')
                 stage = 'review'
-                review = None if not blocking_review else await review_source(agents, node / 'review.json', node / start.implementation,
+                review = await review_source(agents, node / 'review.json', node / start.implementation,
                     {'kind': 'experiment', 'plan': start.hypothesis.pipeline.model_dump(), 'code': program.code,
                      'contract': review_contract(shared['preparation']),
                      'smoke': json.loads((node / 'smoke.json').read_text()) if (node / 'smoke.json').exists()
@@ -565,7 +565,7 @@ async def run(task_path: Path, options: Options, settings: Settings):
                 context = {**shared, **({'parent': parent_view(start.parent_id)} if start.parent_id else {})}
                 local = JSONAgents(settings, deadline, IMPLEMENTATION_CALLS, shared=agents, node_id=start.node_id)
                 task = asyncio.create_task(experiment(directory / 'nodes' / start.node_id, start, context, local, deadline, checkpoint,
-                                                      code=sources.pop(start.node_id, None), blocking_review=not options.autopilot,
+                                                      code=sources.pop(start.node_id, None),
                                                       # blends of several boosters need imports and fits beyond 45 s
                                                       check_seconds=150 if start.node_id in references else 120 if options.autopilot else 45,
                                                       measured=measured))
