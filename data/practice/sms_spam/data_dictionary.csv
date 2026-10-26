@@ -1,0 +1,4 @@
+feature,role,dtype,unit,description_ru
+id,id,string,,Случайный идентификатор; не использовать как признак
+message,feature,object,text,Исходный текст SMS; CSV quoting сохраняет запятые и кавычки
+message_class,target,object,category,"ham — обычное сообщение, spam — спам; целевая переменная"

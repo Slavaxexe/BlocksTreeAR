@@ -1,0 +1,30 @@
+{
+  "dataset": "bike_demand",
+  "seed": 20261020,
+  "source_rows": 17379,
+  "train_rows": 15211,
+  "test_rows": 2168,
+  "feature_count": 12,
+  "target": "rental_count",
+  "metric": "rmsle",
+  "direction": "minimize",
+  "source": {
+    "source_name": "UCI Bike Sharing, hour.csv",
+    "page": "https://archive.ics.uci.edu/dataset/275/bike+sharing+dataset",
+    "url": "https://archive.ics.uci.edu/static/public/275/bike+sharing+dataset.zip",
+    "sha256": "b70182d0d0508e9abbb79306ce5c0cec34869000f8220175ac83d11dbe845401",
+    "citation": "Hadi Fanaee-T (2013), DOI: 10.24432/C5W894."
+  },
+  "license": "CC BY 4.0",
+  "adaptation_date": "2026-10-20",
+  "changes": "Удалены instant, casual, registered; dteday и hr объединены в timestamp; cnt переименован в rental_count; добавлен случайный id. Нормированные погодные значения оставлены в шкале источника.",
+  "split": "По времени: train до 2012-10-01, test с 2012-10-01 по 2012-12-31 включительно.",
+  "participant_sha256": {
+    "task.md": "3fb62614e897f49769af5d641dd41080f8296900f1e50bb50c1d1eab1e0fa95b",
+    "train.csv": "0981c454d33bacf0d2c903df33668081dced19040711a492a5b0baf095aab92c",
+    "test.csv": "3997711c914c7f935f75769a49cb0c64022a809349947f1436add4aeac72e6f1",
+    "data_dictionary.csv": "ab950fd0506965c0d8db6a123920b4342bfab760995a13a60e9ad4ffb70aa112",
+    "sample_submission.csv": "6ca316ff5d797112c2094866e7524a22c9efb70776ad801addeeb5720362ead9"
+  },
+  "labels_sha256": "5f45a75740fdc3bd3f1d20a64f6f84cbebddb67c4a38d3f185f17f585bcf7406"
+}

@@ -1,0 +1,31 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    },
+    "findings": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "next_ideas": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Next Ideas",
+      "type": "array"
+    }
+  },
+  "required": [
+    "summary"
+  ],
+  "title": "Analysis",
+  "type": "object"
+}

@@ -1,0 +1,405 @@
+{
+  "$defs": {
+    "AnalysisRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "quality",
+            "association",
+            "correlation",
+            "shift",
+            "groups",
+            "redundancy",
+            "missingness",
+            "interactions",
+            "predictive",
+            "permutation",
+            "ablation",
+            "feature",
+            "stability",
+            "entities",
+            "targets",
+            "queries",
+            "series",
+            "clusters",
+            "task_predictive"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "columns": {
+          "description": "Raw model inputs for predictive/feature/permutation/interactions. For ablation ONLY the final input columns to remove, not the retained columns.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "dataset": {
+          "default": "fit",
+          "description": "Actual table for descriptive analyses; supervised analyses use fit only",
+          "enum": [
+            "fit",
+            "validation",
+            "test"
+          ],
+          "title": "Dataset",
+          "type": "string"
+        },
+        "compare": {
+          "default": "test",
+          "description": "Other table for shift only; does not select the table for other analyses",
+          "enum": [
+            "validation",
+            "test"
+          ],
+          "title": "Compare",
+          "type": "string"
+        },
+        "group_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group By"
+        },
+        "baseline_columns": {
+          "description": "Original raw model inputs. For ablation set this explicitly; columns is the subset removed from this model.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Baseline Columns",
+          "type": "array"
+        },
+        "baseline_features": {
+          "description": "Existing engineered recipes kept in the feature comparison baseline; features adds or replaces recipes by name in the candidate.",
+          "items": {
+            "$ref": "#/$defs/FeatureSpec"
+          },
+          "title": "Baseline Features",
+          "type": "array"
+        },
+        "features": {
+          "description": "Engineered recipes applied to predictive/permutation/interactions and BOTH ablation models. For kind=feature these are additions/replacements relative to baseline_features.",
+          "items": {
+            "$ref": "#/$defs/FeatureSpec"
+          },
+          "title": "Features",
+          "type": "array"
+        },
+        "sample_rows": {
+          "anyOf": [
+            {
+              "minimum": 20,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 5000,
+          "description": "Proxy model fit+evaluation row budget. For history/target_encoding the complete inner training table remains the statistics source; held-out labels stay excluded. null removes sampling.",
+          "title": "Sample Rows"
+        },
+        "top_k": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 10,
+          "title": "Top K"
+        },
+        "seed": {
+          "default": 42,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "estimator": {
+          "default": "extra_trees",
+          "enum": [
+            "extra_trees",
+            "hist_gradient_boosting",
+            "linear"
+          ],
+          "title": "Estimator",
+          "type": "string"
+        },
+        "repeats": {
+          "default": 3,
+          "minimum": 1,
+          "title": "Repeats",
+          "type": "integer"
+        },
+        "validation": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "random",
+            "group",
+            "time"
+          ],
+          "title": "Validation",
+          "type": "string"
+        },
+        "validation_fraction": {
+          "default": 0.25,
+          "exclusiveMaximum": 1.0,
+          "exclusiveMinimum": 0.0,
+          "title": "Validation Fraction",
+          "type": "number"
+        },
+        "split_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Split Column"
+        },
+        "key_candidates": {
+          "description": "For entities: proposed single/composite keys; [] uses columns as one key. No target access required.",
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Key Candidates",
+          "type": "array"
+        },
+        "query_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Query Columns",
+          "type": "array"
+        },
+        "series_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Series Columns",
+          "type": "array"
+        },
+        "lags": {
+          "description": "Positive observation lags for series analysis",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Lags",
+          "type": "array"
+        },
+        "n_clusters": {
+          "default": 3,
+          "description": "Number of clusters in the exploratory fit-only proxy",
+          "minimum": 2,
+          "title": "N Clusters",
+          "type": "integer"
+        },
+        "filters": {
+          "items": {
+            "$ref": "#/$defs/RowFilter"
+          },
+          "title": "Filters",
+          "type": "array"
+        },
+        "comparison_filters": {
+          "items": {
+            "$ref": "#/$defs/RowFilter"
+          },
+          "title": "Comparison Filters",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "title": "AnalysisRequest",
+      "type": "object"
+    },
+    "FeatureSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "sum",
+            "mean",
+            "product",
+            "difference",
+            "ratio",
+            "signed_log",
+            "missing",
+            "frequency",
+            "clip",
+            "group_mean",
+            "datetime",
+            "expression",
+            "history",
+            "target_encoding"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        },
+        "parameters": {
+          "description": "For expression use {expression: formula}; x0/x1 or col(quoted column) read declared columns. Compose arithmetic, conditions, log1p, abs, sqrt, where, clip, frequency and group_mean/group_std/group_count. Statistics learn only on fit.",
+          "title": "Parameters",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "operation",
+        "columns"
+      ],
+      "title": "FeatureSpec",
+      "type": "object"
+    },
+    "RowFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "eq",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "isin",
+            "isna",
+            "notna"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "column",
+        "operation"
+      ],
+      "title": "RowFilter",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "parent_id": {
+      "anyOf": [
+        {
+          "pattern": "^research_[0-9]{3,}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Id"
+    },
+    "question": {
+      "minLength": 1,
+      "title": "Question",
+      "type": "string"
+    },
+    "hypothesis": {
+      "minLength": 1,
+      "title": "Hypothesis",
+      "type": "string"
+    },
+    "method": {
+      "minLength": 1,
+      "title": "Method",
+      "type": "string"
+    },
+    "decision": {
+      "minLength": 1,
+      "title": "Decision",
+      "type": "string"
+    },
+    "analyses": {
+      "description": "Executable feature-analysis requests; no generated Python",
+      "items": {
+        "$ref": "#/$defs/AnalysisRequest"
+      },
+      "minItems": 1,
+      "title": "Analyses",
+      "type": "array"
+    },
+    "alternative_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Required if the assigned research direction cannot be tested: explain the data limitation and why the alternative is new",
+      "title": "Alternative Reason"
+    }
+  },
+  "required": [
+    "question",
+    "hypothesis",
+    "method",
+    "decision",
+    "analyses"
+  ],
+  "title": "ResearchPlan",
+  "type": "object"
+}

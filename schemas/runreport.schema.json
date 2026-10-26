@@ -1,0 +1,313 @@
+{
+  "$defs": {
+    "LLMCall": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "node_id": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "pattern": "^research_[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Node Id"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block"
+        },
+        "attempt": {
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "invalid_json",
+            "api_error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "prompt_tokens": {
+          "default": 0,
+          "title": "Prompt Tokens",
+          "type": "integer"
+        },
+        "completion_tokens": {
+          "default": 0,
+          "title": "Completion Tokens",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "role",
+        "attempt",
+        "status"
+      ],
+      "title": "LLMCall",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "enum": [
+        "running",
+        "ready",
+        "partial",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "stage": {
+      "default": "extraction",
+      "enum": [
+        "extraction",
+        "preparation",
+        "data_research",
+        "baseline",
+        "search",
+        "final_validation",
+        "final_refit",
+        "complete"
+      ],
+      "title": "Stage",
+      "type": "string"
+    },
+    "mode": {
+      "const": "qwen",
+      "default": "qwen",
+      "title": "Mode",
+      "type": "string"
+    },
+    "task_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Task Sha256",
+      "type": "string"
+    },
+    "checks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Checks",
+      "type": "array"
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "llm_calls": {
+      "items": {
+        "$ref": "#/$defs/LLMCall"
+      },
+      "title": "Llm Calls",
+      "type": "array"
+    },
+    "experiments": {
+      "default": 0,
+      "title": "Experiments",
+      "type": "integer"
+    },
+    "best_node": {
+      "anyOf": [
+        {
+          "pattern": "^node_[0-9]{3,}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Best Node"
+    },
+    "stop_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stop Reason"
+    },
+    "running_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3,}$",
+        "type": "string"
+      },
+      "title": "Running Nodes",
+      "type": "array"
+    },
+    "queued_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3,}$",
+        "type": "string"
+      },
+      "title": "Queued Nodes",
+      "type": "array"
+    },
+    "planning_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3,}$",
+        "type": "string"
+      },
+      "title": "Planning Nodes",
+      "type": "array"
+    },
+    "queued_ideas": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Queued Ideas",
+      "type": "array"
+    },
+    "analyzing_nodes": {
+      "items": {
+        "pattern": "^node_[0-9]{3,}$",
+        "type": "string"
+      },
+      "title": "Analyzing Nodes",
+      "type": "array"
+    },
+    "planning": {
+      "default": false,
+      "title": "Planning",
+      "type": "boolean"
+    },
+    "max_parallel_nodes": {
+      "default": 6,
+      "title": "Max Parallel Nodes",
+      "type": "integer"
+    },
+    "search_parallel_limit": {
+      "default": 6,
+      "title": "Search Parallel Limit",
+      "type": "integer"
+    },
+    "api_budget": {
+      "title": "Api Budget",
+      "type": "object"
+    },
+    "max_parallel_agents": {
+      "default": 8,
+      "title": "Max Parallel Agents",
+      "type": "integer"
+    },
+    "active_agents": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Active Agents",
+      "type": "array"
+    },
+    "node_states": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "title": "Node States",
+      "type": "object"
+    },
+    "max_parallel_research": {
+      "default": 0,
+      "title": "Max Parallel Research",
+      "type": "integer"
+    },
+    "researching_nodes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Researching Nodes",
+      "type": "array"
+    },
+    "research_nodes": {
+      "default": 0,
+      "title": "Research Nodes",
+      "type": "integer"
+    },
+    "research_revision": {
+      "default": 0,
+      "title": "Research Revision",
+      "type": "integer"
+    },
+    "research_insights": {
+      "default": 0,
+      "title": "Research Insights",
+      "type": "integer"
+    },
+    "research_stop_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Research Stop Reason"
+    },
+    "final_validation": {
+      "title": "Final Validation",
+      "type": "object"
+    }
+  },
+  "required": [
+    "status",
+    "task_sha256"
+  ],
+  "title": "RunReport",
+  "type": "object"
+}

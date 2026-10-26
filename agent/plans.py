@@ -1,0 +1,362 @@
+"""Small executable requests shared by Baker, AutoML and data research."""
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+
+
+class Plan(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True, allow_inf_nan=False, frozen=True)
+
+
+class SplitPlan(Plan):
+    strategy: Literal['random', 'stratified', 'group', 'stratified_group', 'time', 'group_time', 'ordered'] = 'random'
+    fraction: float = Field(default=.2, gt=0, lt=1, description='Validation fraction; time uses complete periods')
+    seed: int = 42
+    validation_rows: int | None = Field(default=None, ge=1, description='Explicit validation size; time may include extra tied rows')
+    time_column: str | None = None
+    group_columns: list[str] = Field(default_factory=list)
+    stratify_columns: list[str] = Field(default_factory=list, description='Default: task targets when stratification is requested')
+    stratify_bins: int | None = Field(default=None, ge=2, description='Optional quantile bins for one numeric stratification column')
+    validation_periods: int | None = Field(default=None, ge=1, description='Hold out this many latest distinct time values')
+    cutoff: float | int | str | None = Field(default=None, description='Validation starts at this numeric period or ISO timestamp, inclusive')
+    gap_periods: int = Field(default=0, ge=0, description='Exclude this many distinct periods immediately before validation')
+    gap_rows: int = Field(default=0, ge=0, description='Ordered split only: exclude rows immediately before validation')
+    rare_class_policy: Literal['error', 'train_only'] = 'error'
+
+    @model_validator(mode='after')
+    def supported_parameters(self):
+        timed = self.strategy in {'time', 'group_time'}
+        grouped = self.strategy in {'group', 'stratified_group', 'group_time'}
+        if timed and not self.time_column:
+            raise ValueError('Time split requires time_column')
+        if grouped and not self.group_columns:
+            raise ValueError('Group split requires group_columns')
+        if not grouped and self.group_columns:
+            raise ValueError('group_columns requires group, stratified_group or group_time strategy')
+        if self.strategy not in {'stratified', 'stratified_group'} and (self.stratify_columns or self.stratify_bins is not None):
+            raise ValueError('Stratification settings require stratified or stratified_group strategy')
+        if not timed and (self.cutoff is not None or self.validation_periods is not None or self.gap_periods):
+            raise ValueError('cutoff, validation_periods and gap_periods require a time strategy')
+        if self.cutoff is not None and self.validation_periods is not None:
+            raise ValueError('Choose cutoff or validation_periods, not both')
+        if self.gap_rows and self.strategy != 'ordered':
+            raise ValueError('gap_rows is available for ordered strategy')
+        return self
+
+
+class FeatureSpec(Plan):
+    name: str = Field(min_length=1)
+    operation: Literal['sum', 'mean', 'product', 'difference', 'ratio', 'signed_log',
+                       'missing', 'frequency', 'clip', 'group_mean', 'group_std', 'group_min',
+                       'group_max', 'group_nunique', 'group_count', 'group_ratio', 'group_diff',
+                       'datetime', 'expression', 'history', 'target_encoding']
+    columns: list[str] = Field(min_length=1)
+    parameters: dict[str, Any] = Field(default_factory=dict, description='For expression use {expression: formula}; x0/x1 or col(quoted column) read declared columns. Compose arithmetic, conditions, log1p, abs, sqrt, where, clip, frequency, group_mean(group, numeric_value), group_std(group, numeric_value), group_count(group). The group argument is FIRST, including inside expressions. Statistics learn only on fit.')
+
+    @model_validator(mode='after')
+    def supervised_parameters(self):
+        if self.operation == 'history':
+            HistorySettings.model_validate(self.parameters)
+        elif self.operation == 'target_encoding':
+            TargetEncodingSettings.model_validate(self.parameters)
+        return self
+
+
+class HistorySettings(Plan):
+    time_column: str
+    value_column: str
+    aggregation: Literal['last', 'mean', 'sum', 'std', 'min', 'max', 'count', 'trend', 'age'] = 'last'
+    window: int | None = Field(default=None, ge=1, description='Number of distinct earlier periods, not rows')
+    lag: int = Field(default=1, ge=1, description='1 starts at the latest strictly earlier period')
+    min_history: int = Field(default=1, ge=1)
+    max_age: float | None = Field(default=None, gt=0, description='Time units for numeric time, days for timestamps')
+    fallback: Literal['missing', 'global'] = 'missing'
+    class_label: Any = Field(default=None, description='Encode this class as 1, others as 0; omit for numeric values')
+
+
+class TargetEncodingSettings(Plan):
+    target: str
+    smoothing: float = Field(default=10., ge=0)
+    folds: int = Field(default=5, ge=2)
+    seed: int = 42
+    validation: Literal['auto', 'random', 'group', 'time'] = 'auto'
+    group_column: str | None = None
+    time_column: str | None = None
+    class_label: Any = None
+
+
+class RowWeights(Plan):
+    time_column: str
+    half_life: float = Field(gt=0, description='Numeric time units, or days for timestamps; weight halves per half_life')
+
+
+class SearchSpace(Plan):
+    kind: Literal['int', 'float', 'categorical']
+    low: float | int | None = None
+    high: float | int | None = None
+    log: bool = False
+    choices: list[Any] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def valid_domain(self):
+        if self.kind == 'categorical':
+            if not self.choices:
+                raise ValueError('Categorical search needs choices')
+        elif self.low is None or self.high is None or self.low >= self.high or (self.log and self.low <= 0):
+            raise ValueError('Search needs low < high, with positive bounds for a log domain')
+        return self
+
+
+class AutoMLPlan(Plan):
+    engine: Literal['flaml', 'autogluon']
+    reuse_node: str | None = Field(default=None, pattern=r'^node_[0-9]{3,}$', description='Refit the saved selected model with current features; no new AutoML search')
+    models: list[str] = Field(default_factory=list)
+    model_parameters: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    search_space: dict[str, dict[str, SearchSpace]] = Field(default_factory=dict)
+    num_trials: int | None = Field(default=None, ge=1)
+    validation: Literal['holdout', 'cv'] = 'holdout'
+    folds: int = Field(default=3, ge=2)
+    holdout_fraction: float = Field(default=0.2, gt=0, lt=1)
+    split_column: str | None = Field(default=None, description='Optional explicit ordered column for the inner holdout; outer split stays fixed')
+    group_by: str | None = Field(default=None, description='Optional explicit grouping column for the inner holdout')
+    bag_folds: int = Field(default=0, ge=0)
+    stack_levels: int = Field(default=0, ge=0)
+    ensemble: bool | None = None
+    budget_fraction: float = Field(default=1.0, gt=0, le=1)
+    columns: list[str] = Field(default_factory=list)
+    drop_columns: list[str] = Field(default_factory=list)
+    features: list[FeatureSpec] = Field(default_factory=list)
+    row_weights: RowWeights | None = None
+    target_metrics: dict[str, str] = Field(default_factory=dict, description='Optional per-target AutoML selection metrics; the joint outer metric stays fixed')
+    time_column: str | None = None
+    series_columns: list[str] = Field(default_factory=list)
+    horizon: int | None = Field(default=None, ge=1, description='FLAML native forecast horizon in observations; defaults to the largest query horizon')
+    frequency: str | None = Field(default=None, description='Forecast calendar frequency, e.g. D/MS/h. Integer period codes use this frequency (D by default) on a synthetic calendar')
+
+    @model_validator(mode='before')
+    @classmethod
+    def engine_model_names(cls, value):
+        from .automl_catalog import normalize_models
+        return normalize_models(value)
+
+    @model_validator(mode='after')
+    def supported_combination(self, info: ValidationInfo):
+        required = (info.context or {}).get('requested_engine')
+        if required and self.engine != required:
+            raise ValueError(f'This reserved experiment must configure engine={required}')
+        if (self.features or self.row_weights) and (self.validation == 'cv' or self.bag_folds or self.stack_levels):
+            raise ValueError('Feature recipes require validation=holdout with bag_folds=stack_levels=0; the adapter rebuilds recipes on its explicit inner train')
+        if self.engine == 'flaml' and (self.features or self.row_weights) and self.ensemble:
+            raise ValueError('Use separate saved ensembles after feature-aware FLAML; internal stacking cannot rebuild recipes inside its folds')
+        if self.bag_folds == 1:
+            raise ValueError('Bagging needs zero or at least two folds')
+        if self.engine == 'flaml' and (self.bag_folds or self.stack_levels):
+            raise ValueError('Use validation=cv and ensemble for FLAML; bag_folds/stack_levels are AutoGluon settings')
+        if self.engine == 'autogluon' and self.stack_levels and not (self.bag_folds or self.validation == 'cv'):
+            raise ValueError('AutoGluon stacking needs bagging: set bag_folds or validation=cv')
+        return self
+
+
+class RowFilter(Plan):
+    column: str
+    operation: Literal['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'isin', 'isna', 'notna']
+    value: Any = None
+
+
+class BlendRule(Plan):
+    conditions: list[RowFilter] = Field(min_length=1)
+    weights: list[float] = Field(min_length=2)
+
+
+class EnsemblePlan(Plan):
+    source_nodes: list[str] = Field(min_length=2, description='Completed nodes from prediction_sources, on the same preparation')
+    method: Literal['mean', 'vote', 'probabilities', 'rank_average', 'conditional', 'stacking', 'gating']
+    weights: list[float] = Field(default_factory=list)
+    optimize_weights: bool = Field(default=False, description='Tune nonnegative blend weights on saved inner-holdout predictions, never outer validation')
+    weight_trials: int = Field(default=64, ge=1, description='Maximum local weight candidates, no LLM calls')
+    combine: Literal['mean', 'vote', 'probabilities', 'rank_average'] | None = None
+    rules: list[BlendRule] = Field(default_factory=list, description='First matching rule wins; default weights apply otherwise')
+    estimator: str | None = Field(default=None, description='Installed sklearn-compatible class path; stacking defaults to LogisticRegression/Ridge, gating to shallow DecisionTreeClassifier with predict_proba')
+    parameters: dict[str, Any] = Field(default_factory=dict, description='Combiner constructor kwargs, not source-model settings')
+    feature_columns: list[str] = Field(default_factory=list, description='Raw features for gating or stacking passthrough; [] selects all allowed features')
+    passthrough: bool = Field(default=False, description='Stacking also sees preprocessed raw features alongside source predictions; supports nonlinear dependencies')
+
+    @model_validator(mode='before')
+    @classmethod
+    def legacy_oof_settings(cls, value):
+        # Old saved plans may contain these; shared holdout no longer varies per ensemble.
+        if isinstance(value, dict):
+            return {key: item for key, item in value.items() if key not in {'folds', 'seed'}}
+        return value
+
+    @model_validator(mode='after')
+    def compatible_sources(self):
+        import re
+        if len(set(self.source_nodes)) != len(self.source_nodes) or any(
+                not re.fullmatch(r'node_[0-9]{3,}', node) for node in self.source_nodes):
+            raise ValueError('Select distinct saved node IDs')
+        for weights in [self.weights, *(rule.weights for rule in self.rules)]:
+            if weights and (len(weights) != len(self.source_nodes) or min(weights) < 0 or sum(weights) <= 0):
+                raise ValueError('Weights must match sources and be nonnegative with a positive sum')
+        if self.method == 'conditional' and not self.rules:
+            raise ValueError('Conditional blending needs at least one rule')
+        if self.optimize_weights and self.method not in {'mean', 'vote', 'probabilities'}:
+            raise ValueError('Weight optimization applies to mean, vote or probability blending')
+        if self.method != 'conditional' and self.rules:
+            raise ValueError('Rules apply only to conditional blending')
+        return self
+
+
+class ToolCall(Plan):
+    kind: Literal['constant', 'features', 'preprocess', 'fit', 'predict', 'automl', 'ensemble', 'saved_ensemble', 'forecast']
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    inputs: dict[str, str] = Field(default_factory=dict, description='Map canonical operation inputs to saved state keys')
+    outputs: dict[str, str] = Field(default_factory=dict, description='Map canonical outputs to custom state keys')
+
+
+    @model_validator(mode='before')
+    @classmethod
+    def canonical_parameters(cls, value):
+        if not isinstance(value, dict):
+            return value
+        parameters = value.get('parameters', {})
+        if value.get('kind') == 'automl':
+            parameters = AutoMLPlan.model_validate(parameters).model_dump()
+        elif value.get('kind') == 'saved_ensemble':
+            parameters = EnsemblePlan.model_validate(parameters).model_dump()
+        elif value.get('kind') == 'fit' and isinstance(parameters, dict):
+            parameters = dict(parameters)
+            constructor = parameters.get('parameters', {})
+            if not isinstance(constructor, dict):
+                raise ValueError('parameters must contain estimator constructor parameters')
+            constructor = dict(constructor)
+            for alias in ('estimator_params', 'estimator_parameters', 'model_parameters'):
+                if alias in parameters:
+                    extra = parameters.pop(alias)
+                    if not isinstance(extra, dict):
+                        raise ValueError(f'{alias} must contain estimator constructor parameters')
+                    if any(key in constructor and constructor[key] != item for key, item in extra.items()):
+                        raise ValueError('Conflicting estimator parameter aliases')
+                    constructor.update(extra)
+            if constructor:
+                parameters['parameters'] = constructor
+        elif value.get('kind') == 'preprocess' and isinstance(parameters, dict) and 'columns' in parameters:
+            parameters = dict(parameters)
+            columns = parameters.pop('columns')
+            if 'feature_columns' in parameters and parameters['feature_columns'] != columns:
+                raise ValueError('Specify feature_columns once; columns is its legacy alias')
+            parameters['feature_columns'] = columns
+        return {**value, 'parameters': parameters}
+
+    def interface(self):
+        from .operations import CATALOG
+        entry = CATALOG[self.kind]
+        required = [self.inputs.get(key, key) for key in entry['requires']]
+        if self.kind == 'ensemble':
+            required += [key for pair in self.parameters.get('sources', []) for key in pair]
+        provided = [self.outputs.get(key, key) for key in entry['provides']]
+        return list(dict.fromkeys(required)), list(dict.fromkeys(provided))
+
+    @model_validator(mode='after')
+    def operation_parameters(self, info: ValidationInfo):
+        fields = {
+            'constant': set(), 'features': {'recipes'},
+            'preprocess': {'feature_columns', 'drop_columns', 'numeric_imputer', 'encoding', 'native_backend', 'scaling', 'pca_components'},
+            'fit': {'estimator', 'parameters', 'fixed_parameters', 'search_space', 'num_trials', 'validation', 'group_by', 'split_column', 'row_weights', 'seeds', 'query_columns', 'source_node'},
+            'forecast': {'estimator', 'parameters', 'time_column', 'series_columns', 'lags', 'rolling_windows', 'feature_columns'},
+            'predict': {'output'}, 'ensemble': {'sources', 'weights', 'method'},
+        }
+        if self.kind == 'automl':
+            AutoMLPlan.model_validate(self.parameters)
+        elif self.kind == 'saved_ensemble':
+            EnsemblePlan.model_validate(self.parameters)
+        else:
+            unknown = set(self.parameters) - fields[self.kind]
+            if unknown:
+                raise ValueError(f'Unknown {self.kind} settings: {sorted(unknown)}')
+        if self.kind == 'fit':
+            if self.parameters.get('source_node') is not None:
+                import re
+                if not re.fullmatch(r'node_[0-9]{3,}', str(self.parameters['source_node'])):
+                    raise ValueError('source_node must name a completed node')
+            if self.parameters.get('row_weights') is not None:
+                RowWeights.model_validate(self.parameters['row_weights'])
+            seeds = self.parameters.get('seeds', [])
+            if not isinstance(seeds, list) or any(type(seed) is not int for seed in seeds):
+                raise ValueError('seeds must be a list of integers')
+        if self.kind == 'forecast':
+            for key in ('lags', 'rolling_windows'):
+                values = self.parameters.get(key, [1] if key == 'lags' else [])
+                if not isinstance(values, list) or any(type(value) is not int or value < 1 for value in values):
+                    raise ValueError(f'{key} must contain positive observation counts')
+        block = (info.context or {}).get('block')
+        if block is not None:
+            original = block.get('operation')
+            if original:
+                if self.kind != original['kind']:
+                    raise ValueError('Repair must preserve the operation kind and hypothesis')
+                fixed = ('method', 'source_nodes') if self.kind == 'saved_ensemble' else (
+                    ('engine',) if self.kind == 'automl' else ())
+                for key in fixed:
+                    if self.parameters.get(key) != original.get('parameters', {}).get(key):
+                        raise ValueError(f'Repair must preserve {key}; create a new hypothesis to change it')
+            from .operations import CATALOG
+            entry = CATALOG[self.kind]
+            required = {self.inputs.get(key, key) for key in entry['requires']}
+            if self.kind == 'ensemble':
+                required.update(key for pair in self.parameters.get('sources', []) for key in pair)
+            provided = {self.outputs.get(key, key) for key in entry['provides']}
+            if not required <= set(block['requires']) or not set(block['provides']) <= provided:
+                raise ValueError('A repaired operation must preserve the block input/output interface')
+        return self
+
+
+class AnalysisRequest(Plan):
+    name: str = Field(pattern=r'^[a-z][a-z0-9_]{0,63}$')
+    kind: Literal['quality', 'association', 'correlation', 'shift', 'groups', 'redundancy',
+                  'missingness', 'interactions', 'predictive', 'permutation', 'ablation', 'feature', 'stability', 'entities',
+                  'targets', 'queries', 'series', 'clusters', 'task_predictive']
+    columns: list[str] = Field(default_factory=list, description='Raw model inputs for predictive/feature/permutation/interactions. For ablation ONLY the final input columns to remove, not the retained columns.')
+    target: str | None = None
+    dataset: Literal['fit', 'validation', 'test'] = Field(default='fit', description='Actual table for descriptive analyses; supervised analyses use fit only')
+    compare: Literal['validation', 'test'] = Field(default='test', description='Other table for shift only; does not select the table for other analyses')
+    group_by: str | None = None
+    baseline_columns: list[str] = Field(default_factory=list, description='Original raw model inputs. For ablation set this explicitly; columns is the subset removed from this model.')
+    baseline_features: list[FeatureSpec] = Field(default_factory=list, description='Existing engineered recipes kept in the feature comparison baseline; features adds or replaces recipes by name in the candidate.')
+    features: list[FeatureSpec] = Field(default_factory=list, description='Engineered recipes applied to predictive/permutation/interactions and BOTH ablation models. For kind=feature these are additions/replacements relative to baseline_features.')
+    sample_rows: int | None = Field(default=5000, ge=20, description='Proxy model fit+evaluation row budget. For history/target_encoding the complete inner training table remains the statistics source; held-out labels stay excluded. null removes sampling.')
+    top_k: int | None = Field(default=10, ge=1)
+    seed: int = 42
+    estimator: Literal['extra_trees', 'hist_gradient_boosting', 'linear'] = 'extra_trees'
+    repeats: int = Field(default=3, ge=1)
+    validation: Literal['auto', 'random', 'group', 'time'] = 'auto'
+    validation_fraction: float = Field(default=0.25, gt=0, lt=1)
+    split_column: str | None = None
+    key_candidates: list[list[str]] = Field(default_factory=list, description='For entities: proposed single/composite keys; [] uses columns as one key. No target access required.')
+    query_columns: list[str] = Field(default_factory=list)
+    series_columns: list[str] = Field(default_factory=list)
+    lags: list[int] = Field(default_factory=lambda: [1], description='Positive observation lags for series analysis')
+    n_clusters: int = Field(default=3, ge=2, description='Number of clusters in the exploratory fit-only proxy')
+    filters: list[RowFilter] = Field(default_factory=list)
+    comparison_filters: list[RowFilter] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def executable_comparison(self):
+        if any(lag < 1 for lag in self.lags):
+            raise ValueError('lags must contain positive observation counts')
+        if self.kind == 'groups' and not self.group_by:
+            raise ValueError('groups requires an explicit group_by column')
+        model_kinds = {'predictive', 'permutation', 'interactions', 'ablation', 'feature', 'task_predictive'}
+        if (self.features or self.baseline_features) and self.kind not in model_kinds:
+            raise ValueError('Feature recipes require a model-based analysis kind')
+        for recipes in (self.features, self.baseline_features):
+            names = [recipe.name for recipe in recipes]
+            if len(names) != len(set(names)):
+                raise ValueError('Recipe names must be unique within each feature list')
+        if self.kind == 'ablation' and self.baseline_columns:
+            available = set(self.baseline_columns) | {recipe.name for recipe in [*self.baseline_features, *self.features]}
+            if not self.columns or not set(self.columns) <= available:
+                raise ValueError('Ablation columns must name inputs removed from the baseline model')
+            if not available - set(self.columns):
+                raise ValueError('Ablation removes every model input; retain at least one feature')
+        return self

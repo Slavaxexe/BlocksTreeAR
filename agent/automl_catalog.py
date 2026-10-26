@@ -1,0 +1,79 @@
+"""Engine-specific model identifiers, independent of the installed AutoML imports."""
+import re
+
+
+MODELS = {
+    'flaml': ['xgboost', 'xgb_limitdepth', 'rf', 'lgbm', 'lgbm_spark', 'rf_spark', 'lrl1', 'lrl2',
+              'catboost', 'extra_tree', 'kneighbor', 'transformer', 'transformer_ms', 'histgb', 'svc',
+              'sgd', 'nb_spark', 'enet', 'lassolars', 'glr_spark', 'lr_spark', 'svc_spark', 'gbt_spark', 'aft_spark',
+              'arima', 'sarimax', 'holt-winters', 'naive', 'snaive', 'avg', 'savg'],
+    'autogluon': ['RF', 'XT', 'KNN', 'GBM', 'CAT', 'XGB', 'NN_TORCH', 'LR', 'FASTAI', 'AG_TEXT_NN',
+                 'AG_IMAGE_NN', 'AG_AUTOMM', 'FT_TRANSFORMER', 'TABPFN', 'TABPFNMIX', 'FASTTEXT',
+                 'ENS_WEIGHTED', 'SIMPLE_ENS_WEIGHTED', 'IM_RULEFIT', 'IM_GREEDYTREE', 'IM_FIGS',
+                 'IM_HSTREE', 'IM_BOOSTEDRULES', 'DUMMY'],
+}
+
+ALIASES = {
+    'flaml': {'lightgbm': 'lgbm', 'gbm': 'lgbm', 'cat': 'catboost', 'xgb': 'xgboost',
+              'randomforest': 'rf', 'extratrees': 'extra_tree', 'xt': 'extra_tree',
+              'knn': 'kneighbor', 'histgradientboosting': 'histgb', 'elasticnet': 'enet'},
+    'autogluon': {'lightgbm': 'GBM', 'lgbm': 'GBM', 'catboost': 'CAT', 'xgboost': 'XGB',
+                  'randomforest': 'RF', 'extratrees': 'XT', 'extratree': 'XT',
+                  'kneighbor': 'KNN', 'kneighbors': 'KNN', 'logisticregression': 'LR'},
+}
+
+CAPABILITIES = {
+    engine: {'model_ids': names, 'notes': [
+        'Use engine model IDs in models, model_parameters and search_space, not Python class names.',
+        'Optional model families still require their installed dependencies; pretrained downloads are unavailable.',
+        'is_unbalance and scale_pos_weight are binary-classification settings, not generic multiclass balancing.',
+        'CV stays within fit; the shared outer split and metric are fixed.',
+        'Tabular features or group/time policy use an explicit inner holdout and frozen full-fit refit; no bagging/stacking or FLAML internal ensemble in this mode. Saved ensembles remain available.',
+    ]} for engine, names in MODELS.items()
+}
+CAPABILITIES['flaml']['tasks'] = {
+    'tabular': 'Regression, binary/multiclass; multiple targets and multilabel use independent searches sharing the node budget.',
+    'ranking': {'models': ['lgbm', 'xgboost', 'xgb_limitdepth'],
+                'validation': 'complete-query holdout or group CV; recipes require holdout',
+                'metric': 'Exact shared NDCG/MAP, including metric.parameters; queries from data.query_columns.'},
+    'forecasting': {'models': ['lgbm', 'rf', 'extra_tree', 'xgboost', 'catboost', 'arima', 'sarimax',
+                               'holt-winters', 'naive', 'snaive', 'avg', 'savg'],
+                    'settings': 'time_column, series_columns, horizon, frequency; one native predictor per series/target, all under the same node deadline. Integer periods use a synthetic calendar at frequency (D default).',
+                    'requirements': 'Regular unique series/time rows; known exogenous inputs for every future step. No prophet/tft dependencies. Target-derived recipes are rebuilt inside the time holdout.'},
+    'clustering': False,
+}
+CAPABILITIES['autogluon']['tasks'] = {
+    'tabular': 'Regression, binary/multiclass; multiple targets and multilabel use independent TabularPredictors sharing the node budget. Other raw targets are excluded from model features.',
+    'ranking': False, 'forecasting': 'Unavailable: autogluon.timeseries is not included in the provided dependencies.',
+    'clustering': False,
+}
+
+
+def model_id(engine, name):
+    token = re.sub(r'[^a-z0-9]', '', name.rsplit('.', 1)[-1].lower())
+    token = re.sub(r'(classifier|regressor)$', '', token)
+    known = {re.sub(r'[^a-z0-9]', '', value.lower()): value for value in MODELS[engine]}
+    selected = ALIASES[engine].get(token) or known.get(token)
+    if selected is None:
+        raise ValueError(f'Unknown {engine} model {name!r}; model IDs: {MODELS[engine]}')
+    return selected
+
+
+def normalize_models(value):
+    if not isinstance(value, dict) or value.get('engine') not in MODELS:
+        return value
+    value = dict(value)
+    engine = value['engine']
+    if isinstance(value.get('models'), list) and all(isinstance(name, str) for name in value['models']):
+        value['models'] = list(dict.fromkeys(model_id(engine, name) for name in value['models']))
+    for field in ('model_parameters', 'search_space'):
+        if field not in value or not isinstance(value[field], dict):
+            continue
+        normalized = {}
+        for name, settings in value[field].items():
+            name = model_id(engine, name)
+            if name in normalized:
+                raise ValueError(f'{field} repeats model {name} under different names')
+            normalized[name] = settings
+        value[field] = normalized
+    return value

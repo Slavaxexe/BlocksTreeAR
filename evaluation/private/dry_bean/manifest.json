@@ -1,0 +1,48 @@
+{
+  "dataset": "dry_bean",
+  "seed": 20261020,
+  "source_rows": 13611,
+  "train_rows": 10883,
+  "test_rows": 2728,
+  "feature_count": 16,
+  "target": "bean_class",
+  "metric": "macro_f1",
+  "direction": "maximize",
+  "source": {
+    "source_name": "UCI Dry Bean",
+    "page": "https://archive.ics.uci.edu/dataset/602/dry+bean+dataset",
+    "url": "https://archive.ics.uci.edu/static/public/602/data.csv",
+    "sha256": "c91a086bb4357e69409d23287ec22be1be9512145cead1d8ca988c918be38fcb",
+    "citation": "Murat Koklu, Ilker Ali Ozkan (2020), DOI: 10.24432/C50S4B."
+  },
+  "license": "CC BY 4.0",
+  "adaptation_date": "2026-10-20",
+  "changes": "Class переименован в bean_class, добавлен случайный id; признаки сохранены.",
+  "split": "Первый fold StratifiedGroupKFold(n_splits=5, shuffle=True); группы по всем признакам.",
+  "participant_sha256": {
+    "task.md": "91386638edb0db3d916d0255f48c4362510380a6e09d48f56e280d7aeb959f90",
+    "train.csv": "43a83403e9af679ea1a47b94d0654147e792d5604b6bbed39fed0bb3de9d8ae1",
+    "test.csv": "c39ab7377f73702ca1f4acbb68771f9bf5bab818a53b8faf07efd32e03a11a22",
+    "data_dictionary.csv": "6d0b0f1f4abec2d4d3bdc52f27c0f75f3ddd59871950cf21bb5b810b0b512989",
+    "sample_submission.csv": "78f216bb8f7e5627f482b64795307b5f7b9015bd52c298208cd192012d5dfc6d"
+  },
+  "labels_sha256": "fb2735f03d7c1070d195c40be03b6e31a4d4bd18e859bd1602fed98f55825e10",
+  "train_class_counts": {
+    "DERMASON": 2813,
+    "SIRA": 2121,
+    "SEKER": 1655,
+    "HOROZ": 1516,
+    "CALI": 1320,
+    "BARBUNYA": 1040,
+    "BOMBAY": 418
+  },
+  "test_class_counts": {
+    "DERMASON": 733,
+    "SIRA": 515,
+    "HOROZ": 412,
+    "SEKER": 372,
+    "CALI": 310,
+    "BARBUNYA": 282,
+    "BOMBAY": 104
+  }
+}

@@ -1,0 +1,952 @@
+{
+  "$defs": {
+    "AssemblyChanges": {
+      "additionalProperties": false,
+      "properties": {
+        "edits": {
+          "items": {
+            "$ref": "#/$defs/BlockEdit"
+          },
+          "title": "Edits",
+          "type": "array"
+        },
+        "insert": {
+          "description": "New stages only; use edits to change an existing operation",
+          "items": {
+            "$ref": "#/$defs/Block"
+          },
+          "title": "Insert",
+          "type": "array"
+        },
+        "remove": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Remove",
+          "type": "array"
+        },
+        "order": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Omit to preserve order; required when inserting stages",
+          "title": "Order"
+        }
+      },
+      "title": "AssemblyChanges",
+      "type": "object"
+    },
+    "AutoMLPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
+          "enum": [
+            "flaml",
+            "autogluon"
+          ],
+          "title": "Engine",
+          "type": "string"
+        },
+        "reuse_node": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Refit the saved selected model with current features; no new AutoML search",
+          "title": "Reuse Node"
+        },
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Models",
+          "type": "array"
+        },
+        "model_parameters": {
+          "additionalProperties": {
+            "type": "object"
+          },
+          "title": "Model Parameters",
+          "type": "object"
+        },
+        "search_space": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/SearchSpace"
+            },
+            "type": "object"
+          },
+          "title": "Search Space",
+          "type": "object"
+        },
+        "num_trials": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Num Trials"
+        },
+        "validation": {
+          "default": "holdout",
+          "enum": [
+            "holdout",
+            "cv"
+          ],
+          "title": "Validation",
+          "type": "string"
+        },
+        "folds": {
+          "default": 3,
+          "minimum": 2,
+          "title": "Folds",
+          "type": "integer"
+        },
+        "holdout_fraction": {
+          "default": 0.2,
+          "exclusiveMaximum": 1.0,
+          "exclusiveMinimum": 0.0,
+          "title": "Holdout Fraction",
+          "type": "number"
+        },
+        "split_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit ordered column for the inner holdout; outer split stays fixed",
+          "title": "Split Column"
+        },
+        "group_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit grouping column for the inner holdout",
+          "title": "Group By"
+        },
+        "bag_folds": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Bag Folds",
+          "type": "integer"
+        },
+        "stack_levels": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stack Levels",
+          "type": "integer"
+        },
+        "ensemble": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ensemble"
+        },
+        "budget_fraction": {
+          "default": 1.0,
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "title": "Budget Fraction",
+          "type": "number"
+        },
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "drop_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Drop Columns",
+          "type": "array"
+        },
+        "features": {
+          "items": {
+            "$ref": "#/$defs/FeatureSpec"
+          },
+          "title": "Features",
+          "type": "array"
+        },
+        "row_weights": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RowWeights"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target_metrics": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional per-target AutoML selection metrics; the joint outer metric stays fixed",
+          "title": "Target Metrics",
+          "type": "object"
+        },
+        "time_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Column"
+        },
+        "series_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Series Columns",
+          "type": "array"
+        },
+        "horizon": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "FLAML native forecast horizon in observations; defaults to the largest query horizon",
+          "title": "Horizon"
+        },
+        "frequency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Forecast calendar frequency, e.g. D/MS/h. Integer period codes use this frequency (D by default) on a synthetic calendar",
+          "title": "Frequency"
+        }
+      },
+      "required": [
+        "engine"
+      ],
+      "title": "AutoMLPlan",
+      "type": "object"
+    },
+    "BlendRule": {
+      "additionalProperties": false,
+      "properties": {
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/RowFilter"
+          },
+          "minItems": 1,
+          "title": "Conditions",
+          "type": "array"
+        },
+        "weights": {
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "title": "Weights",
+          "type": "array"
+        }
+      },
+      "required": [
+        "conditions",
+        "weights"
+      ],
+      "title": "BlendRule",
+      "type": "object"
+    },
+    "Block": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolCall"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "source_node": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Node"
+        },
+        "description": {
+          "description": "Behavior and exact input/output types, shapes, column conventions and object APIs",
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "requires": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requires",
+          "type": "array"
+        },
+        "provides": {
+          "description": "Required non-None state outputs; nullable settings belong inside output objects",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Provides",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "provides"
+      ],
+      "title": "Block",
+      "type": "object"
+    },
+    "BlockEdit": {
+      "additionalProperties": false,
+      "properties": {
+        "block": {
+          "title": "Block",
+          "type": "string"
+        },
+        "parameters": {
+          "description": "Recursive merge into operation parameters; unspecified settings are preserved",
+          "title": "Parameters",
+          "type": "object"
+        },
+        "features": {
+          "description": "Add/replace recipes by name, preserving all other recipes",
+          "items": {
+            "$ref": "#/$defs/FeatureSpec"
+          },
+          "title": "Features",
+          "type": "array"
+        },
+        "feature_parameters": {
+          "additionalProperties": {
+            "type": "object"
+          },
+          "description": "Merge only changed parameters into existing named recipes, preserving key/time/fallback settings",
+          "title": "Feature Parameters",
+          "type": "object"
+        },
+        "remove_features": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Remove Features",
+          "type": "array"
+        }
+      },
+      "required": [
+        "block"
+      ],
+      "title": "BlockEdit",
+      "type": "object"
+    },
+    "EnsemblePlan": {
+      "additionalProperties": false,
+      "properties": {
+        "source_nodes": {
+          "description": "Completed nodes from prediction_sources, on the same preparation",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Source Nodes",
+          "type": "array"
+        },
+        "method": {
+          "enum": [
+            "mean",
+            "vote",
+            "probabilities",
+            "conditional",
+            "stacking",
+            "gating"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "weights": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Weights",
+          "type": "array"
+        },
+        "optimize_weights": {
+          "default": false,
+          "description": "Tune nonnegative blend weights on saved inner-holdout predictions, never outer validation",
+          "title": "Optimize Weights",
+          "type": "boolean"
+        },
+        "weight_trials": {
+          "default": 64,
+          "description": "Maximum local weight candidates, no LLM calls",
+          "minimum": 1,
+          "title": "Weight Trials",
+          "type": "integer"
+        },
+        "combine": {
+          "anyOf": [
+            {
+              "enum": [
+                "mean",
+                "vote",
+                "probabilities"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Combine"
+        },
+        "rules": {
+          "description": "First matching rule wins; default weights apply otherwise",
+          "items": {
+            "$ref": "#/$defs/BlendRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "estimator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Installed sklearn-compatible class path; stacking defaults to LogisticRegression/Ridge, gating to shallow DecisionTreeClassifier with predict_proba",
+          "title": "Estimator"
+        },
+        "parameters": {
+          "description": "Combiner constructor kwargs, not source-model settings",
+          "title": "Parameters",
+          "type": "object"
+        },
+        "feature_columns": {
+          "description": "Raw features for gating or stacking passthrough; [] selects all allowed features",
+          "items": {
+            "type": "string"
+          },
+          "title": "Feature Columns",
+          "type": "array"
+        },
+        "passthrough": {
+          "default": false,
+          "description": "Stacking also sees preprocessed raw features alongside source predictions; supports nonlinear dependencies",
+          "title": "Passthrough",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source_nodes",
+        "method"
+      ],
+      "title": "EnsemblePlan",
+      "type": "object"
+    },
+    "FeatureDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "test",
+            "defer",
+            "reject"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "action",
+        "reason"
+      ],
+      "title": "FeatureDecision",
+      "type": "object"
+    },
+    "FeatureSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "sum",
+            "mean",
+            "product",
+            "difference",
+            "ratio",
+            "signed_log",
+            "missing",
+            "frequency",
+            "clip",
+            "group_mean",
+            "datetime",
+            "expression",
+            "history",
+            "target_encoding"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        },
+        "parameters": {
+          "description": "For expression use {expression: formula}; x0/x1 or col(quoted column) read declared columns. Compose arithmetic, conditions, log1p, abs, sqrt, where, clip, frequency and group_mean/group_std/group_count. Statistics learn only on fit.",
+          "title": "Parameters",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "operation",
+        "columns"
+      ],
+      "title": "FeatureSpec",
+      "type": "object"
+    },
+    "Idea": {
+      "additionalProperties": false,
+      "properties": {
+        "purpose": {
+          "enum": [
+            "baseline",
+            "improve",
+            "explore"
+          ],
+          "title": "Purpose",
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Id"
+        },
+        "change": {
+          "description": "One concrete change, including intended algorithm or parameters",
+          "minLength": 1,
+          "title": "Change",
+          "type": "string"
+        },
+        "change_blocks": {
+          "description": "Existing or proposed block names to change",
+          "items": {
+            "type": "string"
+          },
+          "title": "Change Blocks",
+          "type": "array"
+        },
+        "expected_effect": {
+          "minLength": 1,
+          "title": "Expected Effect",
+          "type": "string"
+        },
+        "automl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AutoMLPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Executable AutoML configuration; null for composed trusted operations"
+        },
+        "ensemble": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnsemblePlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Combine completed prediction sources; compiled without a node-planner call"
+        },
+        "feature_candidate_ids": {
+          "description": "Exact measured feature candidates selected for this experiment; planner must include their recipes",
+          "items": {
+            "type": "string"
+          },
+          "title": "Feature Candidate Ids",
+          "type": "array"
+        },
+        "build_id": {
+          "anyOf": [
+            {
+              "pattern": "^(node_[0-9]{3,}|eda_[a-f0-9]{12,64})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ready assembly ID. With changes omitted, execute the exact saved assembly; no node-planner call.",
+          "title": "Build Id"
+        },
+        "changes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssemblyChanges"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit changes to build_id; all other operations/settings remain identical"
+        },
+        "priority": {
+          "default": 50,
+          "description": "Queue priority; higher runs first, not an expected score",
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "research_ids": {
+          "description": "IDs of only the research insights needed for this change; empty when unrelated",
+          "items": {
+            "type": "string"
+          },
+          "title": "Research Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "purpose",
+        "change",
+        "expected_effect"
+      ],
+      "title": "Idea",
+      "type": "object"
+    },
+    "IdeaUpdate": {
+      "additionalProperties": false,
+      "properties": {
+        "idea_id": {
+          "title": "Idea Id",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "prioritize",
+            "remove"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "priority": {
+          "default": 50,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "idea_id",
+        "action",
+        "reason"
+      ],
+      "title": "IdeaUpdate",
+      "type": "object"
+    },
+    "RowFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "eq",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "isin",
+            "isna",
+            "notna"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "column",
+        "operation"
+      ],
+      "title": "RowFilter",
+      "type": "object"
+    },
+    "RowWeights": {
+      "additionalProperties": false,
+      "properties": {
+        "time_column": {
+          "title": "Time Column",
+          "type": "string"
+        },
+        "half_life": {
+          "description": "Numeric time units, or days for timestamps; weight halves per half_life",
+          "exclusiveMinimum": 0.0,
+          "title": "Half Life",
+          "type": "number"
+        }
+      },
+      "required": [
+        "time_column",
+        "half_life"
+      ],
+      "title": "RowWeights",
+      "type": "object"
+    },
+    "SearchSpace": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "int",
+            "float",
+            "categorical"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "low": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Low"
+        },
+        "high": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "High"
+        },
+        "log": {
+          "default": false,
+          "title": "Log",
+          "type": "boolean"
+        },
+        "choices": {
+          "items": {},
+          "title": "Choices",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "SearchSpace",
+      "type": "object"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "constant",
+            "features",
+            "preprocess",
+            "fit",
+            "predict",
+            "automl",
+            "ensemble",
+            "saved_ensemble",
+            "forecast"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "parameters": {
+          "title": "Parameters",
+          "type": "object"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map canonical operation inputs to saved state keys",
+          "title": "Inputs",
+          "type": "object"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map canonical outputs to custom state keys",
+          "title": "Outputs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ToolCall",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "ideas": {
+      "items": {
+        "$ref": "#/$defs/Idea"
+      },
+      "title": "Ideas",
+      "type": "array"
+    },
+    "updates": {
+      "items": {
+        "$ref": "#/$defs/IdeaUpdate"
+      },
+      "title": "Updates",
+      "type": "array"
+    },
+    "feature_decisions": {
+      "items": {
+        "$ref": "#/$defs/FeatureDecision"
+      },
+      "title": "Feature Decisions",
+      "type": "array"
+    }
+  },
+  "title": "Ideas",
+  "type": "object"
+}

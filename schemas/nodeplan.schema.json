@@ -1,0 +1,226 @@
+{
+  "$defs": {
+    "Block": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolCall"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "source_node": {
+          "anyOf": [
+            {
+              "pattern": "^node_[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Node"
+        },
+        "description": {
+          "description": "Behavior and exact input/output types, shapes, column conventions and object APIs",
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "requires": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requires",
+          "type": "array"
+        },
+        "provides": {
+          "description": "Required non-None state outputs; nullable settings belong inside output objects",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Provides",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "provides"
+      ],
+      "title": "Block",
+      "type": "object"
+    },
+    "BlockReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "source_node": {
+          "pattern": "^node_[0-9]{3,}$",
+          "title": "Source Node",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "source_node"
+      ],
+      "title": "BlockReference",
+      "type": "object"
+    },
+    "ModelConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Actual algorithm/API name or ensemble name, not a block name",
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "configuration": {
+          "description": "Concrete settings of every model; state defaults explicitly",
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Configuration",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "configuration"
+      ],
+      "title": "ModelConfiguration",
+      "type": "object"
+    },
+    "PipelinePlan": {
+      "additionalProperties": false,
+      "properties": {
+        "preprocessing": {
+          "description": "Actual transformations, or explicitly no preprocessing",
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Preprocessing",
+          "type": "string"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelConfiguration"
+        },
+        "training": {
+          "description": "Fitting, tuning, internal validation and ensemble procedure",
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Training",
+          "type": "string"
+        }
+      },
+      "required": [
+        "preprocessing",
+        "model",
+        "training"
+      ],
+      "title": "PipelinePlan",
+      "type": "object"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "constant",
+            "features",
+            "preprocess",
+            "fit",
+            "predict",
+            "automl",
+            "ensemble",
+            "saved_ensemble",
+            "forecast"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "parameters": {
+          "title": "Parameters",
+          "type": "object"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map canonical operation inputs to saved state keys",
+          "title": "Inputs",
+          "type": "object"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map canonical outputs to custom state keys",
+          "title": "Outputs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ToolCall",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "pipeline": {
+      "$ref": "#/$defs/PipelinePlan"
+    },
+    "order": {
+      "description": "Block names in execution order",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Order",
+      "type": "array"
+    },
+    "reuse": {
+      "description": "References only; Python copies the saved interfaces",
+      "items": {
+        "$ref": "#/$defs/BlockReference"
+      },
+      "title": "Reuse",
+      "type": "array"
+    },
+    "write": {
+      "description": "Complete interfaces of only the new or changed blocks",
+      "items": {
+        "$ref": "#/$defs/Block"
+      },
+      "minItems": 1,
+      "title": "Write",
+      "type": "array"
+    }
+  },
+  "required": [
+    "pipeline",
+    "order",
+    "write"
+  ],
+  "title": "NodePlan",
+  "type": "object"
+}

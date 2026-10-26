@@ -1,0 +1,11 @@
+feature,role,dtype,unit,description_ru
+id,id,string,,Случайный идентификатор; не использовать как признак
+cement,feature,float64,kg/m3,Цемент на кубометр смеси
+slag,feature,float64,kg/m3,Доменный шлак на кубометр смеси
+fly_ash,feature,float64,kg/m3,Зола уноса на кубометр смеси
+water,feature,float64,kg/m3,Вода на кубометр смеси
+superplasticizer,feature,float64,kg/m3,Суперпластификатор на кубометр смеси
+coarse_aggregate,feature,float64,kg/m3,Крупный заполнитель на кубометр смеси
+fine_aggregate,feature,float64,kg/m3,Мелкий заполнитель на кубометр смеси
+age_days,feature,int64,days,Возраст образца на момент испытания
+strength_mpa,target,float64,MPa,Прочность на сжатие; целевая переменная

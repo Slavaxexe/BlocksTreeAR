@@ -1,0 +1,145 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "strategy": {
+      "default": "random",
+      "enum": [
+        "random",
+        "stratified",
+        "group",
+        "stratified_group",
+        "time",
+        "group_time",
+        "ordered"
+      ],
+      "title": "Strategy",
+      "type": "string"
+    },
+    "fraction": {
+      "default": 0.2,
+      "description": "Validation fraction; time uses complete periods",
+      "exclusiveMaximum": 1.0,
+      "exclusiveMinimum": 0.0,
+      "title": "Fraction",
+      "type": "number"
+    },
+    "seed": {
+      "default": 42,
+      "title": "Seed",
+      "type": "integer"
+    },
+    "validation_rows": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Explicit validation size; time may include extra tied rows",
+      "title": "Validation Rows"
+    },
+    "time_column": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Time Column"
+    },
+    "group_columns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Group Columns",
+      "type": "array"
+    },
+    "stratify_columns": {
+      "description": "Default: task targets when stratification is requested",
+      "items": {
+        "type": "string"
+      },
+      "title": "Stratify Columns",
+      "type": "array"
+    },
+    "stratify_bins": {
+      "anyOf": [
+        {
+          "minimum": 2,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional quantile bins for one numeric stratification column",
+      "title": "Stratify Bins"
+    },
+    "validation_periods": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Hold out this many latest distinct time values",
+      "title": "Validation Periods"
+    },
+    "cutoff": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Validation starts at this numeric period or ISO timestamp, inclusive",
+      "title": "Cutoff"
+    },
+    "gap_periods": {
+      "default": 0,
+      "description": "Exclude this many distinct periods immediately before validation",
+      "minimum": 0,
+      "title": "Gap Periods",
+      "type": "integer"
+    },
+    "gap_rows": {
+      "default": 0,
+      "description": "Ordered split only: exclude rows immediately before validation",
+      "minimum": 0,
+      "title": "Gap Rows",
+      "type": "integer"
+    },
+    "rare_class_policy": {
+      "default": "error",
+      "enum": [
+        "error",
+        "train_only"
+      ],
+      "title": "Rare Class Policy",
+      "type": "string"
+    }
+  },
+  "title": "SplitPlan",
+  "type": "object"
+}
