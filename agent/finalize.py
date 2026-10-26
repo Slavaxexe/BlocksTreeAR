@@ -89,7 +89,8 @@ class FinalRefit:
             if call.kind == 'fit':
                 key = fingerprint(call.outputs.get('model', 'model'))[:12]
                 facts = json.loads((source / f'fit_{key}_full_diagnostics.json').read_text(encoding='utf-8'))
-                params['parameters'] = {**params.get('parameters', {}), **facts.get('best_parameters', {})}
+                # Apply the latest search result after inherited settings, including deep sklearn parameters.
+                params['fixed_parameters'] = {**params.get('fixed_parameters', {}), **facts.get('best_parameters', {})}
                 params['search_space'] = {}
                 call = call.model_copy(update={'parameters': params})
             if call.kind == 'saved_ensemble':

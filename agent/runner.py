@@ -680,9 +680,9 @@ async def run(task_path: Path, options: Options, settings: Settings):
             except Exception as error:
                 notify(f'{start.node_id} cleanup: {error}')
         if analyses:
-            cancelled = set(analyses.values())
+            interrupted_analyses = set(analyses.values())
             delta = delta.model_copy(update={'nodes': [row.model_copy(update={'analysis_status': 'skipped'})
-                if row.node_id in cancelled else row for row in delta.nodes]})
+                if row.node_id in interrupted_analyses else row for row in delta.nodes]})
             analyses.clear()
             save_delta()
         if search:

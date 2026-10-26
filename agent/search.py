@@ -376,14 +376,17 @@ class Search:
                     'delta_from_baseline': (baseline - score if direction == 'minimize' else score - baseline)
                         if score is not None and baseline is not None else None,
                     'key_features': [recipe['name'] for recipe in recipes],
+                    'input_feature_counts': sorted({f['input_feature_count'] for f in facts if 'input_feature_count' in f}),
+                    'feature_warnings': [warning for f in facts for warning in f.get('feature_warnings', [])],
                     'seconds': item['result'].get('duration_seconds'), 'error': item['result'].get('error')}
             if item.get('analysis'):
                 card['analysis'] = {'summary': item['analysis'].get('summary')}
             if item['node_id'] == self.leader:
                 card['feature_recipes'] = recipes
                 card['model_facts'] = [{key: f[key] for key in ('native_estimator', 'native_parameters',
-                    'best_estimator', 'best_config', 'inner_best_loss', 'inner_validation', 'selected_model_count')
-                    if key in f} for f in facts if f.get('best_estimator') or f.get('native_estimator')]
+                    'best_estimator', 'best_config', 'inner_best_loss', 'inner_validation', 'selected_model_count',
+                    'selected_columns', 'input_feature_count')
+                    if key in f} for f in facts if f.get('best_estimator') or f.get('native_estimator') or f.get('selected_columns')]
             result.append(compact(card))
         # The full journal remains local for duplicate detection. Prompt size is bounded.
         index = select_experiments(cards, self.leader, direction, limit=16)
@@ -411,9 +414,9 @@ class Search:
         ready_builds = [card(value) for value in build_lookup.values()]
         return {**self.shared, 'data_research': research, 'purposes': ['baseline'] if self.next_node == 0 else
                 [purpose for purpose, cap in self.caps.items() if cap],
-            'max_new_ideas': min(1 if self.next_node == 0 else 4, remaining,
+            'max_new_ideas': min(1 if self.next_node == 0 or self.failures else 2, remaining,
                                  max(1 if self.next_node == 0 else 2, self.parallel_limit - len(self.queue))),
-            'queue_capacity': min(self.parallel_limit * 2, remaining),
+            'queue_capacity': min(self.parallel_limit, remaining),
             'remaining_experiments': None if math.isinf(remaining) else remaining,
             'slot_limits': self.slot_limits(), 'occupied_slots': self.occupied,
             'api_budget': self.agents.budget_view(),
@@ -436,8 +439,9 @@ class Search:
 
     async def ask_ideas(self, trigger):
         if self.failures:
-            self.agents.log('planning_retry_wait', consecutive_failures=self.failures, delay_seconds=5)
-            await asyncio.sleep(min(5., max(0., self.agents.deadline - time.monotonic())))
+            delay = min(60., 5. * 2 ** min(self.failures - 1, 4))
+            self.agents.log('planning_retry_wait', consecutive_failures=self.failures, delay_seconds=delay)
+            await asyncio.sleep(min(delay, max(0., self.agents.deadline - time.monotonic())))
         context = {**self.baker_context(), 'trigger': trigger}
         self.baker_research_revision = context.get('data_research', {}).get('revision', 0)
         self.baker_candidates = context.get('data_research', {}).get('feature_candidates', [])
@@ -517,8 +521,7 @@ class Search:
                 self.failures += 1
                 self.last_planning_error = str(error)
                 self.agents.log('idea_generation_failed', traceback=traceback.format_exc())
-                temporary = (not self.agents.root.api_error and self.failures < 3
-                             and time.monotonic() < self.agents.deadline)
+                temporary = not self.agents.root.api_error and time.monotonic() < self.agents.deadline
                 self.failed = not temporary
                 self.stop_reason = 'llm_error'
                 self.notify(f'Baker: {error}', fatal=not temporary)

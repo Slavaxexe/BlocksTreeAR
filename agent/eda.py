@@ -242,6 +242,8 @@ def _predictive(frame, columns, target, classification, request, metric, cache, 
               'inner_split_sha256': split_hash,
               'comparison_score': score,
               'scope': 'Proxy evaluation inside fit only; not the experiment outer-validation score'}
+    from .features import feature_warnings
+    result['feature_warnings'] = feature_warnings(valid, result['recipe_names'], 'inner_validation')
     if slices:
         result['history_slices'] = slices
     estimator = model.steps[-1][1]

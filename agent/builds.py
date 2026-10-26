@@ -111,7 +111,13 @@ def compile_build(value, changes, idea):
         item = blocks[edit.block]
         call = item.operation.model_dump()
         delta = copy.deepcopy(edit.parameters)
-        if call['kind'] == 'fit' and 'parameters' in delta:
+        replacing_model = (call['kind'] == 'fit' and 'estimator' in delta
+                           and delta['estimator'] != call['parameters'].get('estimator'))
+        if replacing_model:
+            # A new estimator cannot inherit the old family's constructor or tuned settings.
+            for key in ('parameters', 'fixed_parameters', 'search_space', 'source_node'):
+                call['parameters'].pop(key, None)
+        elif call['kind'] == 'fit' and 'parameters' in delta:
             # Apply constructor/deep sklearn parameter changes after creating the unchanged estimator.
             delta['fixed_parameters'] = {**delta.get('fixed_parameters', {}), **delta.pop('parameters')}
         call['parameters'] = merge(call['parameters'], delta)

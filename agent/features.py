@@ -13,10 +13,23 @@ SUPERVISED_GUIDE = (
     'excluding the same period and future; duplicate key/time values are aggregated. '
     'target_encoding: columns=key, parameters={target,smoothing:10,folds:5,seed:42,validation:auto/random/group/time,'
     'group_column:null,time_column:null,class_label:null}. Training rows are encoded out of fold; '
-    'queries use fit only; temporal encoding uses strictly earlier data. Use class_label for categorical targets. '
+    'queries use fit only; temporal encoding uses strictly earlier data and ignores folds. Use class_label for categorical targets. '
     'AutoML supports these recipes with holdout and bag_folds=stack_levels=0; '
     'feature statistics are rebuilt on inner train, then the selected model is refit on all fit. '
     'FLAML internal ensemble must be false; saved ensembles remain available. Time/group inputs cannot be targets.')
+
+
+def feature_warnings(frame, names, scope):
+    """Report degenerate generated columns without changing the feature matrix."""
+    result = []
+    for name in dict.fromkeys(names):
+        if name not in frame:
+            continue
+        unique = int(frame[name].nunique())
+        if unique <= 1:
+            result.append({'feature': name, 'scope': scope, 'rows': len(frame),
+                           'missing_rows': int(frame[name].isna().sum()), 'unique_values': unique})
+    return result
 
 
 def create_features(frames, recipes, *, forbidden=(), policy=None):

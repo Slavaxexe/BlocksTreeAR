@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +16,69 @@ from tests import test_ensembles, test_operations
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_final_refit_keeps_latest_search_parameters(self):
+        from agent.finalize import FinalRefit
+        from agent.storage import fingerprint
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, defaults, sha = test_ensembles.EnsembleTests().setup_run(root, False)
+            node = root / 'nodes/node_000'
+            manifest = json.loads((node / 'assembly.json').read_text())
+            manifest['blocks'][1]['operation']['parameters']['fixed_parameters'] = {'max_depth': 1}
+            (node / 'assembly.json').write_text(json.dumps(manifest), encoding='utf-8')
+            facts = node / f"fit_{fingerprint('model')[:12]}_full_diagnostics.json"
+            facts.write_text(json.dumps({'best_parameters': {'max_depth': 4}}), encoding='utf-8')
+            refit = FinalRefit.__new__(FinalRefit)
+            refit.__dict__.update(root=root, destination=root / 'final', memo={}, defaults=defaults,
+                train=state['fit'], test=state['test'], metadata=state['preparation'], deadline=time.monotonic() + 10)
+            with patch('agent.finalize.source_node', return_value=(node, {'code_sha256': 'saved'})), \
+                    patch('agent.assembly.implementation_hash', return_value='saved'), \
+                    patch('agent.operations.run_operation', wraps=run_operation) as execute:
+                refit.run_node('node_000')
+            self.assertEqual(execute.call_args.args[0]['model']['estimator'].max_depth, 4)
+
+    def test_frozen_flaml_forest_applies_new_parameters(self):
+        from agent.selected_model import SelectedModel
+        from flaml.automl.model import ExtraTreesEstimator
+        frame = pd.DataFrame({'x': np.arange(24, dtype=float)})
+        target = pd.Series(np.sin(frame.x))
+        original = ExtraTreesEstimator(task='regression', n_estimators=2, max_depth=1, n_jobs=1)
+        original.fit(frame, target, budget=5)
+        result = SelectedModel('flaml', [original], [1.], None, None).refit(frame, target,
+            {'deadline': time.monotonic() + 10, 'num_cpus': 1},
+            parameters={'extra_tree': {'n_estimators': 7, 'max_depth': 4}})
+        self.assertEqual((result.models[0].model.n_estimators, result.models[0].model.max_depth), (7, 4))
+
+    def test_rank_average_matches_final_refit(self):
+        from agent.ensembles import blend, run_saved_ensemble
+        from agent.finalize import FinalRefit
+        from agent.plans import EnsemblePlan
+        state = test_operations.OperationTests().state()
+        state['preparation']['runtime'].update(run_directory='.', preparation_sha256='saved')
+        state['preparation']['data']['query_columns'] = ['query']
+        for scope in ('validation', 'test'):
+            state[scope]['query'] = np.repeat(np.arange(4), 3)
+        pair = {scope: pd.DataFrame({'target': np.tile([100., 2., 1.], 4)}) for scope in ('validation', 'test')}
+        plan = EnsemblePlan(source_nodes=['node_001', 'node_002'], method='rank_average')
+        defaults = {'task_type': 'regression'}
+        with patch('agent.ensembles.load_pair', side_effect=lambda *args: {k: v.copy() for k, v in pair.items()}):
+            measured = run_saved_ensemble(state, plan, defaults)['test_predictions']
+        refit = FinalRefit.__new__(FinalRefit)
+        refit.defaults, refit.run_node = defaults, lambda node: pair
+        final = refit.ensemble(None, plan, state)['test_predictions']
+        np.testing.assert_allclose(measured, final)
+        np.testing.assert_allclose(final.target, np.tile([1., .5, 0.], 4))
+
+    def test_stratified_automl_allows_native_cv(self):
+        from agent.automl import run_automl
+        state = test_operations.OperationTests().state(True)
+        state['preparation']['validation'] = {'strategy': 'stratified'}
+        with patch('agent.automl._fit_flaml', side_effect=RuntimeError('native search reached')) as search:
+            with self.assertRaisesRegex(RuntimeError, 'native search reached'):
+                run_automl(state, task_type='classification', config={
+                    'engine': 'flaml', 'validation': 'cv', 'folds': 2, 'ensemble': True})
+        self.assertAlmostEqual(search.call_args.args[4]['deadline'], state['preparation']['runtime']['deadline'], places=2)
+
     def test_eda_build_executes_without_replanning_and_changes_preserve_settings(self):
         from agent.builds import register_eda, compile_build, store
         from agent.contracts import Idea, Assembly, AssemblyChanges, BlockEdit
@@ -47,6 +111,24 @@ class UpgradeTests(unittest.TestCase):
                 state.update(run_operation(state, block.operation, {'task_type': 'regression'}))
             self.assertEqual(state['model']['estimator'].min_samples_leaf, 5)
             self.assertEqual(state['model']['estimator'].n_estimators, 64)
+
+            replaced = compile_build(parent, AssemblyChanges(edits=[BlockEdit(block='fit', parameters={
+                'estimator': 'sklearn.linear_model.Ridge', 'parameters': {'alpha': 2.}})]), idea)
+            for block in replaced.assembly.blocks:
+                state.update(run_operation(state, block.operation, {'task_type': 'regression'}))
+            self.assertEqual(state['model']['estimator'].alpha, 2.)
+            self.assertEqual(replaced.assembly.blocks[1].operation, proposal.assembly.blocks[1].operation)
+            self.assertEqual(parent['assembly']['blocks'][2]['operation']['parameters']['estimator'],
+                             'sklearn.ensemble.ExtraTreesRegressor')
+
+    def test_generated_feature_warnings_leave_data_unchanged(self):
+        from agent.features import feature_warnings
+        frame = pd.DataFrame({'missing': [np.nan, np.nan], 'constant': [1., 1.], 'useful': [1., 2.]})
+        original = frame.copy()
+        facts = feature_warnings(frame, ['missing', 'constant', 'useful'], 'fit')
+        self.assertEqual([(item['feature'], item['unique_values'], item['missing_rows']) for item in facts],
+                         [('missing', 0, 2), ('constant', 1, 0)])
+        pd.testing.assert_frame_equal(frame, original)
 
     def test_finalist_splits_keep_time_groups_and_original_positions(self):
         from agent.final_validation import extra_splits

@@ -4,6 +4,17 @@ from pathlib import Path
 import numpy as np
 
 
+def flaml_model_id(model):
+    """Use FLAML's task registry, including forest, linear and nearest-neighbor families."""
+    task = getattr(model, '_task', None)
+    if task is not None:
+        for base in type(model).__mro__:
+            for name, factory in task.estimators.items():
+                if base is factory:
+                    return name
+    return None
+
+
 class SelectedModel:
     def __init__(self, engine, models, weights, transformer, labels, classes=None):
         self.engine, self.models, self.weights = engine, models, np.asarray(weights, dtype=float)
@@ -32,14 +43,12 @@ class SelectedModel:
             remaining = _remaining(runtime) / (len(self.models) - index)
             if self.engine == 'flaml':
                 model = clone_estimator(original)
-                native = getattr(original, 'model', original)
-                family = {'lightgbm': 'lgbm', 'xgboost': 'xgboost', 'catboost': 'catboost'}.get(type(native).__module__.split('.')[0])
+                family = flaml_model_id(original)
                 overrides = (parameters or {}).get(family, {})
                 if overrides:
                     options = {**model.get_params(), **overrides}
-                    if hasattr(original, 'config2params'):
-                        options = original.config2params(options)
                     options['n_jobs'] = int(runtime.get('num_cpus', 1))
+                    # The constructor translates FLAML settings; do not translate them twice.
                     model = type(model)(**options)
                 if type(model).__module__.startswith('flaml'):
                     model.fit(features, encoded, budget=remaining,

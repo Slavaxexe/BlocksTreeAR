@@ -35,11 +35,13 @@ CATALOG = {
                  'parameters': 'sources: [[validation_state_key,test_state_key],...]; weights optional; method=mean/vote/probabilities. List every source state key in block.requires.'},
 }
 
+CATALOG['features']['parameters'] += ' Expressions use group_mean(group, numeric_value), group_std(group, numeric_value), group_count(group): group is FIRST.'
 CATALOG['features']['parameters'] += ' ' + SUPERVISED_GUIDE
 CATALOG['fit']['parameters'] += ' source_node=node_... optionally inherits the saved ordinary/FLAML native estimator and exact parameters; parameters then overrides only explicit changes. It does not inherit preprocessing.'
 CATALOG['fit']['parameters'] += ' fixed_parameters holds frozen/deep sklearn set_params values applied after construction; ready builds preserve these automatically.'
 CATALOG['automl']['parameters'] += ' reuse_node refits the saved selected choice with the current recipe and no new search, preserving the adapter preprocessing algorithm.'
 CATALOG['saved_ensemble']['parameters'] += (
+    'rank_average outputs normalized ranks, not target units; it is unsuitable for RMSE/MAE without calibration. '
     ' Multi-target tasks support column-wise mean/vote/conditional blending; learned stacking/gating currently '
     'requires one supervised target. Cluster IDs are arbitrary across models and cannot be blended.')
 CATALOG['automl']['parameters'] += (
@@ -214,7 +216,9 @@ def _preprocess(state, parameters):
     # Keep the exact input table, including new features and group/time columns.
     transformer.fit_source_ = state['fit']
     created = [recipe['name'] for recipe in state['fit'].attrs.get('feature_recipes', [])]
+    from .features import feature_warnings
     transformer.diagnostics_ = {'selected_columns': columns, 'numeric_columns': numeric,
+        'feature_warnings': feature_warnings(state['fit'], [name for name in created if name in columns], 'fit'),
         'categorical_columns': categorical, 'input_feature_count': len(columns),
         'output_feature_count': int(arrays[0].shape[1]),
         'unused_created_features': [column for column in created if column not in columns]}
@@ -479,31 +483,17 @@ def _ensemble(state, parameters, defaults):
             query_frame = state.get(scope)
             ranked_frames = []
             for frame in frames:
-                raw_mat = frame.to_numpy(dtype=float)
-                ranked_mat = np.empty_like(raw_mat)
-                for col_idx in range(raw_mat.shape[1]):
-                    raw_col = raw_mat[:, col_idx]
-                    if query_cols and query_frame is not None and all(c in query_frame for c in query_cols):
-                        from .task_types import group_codes
-                        codes = group_codes(query_frame, query_cols)
-                        ranked_col = np.empty_like(raw_col)
-                        for code in np.unique(codes):
-                            mask = (codes == code)
-                            sub = raw_col[mask]
-                            order = np.argsort(sub, kind='stable')
-                            ranks = np.empty_like(order, dtype=float)
-                            denom = max(1, len(sub) - 1)
-                            ranks[order] = np.arange(len(sub), dtype=float) / denom
-                            ranked_col[mask] = ranks
-                        ranked_mat[:, col_idx] = ranked_col
-                    else:
-                        order = np.argsort(raw_col, kind='stable')
-                        ranks = np.empty_like(order, dtype=float)
-                        denom = max(1, len(raw_col) - 1)
-                        ranks[order] = np.arange(len(raw_col), dtype=float) / denom
-                        ranked_mat[:, col_idx] = ranks
-                ranked_frames.append(pd.DataFrame(ranked_mat, columns=frame.columns))
-            values = sum(weight * rf.to_numpy(dtype=float) for weight, rf in zip(weights, ranked_frames))
+                numeric = frame.astype(float)
+                if query_cols and query_frame is not None and all(c in query_frame for c in query_cols):
+                    from .task_types import group_codes
+                    codes = group_codes(query_frame, query_cols)
+                    ranks = numeric.groupby(codes, sort=False).rank(method='average')
+                    sizes = pd.Series(codes).map(pd.Series(codes).value_counts()).to_numpy()
+                else:
+                    ranks = numeric.rank(method='average')
+                    sizes = np.full(len(frame), len(frame))
+                ranked_frames.append((ranks.to_numpy() - 1) / np.maximum(1, sizes - 1)[:, None])
+            values = sum(weight * ranks for weight, ranks in zip(weights, ranked_frames))
             output = _prediction(values, state, defaults, labels=list(frames[0].columns))
         else:
             values = sum(weight * frame.to_numpy(dtype=float) for weight, frame in zip(weights, frames))

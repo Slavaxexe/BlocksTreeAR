@@ -1,7 +1,7 @@
 """Stable JSON envelopes; task names and algorithms are deliberately open-ended."""
 
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from .plans import AutoMLPlan, AnalysisRequest, ToolCall, EnsemblePlan, SplitPlan, FeatureSpec
 from .validation import metadata
@@ -390,16 +390,55 @@ class Ideas(Contract):
             addressed = {identity for idea in self.ideas for identity in idea.feature_candidate_ids}
             chosen_builds = {idea.build_id for idea in self.ideas if idea.build_id}
             addressed.update(candidate_id(item) for item in candidates if item.get('build_id') in chosen_builds)
-            for decision in self.feature_decisions:
-                if decision.action == 'test' and decision.candidate_id not in addressed:
-                    raise ValueError('A test decision needs an idea selecting that feature_candidate_id')
-            addressed.update(decision.candidate_id for decision in self.feature_decisions)
-            if pending - addressed:
-                raise ValueError(f'Decide test/defer/reject for untested feature candidates: {sorted(pending - addressed)}')
+            decisions = [decision if decision.action != 'test' or decision.candidate_id in addressed else
+                decision.model_copy(update={'action': 'defer', 'reason': 'No accepted experiment selects this candidate yet'})
+                for decision in self.feature_decisions]
+            addressed.update(decision.candidate_id for decision in decisions)
+            # Missing bookkeeping must not invalidate a useful model hypothesis.
+            decisions.extend(FeatureDecision(candidate_id=identity, action='defer',
+                reason='Not selected in this batch; keep the measured candidate available')
+                for identity in sorted(pending - addressed))
+        else:
+            decisions = self.feature_decisions
         ids = [update.idea_id for update in self.updates]
         if len(ids) != len(set(ids)) or not set(ids).issubset(context.get('idea_ids', [])):
             raise ValueError('Update each supplied idea ID at most once')
-        return self
+        return self.model_copy(update={'feature_decisions': decisions})
+
+
+def validated_ideas(payload, context):
+    """Keep valid hypotheses when one item in a Baker batch fails its contract."""
+    try:
+        return Ideas.model_validate(payload, context=context), []
+    except ValidationError as error:
+        original_error = error
+    if not isinstance(payload, dict) or not isinstance(payload.get('ideas'), list):
+        raise original_error
+    accepted, rejected = [], []
+    for index, row in enumerate(payload['ideas']):
+        try:
+            item = Ideas.model_validate({'ideas': [row]}, context={**context, 'max_new_ideas': 1})
+            accepted.extend(item.ideas)
+        except ValidationError as error:
+            rejected.append({'index': index, 'errors': [e['msg'] for e in error.errors()]})
+    if not accepted:
+        raise original_error
+    repaired = {**payload, 'ideas': sorted(accepted, key=lambda idea: -idea.priority)[:context.get('max_new_ideas', len(accepted))]}
+    for key, model in (('updates', IdeaUpdate), ('feature_decisions', FeatureDecision)):
+        repaired[key] = []
+        seen = set()
+        rows = payload.get(key, [])
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                item = model.model_validate(row)
+            except ValidationError:
+                continue
+            if key == 'updates':
+                if item.idea_id in seen or item.idea_id not in context.get('idea_ids', []):
+                    continue
+                seen.add(item.idea_id)
+            repaired[key].append(item)
+    return Ideas.model_validate(repaired, context=context), rejected
 
 
 class Proposals(Contract):

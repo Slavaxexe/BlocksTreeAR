@@ -4,19 +4,31 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from agent.contracts import Ideas
+from agent.contracts import Ideas, validated_ideas
 from agent.feature_trials import candidate_id, candidate_view, check_recipes
 
 
 class FeatureTrialTests(unittest.TestCase):
-    def test_untested_recipe_needs_an_explicit_decision(self):
+    def test_one_invalid_hypothesis_does_not_discard_valid_work(self):
+        idea = {'purpose': 'improve', 'parent_id': 'node_000', 'change': 'Try a different regularization',
+                'expected_effect': 'Measure the change'}
+        result, rejected = validated_ideas({'ideas': [idea, {**idea, 'parent_id': 'node_999'}]},
+            {'purposes': ['improve'], 'parents': ['node_000'], 'leader': 'node_000', 'max_new_ideas': 2})
+        self.assertEqual(len(result.ideas), 1)
+        self.assertEqual(rejected[0]['index'], 1)
+        with self.assertRaises(ValueError):
+            validated_ideas({'ideas': [{**idea, 'parent_id': 'node_999'}]},
+                {'purposes': ['improve'], 'parents': ['node_000'], 'leader': 'node_000'})
+
+    def test_omitted_recipe_remains_deferred_without_rejecting_the_response(self):
         candidate = {'features':[{'name':'frequency_x','operation':'frequency','columns':['x']}],
                      'trial_status':'untested'}
         identity = candidate_id(candidate)
         context = {'purposes':['improve'],'parents':['node_000'],'leader':'node_000',
                    'feature_candidates':[candidate]}
-        with self.assertRaises(ValueError):
-            Ideas.model_validate({},context=context)
+        default = Ideas.model_validate({},context=context)
+        self.assertEqual(default.feature_decisions[0].candidate_id, identity)
+        self.assertEqual(default.feature_decisions[0].action, 'defer')
         response = Ideas.model_validate({'feature_decisions':[{'candidate_id':identity,'action':'defer',
             'reason':'First finish the pending model experiment'}]},context=context)
         self.assertEqual(response.feature_decisions[0].candidate_id, identity)

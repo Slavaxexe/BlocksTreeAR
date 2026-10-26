@@ -19,7 +19,7 @@ from .config import Settings
 from .context import (analyzer_context, compact, node_context, planner_catalog, prompt_schema,
                       repair_context, research_memory_view, select_research, table, task_context)
 from .contracts import (Analysis, DataFacts, Extraction, Ideas, LLMCall, MetricFacts, NodePlan, OutputFacts,
-                        PreparationDraft, ProblemFacts, RunReport)
+                        PreparationDraft, ProblemFacts, RunReport, validated_ideas)
 from .qwen import QwenError, QwenTemporaryError, api_error_details
 from .storage import append_event, fingerprint, save
 
@@ -426,7 +426,13 @@ class JSONAgents:
                 try:
                     result = schema.model_validate_json(document, context={"source": source, **(validation or {})})
                 except ValidationError:
-                    result = schema.model_validate(payload, context={"source": source, **(validation or {})})
+                    if schema is Ideas:
+                        result, rejected = validated_ideas(payload, {"source": source, **(validation or {})})
+                        if rejected:
+                            self.log('api_ideas_recovered', request_id=request_id, rejected=rejected,
+                                     accepted=len(result.ideas))
+                    else:
+                        result = schema.model_validate(payload, context={"source": source, **(validation or {})})
                 if isinstance(result, Ideas) and len(payload.get('ideas', [])) != len(result.ideas):
                     self.log('api_ideas_normalized', request_id=request_id,
                              received=len(payload['ideas']), accepted=len(result.ideas))
@@ -481,7 +487,7 @@ class JSONAgents:
                         messages.append({'role': 'user', 'content': 'Previously found API facts:\n' +
                             json.dumps(reference_results, ensure_ascii=False, separators=(',', ':'))})
                     messages += [{'role': 'assistant', 'content': content},
-                                 {'role': 'user', 'content': 'Output the COMPLETE corrected JSON object from start to finish, beginning with "{" and ending with "}". Do not continue from the error location. Validation errors: ' + json.dumps(details)}]
+                                 {'role': 'user', 'content': 'Output the COMPLETE corrected JSON object from start to finish, beginning with "{" and ending with "}". Close each array with ] before closing its containing object. Do not continue from the error location. Validation errors: ' + json.dumps(details)}]
             else:
                 self.calls.append(LLMCall(status="completed", **stats))
                 self.log('api_completed', request_id=request_id, duration_seconds=time.monotonic() - started, **stats)
@@ -621,13 +627,14 @@ class JSONAgents:
             "leader_id; explore may use another available parent. Prefer a useful queued idea over a duplicate. "
             "experiments holds short measured cards: leader, diverse strong candidates, recent results, "
             "failures and ancestry. Only the leader includes recipes/native settings. experiment_index is a bounded shortlist. "
+            "key_features lists generated recipes, not all inputs; input_feature_counts and selected_columns describe actual inputs. "
             "Exact repeat detection still uses the full local journal; you have no archive or reference tool. "
             "Compact tables have columns and rows. Empty metadata/default settings may be omitted. "
             "Learn from val_score and actual model_facts; hypothesis text is a plan. Do not invent "
             "causes or treat one holdout as proof. Cite only relevant supplied research_ids; interpretations "
             "are unverified, proxy improvements are not outer-validation gains. "
-            "For each untested data_research.feature_candidates entry, either select its id in an idea.feature_candidate_ids "
-            "or return a feature_decisions item (candidate_id, action=defer/reject, reason). Do not silently ignore "
+            "For useful untested data_research.feature_candidates select its id in idea.feature_candidate_ids "
+            "or provide feature_decisions with a reason to defer/reject. Omitted candidates remain deferred and available. Do not repeatedly ignore "
             "measured candidates while repeatedly refining the same model. Proxy gains require outer validation, "
             "not automatic acceptance. Test a candidate as a controlled change on a suitable parent; keep unrelated "
             "settings fixed. Pending/tested recipes need no duplicate trial without a new concrete reason. "
@@ -636,7 +643,9 @@ class JSONAgents:
             "A node build needs build_id plus explicit changes. edits recursively merge only specified parameters; "
             "features adds/replaces named recipes, remove_features removes named recipes. Unmentioned settings/stages are preserved. "
             "feature_parameters merges only changed settings into an existing recipe, preserving its key/time/fallback. "
-            "To replace a model family, remove and insert the fit stage with explicit order instead of carrying incompatible old kwargs. "
+            "To replace a model family, omit build_id/changes and describe the estimator and settings in change; "
+            "the node planner will build the replacement without incompatible old kwargs. "
+            "For an existing fit-stage edit use changes={edits:[{block:fit,parameters:{parameters:{max_depth:4}}}]}. "
             "A ready build is compiled locally without a node-planner request. Do not copy its entire configuration. "
             "Keep the change about the new action, without copying parent configuration or dataset statistics. "
             "Compare diverse model families when evidence/time permit: boosting, ExtraTrees and a regularized linear model. "
@@ -667,6 +676,10 @@ class JSONAgents:
         )
         if 'baseline' in context['purposes']:
             prompt = BASELINE_RULES + prompt
+        if context.get('planning_error'):
+            prompt += ('Recovery: return one short hypothesis with purpose, parent_id, change, change_blocks and expected_effect. '
+                       'Omit build_id, changes, automl and ensemble; the node planner will construct exact operation settings. '
+                       'For improve use exactly leader_id; use explore for an older available parent.\n')
         return await self.ask(Ideas, prompt + json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
             'baker', reference=False,
             validation={'purposes': context['purposes'], 'parents': context['available_parents'],
@@ -724,7 +737,8 @@ class JSONAgents:
                 'edits.parameters recursively merges dictionaries; omitted values are inherited. For fit model kwargs '
                 'use parameters={parameters:{name:value}}. features adds/replaces recipes by name; remove_features removes them. '
                 'feature_parameters maps recipe names to partial parameter changes, preserving every other recipe setting. '
-                'Insert stages explicitly with a complete order; remove+insert to replace a model family. '
+                'Insert stages explicitly with a complete order. Changing fit.estimator resets inherited constructor settings, '
+                'fixed_parameters, search_space and source_node; supply the new family settings explicitly. '
                 'Preserve preprocessing and every unrelated model parameter. The AutoML reuse_node freezes selection; '
                 'do not remove it unless this hypothesis explicitly requests a new search. Keep the hypothesis concise.\n' +
                 json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
@@ -816,11 +830,20 @@ class JSONAgents:
             'Do not infer target access from a lag description: outer validation labels are not a feature source. '
             'A parameter transfer must preserve all effective native settings and alias meanings; otherwise identify confounding. '
             'A period ordinal is not a calendar year; subtracting it from year_built does not establish building age. '
+            'Trusted history and temporal target_encoding use strictly earlier fit periods; time encoding ignores folds. '
+            'A build_id identifies an assembly, not a dataset/split. Reusing fixed model settings for feature ablation '
+            'is intentional; lack of a new AutoML search alone is not confounding. '
+            'feature_warnings reports constant/all-missing generated inputs on its stated scope. An all-missing '
+            'feature adds no measured signal; a changed score may reflect feature sampling or model randomness. '
+            'For expressions group_mean(group, numeric_value) and group_std(group, numeric_value) take the group FIRST. '
+            'rank_average returns normalized ranks, not target units: it is not calibrated for RMSE/MAE. '
             'Unrecorded correlations, class-weight effects and causes remain explicitly unverified. '
             'Identify omitted requested procedures or repeated implementations. Return 1-2 concise summary '
             'sentences and at most 3 findings/next_ideas each, one concrete new point per item with its block. '
             'Do not repeat scores, timings, dimensions or parameter lists already in the record. '
-            'Do not write code or change task, split or metric.\n')
+            'Do not write code or change task, split or metric. '
+            'Use exactly this JSON shape: {"summary":"...","findings":["..."],"next_ideas":["..."]}. '
+            'Close both arrays with ] and then the object with }.\n')
         return await self.ask(Analysis, prompt + json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
                               'analyzer', reference=failed)
 

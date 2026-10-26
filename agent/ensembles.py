@@ -66,8 +66,14 @@ def conditional(pairs, state, defaults, plan, method):
     for rule in plan.rules:
         rows = {scope: np.flatnonzero(condition_mask(state[scope], rule.conditions) & ~covered[scope])
                 for scope in covered}
-        partial = [{scope: subset(pair[scope], rows[scope]) for scope in covered} for pair in pairs]
-        prediction = blend(partial, state, defaults, rule.weights, method)
+        if method == 'rank_average':
+            # Ranks describe the complete query, even when a rule selects only some of its rows.
+            prediction = blend(pairs, state, defaults, rule.weights, method)
+            prediction = {key: subset(frame, rows[key.removesuffix('_predictions')])
+                          for key, frame in prediction.items()}
+        else:
+            partial = [{scope: subset(pair[scope], rows[scope]) for scope in covered} for pair in pairs]
+            prediction = blend(partial, state, defaults, rule.weights, method)
         for scope in covered:
             frame, update = result[scope + '_predictions'], prediction[scope + '_predictions']
             frame.iloc[rows[scope]] = update.to_numpy()
@@ -236,7 +242,7 @@ def run_saved_ensemble(state, value, defaults):
     if plan.method == 'conditional':
         return conditional(pairs, state, defaults, plan, method)
     result = blend(pairs, state, defaults, plan.weights or None,
-                   plan.method if plan.method in {'mean', 'vote', 'probabilities'} else method)
+                   plan.method if plan.method in {'mean', 'vote', 'probabilities', 'rank_average'} else method)
     if plan.optimize_weights:
         for frame in result.values():
             frame.attrs['meta_held_out'] = False

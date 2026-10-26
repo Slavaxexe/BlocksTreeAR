@@ -51,7 +51,7 @@ class FeatureSpec(Plan):
                        'group_max', 'group_nunique', 'group_count', 'group_ratio', 'group_diff',
                        'datetime', 'expression', 'history', 'target_encoding']
     columns: list[str] = Field(min_length=1)
-    parameters: dict[str, Any] = Field(default_factory=dict, description='For expression use {expression: formula}; x0/x1 or col(quoted column) read declared columns. Compose arithmetic, conditions, log1p, abs, sqrt, where, clip, frequency and group_mean/group_std/group_count. Statistics learn only on fit.')
+    parameters: dict[str, Any] = Field(default_factory=dict, description='For expression use {expression: formula}; x0/x1 or col(quoted column) read declared columns. Compose arithmetic, conditions, log1p, abs, sqrt, where, clip, frequency, group_mean(group, numeric_value), group_std(group, numeric_value), group_count(group). The group argument is FIRST, including inside expressions. Statistics learn only on fit.')
 
     @model_validator(mode='after')
     def supervised_parameters(self):
@@ -224,6 +224,22 @@ class ToolCall(Plan):
             parameters = AutoMLPlan.model_validate(parameters).model_dump()
         elif value.get('kind') == 'saved_ensemble':
             parameters = EnsemblePlan.model_validate(parameters).model_dump()
+        elif value.get('kind') == 'fit' and isinstance(parameters, dict):
+            parameters = dict(parameters)
+            constructor = parameters.get('parameters', {})
+            if not isinstance(constructor, dict):
+                raise ValueError('parameters must contain estimator constructor parameters')
+            constructor = dict(constructor)
+            for alias in ('estimator_params', 'estimator_parameters', 'model_parameters'):
+                if alias in parameters:
+                    extra = parameters.pop(alias)
+                    if not isinstance(extra, dict):
+                        raise ValueError(f'{alias} must contain estimator constructor parameters')
+                    if any(key in constructor and constructor[key] != item for key, item in extra.items()):
+                        raise ValueError('Conflicting estimator parameter aliases')
+                    constructor.update(extra)
+            if constructor:
+                parameters['parameters'] = constructor
         elif value.get('kind') == 'preprocess' and isinstance(parameters, dict) and 'columns' in parameters:
             parameters = dict(parameters)
             columns = parameters.pop('columns')

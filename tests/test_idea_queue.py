@@ -105,11 +105,12 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
             search = self.make_search(temporary)
             async def fail():
                 raise QwenError('Invalid parent in model response')
-            task = search.baker = asyncio.create_task(fail())
-            await asyncio.gather(task, return_exceptions=True)
-            search.collect({task})
+            for _ in range(3):
+                task = search.baker = asyncio.create_task(fail())
+                await asyncio.gather(task, return_exceptions=True)
+                search.collect({task})
             self.assertFalse(search.failed)
-            self.assertEqual(search.failures, 1)
+            self.assertEqual(search.failures, 3)
             self.assertIn('Invalid parent', search.last_planning_error)
 
     async def test_fresh_research_keeps_queued_ideas(self):

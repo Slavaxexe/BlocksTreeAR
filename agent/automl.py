@@ -304,7 +304,7 @@ def _run_single(state, engine='flaml', *, task_type=None, prediction_type=None, 
         seed_value = validation_policy.get('random_state')
     seed = int(seed_value if seed_value is not None else 42)
     started = time.monotonic()
-    explicit = bool(recipes or plan.row_weights or strategy(validation_policy) != 'random')
+    explicit = bool(recipes or plan.row_weights or strategy(validation_policy) not in {'random', 'stratified'})
     selection_x, selection_y, selection_runtime = x, y, runtime
     tuning, weights, refit_weights = None, None, None
     if explicit:
@@ -399,6 +399,8 @@ def _run_single(state, engine='flaml', *, task_type=None, prediction_type=None, 
         from .predictions import attach_probabilities
         return attach_probabilities(pd.DataFrame(values[:, order], columns=columns), values, classes)
 
+    from .features import feature_warnings
+    diagnostics['feature_warnings'] = feature_warnings(x, [recipe['name'] for recipe in recipes], 'fit')
     valid_predictions, test_predictions = predict(valid_x), predict(test_x)
     if not runtime.get('is_smoke_check') and runtime.get('fit_row_positions') is not None:
         import io

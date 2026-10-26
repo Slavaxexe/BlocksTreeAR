@@ -21,7 +21,7 @@ from runner import Options, run
 
 def submission_options(time_budget=10800):
     return Options(time_budget=time_budget, experiment_timeout=600,
-        final_refit_seconds=900, eda_seconds=900,
+        final_refit_seconds=900, eda_seconds=600,
         max_experiments=None, max_research_nodes=None, max_llm_calls=None,
         parallel=6, parallel_agents=8, research_parallel=2, research_timeout=120,
         research_unlimited=True)
