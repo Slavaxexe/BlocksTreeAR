@@ -87,7 +87,7 @@ wheels = [
 ]
 
 [[package]]
-name = "alfa-hack-agent"
+name = "blockstreear"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -59,7 +59,7 @@ def input_hashes(directory: Path, files: dict[str, str]) -> dict[str, str]:
 
 
 def inventory(directory: Path, limit: int = 150) -> list[dict]:
-    """Send filenames and sizes, never raw dataset rows or hidden settings, to Qwen."""
+    """Send filenames and sizes, never raw dataset rows or hidden settings, to LLM."""
     files = []
     for path in sorted(directory.rglob('*')):
         relative = path.relative_to(directory)

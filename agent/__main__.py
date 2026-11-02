@@ -1,4 +1,4 @@
-"""Qwen diagnostics, source extraction, baseline and hypothesis search."""
+"""LLM diagnostics, source extraction, baseline and hypothesis search."""
 
 import argparse
 import asyncio
@@ -9,11 +9,11 @@ from pathlib import Path
 import sys
 
 from .config import ConfigurationError, Settings
-from .qwen import QwenError, ask_qwen
+from .llm import LLMError, ask_llm
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Qwen: извлечение условия, baseline и поиск гипотез.")
+    parser = argparse.ArgumentParser(description="LLM: извлечение условия, baseline и поиск гипотез.")
     parser.add_argument("command", choices=["check-config", "ping", "ask", "extract", "baseline", "search"])
     parser.add_argument("--env-file", type=Path, help="Файл настроек; по умолчанию .env в корне проекта.")
     parser.add_argument("--prompt", help="Текст запроса для команды ask.")
@@ -36,10 +36,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--research-unlimited", action="store_true", help="Убрать отдельные лимиты EDA по нодам, времени и последовательным ошибкам; квота API, явное окно EDA и общий бюджет остаются.")
     parser.add_argument("--max-research-nodes", type=int, default=12, help="Всего исследовательских нод на запуск.")
     parser.add_argument("--research-timeout", type=float, default=60, help="Лимит выполнения одного исследования, секунд.")
-    parser.add_argument("--parallel-agents", type=int, default=8, help="Одновременных обращений к Qwen для всех ролей.")
-    parser.add_argument("--max-llm-calls", type=int, default=80, help="Лимит всех запросов Qwen, включая повторы; 0 — без ограничения.")
+    parser.add_argument("--parallel-agents", type=int, default=8, help="Одновременных обращений к LLM для всех ролей.")
+    parser.add_argument("--max-llm-calls", type=int, default=80, help="Лимит всех запросов LLM, включая повторы; 0 — без ограничения.")
     parser.add_argument("--automl", action=argparse.BooleanOptionalAction, default=True,
-                        help="Выделенные FLAML/AutoGluon-эксперименты после EDA; настройки выбирает Qwen; отключение: --no-automl.")
+                        help="Выделенные FLAML/AutoGluon-эксперименты после EDA; настройки выбирает LLM; отключение: --no-automl.")
     parser.add_argument("--max-code-attempts", "--max-config-attempts", type=int, default=5,
                         help="Версий конфигурации блока: первая и исправления; по умолчанию 5.")
     parser.add_argument("--key-stdin", action="store_true", help="Скрыто запросить ключ в памяти процесса.")
@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = Settings.from_env(args.env_file)
         if args.key_stdin:
             from dataclasses import replace
-            settings = replace(settings, api_key=getpass.getpass("Qwen API key (hidden): "))
+            settings = replace(settings, api_key=getpass.getpass("LLM API key (hidden): "))
         if args.command in {"extract", "baseline", "search"}:
             from .agents import extract_task
             from .runner import Options, run
@@ -88,12 +88,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(status, ensure_ascii=False, indent=2))
             return 0
         prompt = "Ответь одним словом: готов." if args.command == "ping" else args.prompt
-        answer = ask_qwen(settings, prompt)
+        answer = ask_llm(settings, prompt)
         payload = {"answer": answer.text, "model": answer.model, "usage": answer.usage}
         output = json.dumps(payload, ensure_ascii=False, indent=2)
         print(output.replace(settings.api_key, "[REDACTED]"))
         return 0
-    except (ConfigurationError, QwenError, ValueError, OSError) as error:
+    except (ConfigurationError, LLMError, ValueError, OSError) as error:
         message = str(error)
         if settings and settings.api_key:
             message = message.replace(settings.api_key, "[REDACTED]")

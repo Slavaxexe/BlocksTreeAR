@@ -1,4 +1,4 @@
-"""Read baseline-compatible configuration without exposing credentials."""
+"""Connection settings for an OpenAI-compatible model API."""
 
 from dataclasses import dataclass, field
 import math
@@ -21,6 +21,8 @@ class Settings:
     model: str
     timeout_seconds: float | None = None
     max_tokens: int | None = None
+    api_profile: str = "standard"
+    tools_enabled: bool = True
 
     @classmethod
     def from_env(
@@ -30,22 +32,35 @@ class Settings:
     ) -> "Settings":
         path = env_file if env_file is not None else Path(__file__).resolve().parents[1] / ".env"
         # Disable expansion so credentials containing '$' stay literal.
-        values = dict(dotenv_values(path, encoding="utf-8", interpolate=False))
-        values.update(os.environ if environ is None else environ)
+        values = {}
+        for source in (dict(dotenv_values(path, encoding="utf-8", interpolate=False)),
+                       dict(os.environ if environ is None else environ)):
+            # Accept old variable names while preserving environment-over-file precedence.
+            for name in ('TIMEOUT_SECONDS', 'MAX_TOKENS'):
+                if 'LLM_' + name not in source and 'QWEN_' + name in source:
+                    source['LLM_' + name] = source['QWEN_' + name]
+            values.update(source)
+        tools = str(values.get('LLM_TOOLS_ENABLED') or 'true').strip().lower()
+        if tools not in {'true', 'false', '1', '0'}:
+            raise ConfigurationError('LLM_TOOLS_ENABLED: используйте true или false.')
         try:
-            timeout = float(values.get("QWEN_TIMEOUT_SECONDS") or "0")
-            max_tokens = int(values.get("QWEN_MAX_TOKENS") or "0")
+            timeout = float(values.get("LLM_TIMEOUT_SECONDS") or "0")
+            max_tokens = int(values.get("LLM_MAX_TOKENS") or "0")
         except (ValueError, TypeError):
-            raise ConfigurationError("QWEN_TIMEOUT_SECONDS и QWEN_MAX_TOKENS должны быть числами.") from None
+            raise ConfigurationError("LLM_TIMEOUT_SECONDS и LLM_MAX_TOKENS должны быть числами.") from None
         return cls(
             api_key=(values.get("OPENAI_API_KEY") or "").strip(),
             base_url=(values.get("OPENAI_BASE_URL") or "").strip(),
             model=(values.get("OPENAI_MODEL") or "").strip(),
             timeout_seconds=timeout if timeout else None,
             max_tokens=max_tokens if max_tokens else None,
+            api_profile=(values.get("LLM_API_PROFILE") or "standard").strip().lower(),
+            tools_enabled=tools in {"true", "1"},
         )
 
     def validate(self) -> None:
+        if self.api_profile not in {"standard", "qwen"}:
+            raise ConfigurationError("LLM_API_PROFILE: используйте standard или qwen.")
         missing = [name for name, value in (
             ("OPENAI_API_KEY", self.api_key),
             ("OPENAI_BASE_URL", self.base_url),
@@ -62,9 +77,15 @@ class Settings:
         if not valid_url:
             raise ConfigurationError("OPENAI_BASE_URL: нужен абсолютный HTTP/HTTPS URL с корректным адресом и портом.")
         if self.timeout_seconds is not None and (not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0):
-            raise ConfigurationError("QWEN_TIMEOUT_SECONDS должен быть конечным положительным числом.")
+            raise ConfigurationError("LLM_TIMEOUT_SECONDS должен быть конечным положительным числом.")
         if self.max_tokens is not None and self.max_tokens <= 0:
-            raise ConfigurationError("QWEN_MAX_TOKENS должен быть положительным целым числом.")
+            raise ConfigurationError("LLM_MAX_TOKENS должен быть положительным целым числом.")
+
+    def reasoning_options(self, thinking=False):
+        if self.api_profile == 'qwen':
+            options = {'enable_thinking': thinking, 'reasoning_effort': 'medium' if thinking else 'low'}
+            return {'temperature': 0, 'extra_body': {**options, 'chat_template_kwargs': options}}
+        return {}
 
     def public_status(self) -> dict:
         return {
@@ -73,4 +94,6 @@ class Settings:
             "model_configured": bool(self.model),
             "timeout_seconds": self.timeout_seconds,
             "max_tokens": self.max_tokens,
+            "api_profile": self.api_profile,
+            "tools_enabled": self.tools_enabled,
         }

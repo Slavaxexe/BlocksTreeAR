@@ -1,4 +1,4 @@
-"""Stateless Qwen roles with bounded repair and locally validated JSON."""
+"""Stateless LLM roles with bounded repair and locally validated JSON."""
 
 import asyncio
 import hashlib
@@ -20,7 +20,7 @@ from .context import (analyzer_context, compact, node_context, planner_catalog, 
                       repair_context, research_memory_view, select_research, table, task_context)
 from .contracts import (Analysis, DataFacts, Extraction, Ideas, LLMCall, MetricFacts, NodePlan, OutputFacts,
                         PreparationDraft, ProblemFacts, RunReport, validated_ideas)
-from .qwen import QwenError, QwenTemporaryError, api_error_details
+from .llm import LLMError, LLMTemporaryError, api_error_details
 from .storage import append_event, fingerprint, save
 
 
@@ -217,7 +217,7 @@ class JSONAgents:
             remaining = max(0., self.deadline - time.monotonic())
             await asyncio.wait_for(self.slots.acquire(), remaining if math.isfinite(remaining) else None)
         except TimeoutError:
-            raise QwenError('Исчерпан лимит времени в очереди обращений к Qwen.') from None
+            raise LLMError('Исчерпан лимит времени в очереди обращений к LLM.') from None
         token = object()
         try:
             self.root.active[token] = {'role': role, 'node_id': self.node_id, 'block': self.block}
@@ -243,7 +243,7 @@ class JSONAgents:
             # All code versions of this node's block share the same reference budget.
             used = self.root.reference_rounds.get(reference_key, 0)
             reference_limit = min(reference_limit, MAX_REFERENCE_ROUNDS - used)
-        reference_enabled = reference_enabled and reference_limit > 0
+        reference_enabled = reference_enabled and self.settings.tools_enabled and reference_limit > 0
         from .guidance import augment_prompt, prompt_sizes
         prompt, guidance = augment_prompt(prompt, role, self.root.guidance_observations)
         if guidance:
@@ -263,7 +263,7 @@ class JSONAgents:
         # Keep a tool-free system prompt for recovery after an empty continuation.
         final_system = messages[0]['content'].replace(REFERENCE_RULES, 'Do not call tools. ')
         reference_results = []
-        # Validate JSON locally; server grammar constraints can break Qwen responses.
+        # Validate JSON locally; server grammar constraints can break LLM responses.
         if reference_enabled:
             messages[0]['content'] = (f'At most {reference_limit} reference tool round(s) are available. '
                                       'Batch missing details in one round; then return the final schema object. '
@@ -277,15 +277,15 @@ class JSONAgents:
             # A rate limit pauses all roles sharing this key, not just the failed request.
             while True:
                 if self.root.api_error:
-                    raise QwenError(self.root.api_error)
+                    raise LLMError(self.root.api_error)
                 remaining = self.deadline - time.monotonic()
                 if remaining <= 0 or self.remaining_calls <= 0:
-                    raise QwenError("Исчерпан лимит времени или числа LLM-запросов.")
+                    raise LLMError("Исчерпан лимит времени или числа LLM-запросов.")
                 delay = self.root.api_retry_at - time.monotonic()
                 if delay <= 0:
                     break
                 if delay >= remaining:
-                    raise QwenTemporaryError(f'Qwen: роль {role}: пауза API превышает оставшееся время прогона.')
+                    raise LLMTemporaryError(f'LLM: роль {role}: пауза API превышает оставшееся время прогона.')
                 self.log('api_retry_wait', role=role, delay_seconds=delay)
                 await asyncio.sleep(delay)
             reserved = self.root.call_reservations.get(self.node_id, 0)
@@ -303,7 +303,9 @@ class JSONAgents:
                 'model': self.settings.model, 'messages': messages,
                 'prompt_characters': prompt_sizes(messages),
                 'timeout_seconds': timeout, 'max_tokens': max_tokens,
-                'thinking': thinking, 'reasoning_effort': reasoning_effort,
+                'api_profile': self.settings.api_profile,
+                'thinking': thinking if self.settings.api_profile == 'qwen' else None,
+                'reasoning_effort': reasoning_effort if self.settings.api_profile == 'qwen' else None,
                 'reference_round': reference_round, 'reference_limit': reference_limit if reference_enabled else 0,
                 'tools': REFERENCE_TOOLS if reference_enabled else [],
                 'tool_choice': tool_choice if reference_enabled else None})
@@ -311,15 +313,14 @@ class JSONAgents:
             try:
                 async with AsyncOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
                                        max_retries=0, timeout=timeout) as client:
-                    thinking_options = {"enable_thinking": thinking, "reasoning_effort": reasoning_effort}
-                    kwargs = {"extra_body": {**thinking_options, "chat_template_kwargs": thinking_options}}
+                    kwargs = self.settings.reasoning_options(thinking)
                     if reference_enabled:
                         kwargs.update(tools=REFERENCE_TOOLS, tool_choice=tool_choice)
                     if max_tokens is not None:
                         kwargs['max_tokens'] = max_tokens
                     async with asyncio.timeout(timeout):
                         response = await client.chat.completions.create(
-                            model=self.settings.model, messages=messages, temperature=0,
+                            model=self.settings.model, messages=messages,
                             **kwargs)
             except asyncio.CancelledError:
                 self.calls.append(LLMCall(role=role, node_id=self.node_id, block=self.block, attempt=attempt,
@@ -335,7 +336,7 @@ class JSONAgents:
                 details = api_error_details(error) if isinstance(error, APIStatusError) else {
                     'kind': 'timeout' if isinstance(error, (APITimeoutError, TimeoutError)) else 'connection_error'}
                 if details['kind'] == 'quota_exceeded':
-                    self.root.api_error = 'Qwen API: исчерпан бюджет или квота ключа. Повторные запросы остановлены.'
+                    self.root.api_error = 'LLM API: исчерпан бюджет или квота ключа. Повторные запросы остановлены.'
                     suffix += '; исчерпан бюджет или квота ключа'
                 elif status == 429:
                     delay = details.setdefault('retry_after_seconds', min(60., 5. * 2 ** (attempt - 1)))
@@ -347,19 +348,19 @@ class JSONAgents:
                 self.log('api_failed', role=role, request_id=request_id, error=suffix,
                          duration_seconds=time.monotonic() - started, **details)
                 if self.root.api_error:
-                    raise QwenError(self.root.api_error) from None
+                    raise LLMError(self.root.api_error) from None
                 if status == 429:
                     if network_failures < 5 and self.remaining_calls > 0:
                         attempt += 1
                         continue
-                    raise QwenTemporaryError(f'Qwen: роль {role}: HTTP 429; попытки после пауз исчерпаны.') from None
+                    raise LLMTemporaryError(f'LLM: роль {role}: HTTP 429; попытки после пауз исчерпаны.') from None
                 if network_failures < 5 and (status is None or status >= 500):
                     await asyncio.sleep(min(5., max(0., self.deadline - time.monotonic())))
                     attempt += 1
                     continue
                 if status is None or status >= 500:
-                    raise QwenTemporaryError(f'Qwen: роль {role}: {suffix}; тело ответа сервера скрыто.') from None
-                raise QwenError(f"Qwen: роль {role}: {suffix}; тело ответа сервера скрыто.") from None
+                    raise LLMTemporaryError(f'LLM: роль {role}: {suffix}; тело ответа сервера скрыто.') from None
+                raise LLMError(f"LLM: роль {role}: {suffix}; тело ответа сервера скрыто.") from None
             message = response.choices[0].message if response.choices else None
             content = message.content if message else None
             tool_calls = message.tool_calls if message else None
@@ -453,8 +454,8 @@ class JSONAgents:
                          duration_seconds=time.monotonic() - started)
                 recover_reference = not document and reference_enabled and bool(reference_results)
                 if invalid_responses >= 4:
-                    error_type = QwenTemporaryError if not document or finish_reason == 'length' else QwenError
-                    raise error_type(f"Qwen: роль {role} не вернула JSON-контракт за 4 ответа. {reason}") from None
+                    error_type = LLMTemporaryError if not document or finish_reason == 'length' else LLMError
+                    raise error_type(f"LLM: роль {role} не вернула JSON-контракт за 4 ответа. {reason}") from None
                 attempt += 1
                 if code:
                     thinking, reasoning_effort = True, 'medium'
@@ -492,7 +493,7 @@ class JSONAgents:
                 self.calls.append(LLMCall(status="completed", **stats))
                 self.log('api_completed', request_id=request_id, duration_seconds=time.monotonic() - started, **stats)
                 return result
-        raise QwenError("Qwen не вернул валидный контракт.")
+        raise LLMError("LLM не вернул валидный контракт.")
 
 
     async def extract(self, text: str, output: Path) -> Extraction:
@@ -523,7 +524,7 @@ class JSONAgents:
         results = await asyncio.gather(*(one(*role) for role in roles), return_exceptions=True)
         errors = [str(result) for result in results if isinstance(result, Exception)]
         if errors:
-            raise QwenError("; ".join(errors))
+            raise LLMError("; ".join(errors))
         return Extraction(**dict(zip((r[0] for r in roles), results)))
 
     async def prepare(self, context: dict):
@@ -656,7 +657,7 @@ class JSONAgents:
             "Set automl for FLAML/AutoGluon: exact model IDs from automl_engines, fixed parameters or typed "
             "search_space, internal validation/folds, bagging/stacking and feature recipes. Do not repeat "
             "an unchanged automl_portfolio configuration. Dedicated FLAML/AutoGluon trials are scheduled separately "
-            "and Qwen configures them using EDA; do not duplicate or remove their pending entries. After results "
+            "and LLM configures them using EDA; do not duplicate or remove their pending entries. After results "
             "arrive, propose targeted improvements or ensembles using their sources. Other ready models use "
             "installed sklearn-compatible fit/predict. "
             "Standalone preprocess supports encoding=native with native_backend=catboost/lightgbm/xgboost; use the matching estimator library. Ordinary ordinal/onehot still produces numeric arrays. "
@@ -862,7 +863,7 @@ async def extract_task(task_path: Path, output: Path, settings: Settings, *, age
         extraction = await agents.extract(text, output / "extraction")
         save(output / "extraction.json", extraction)
         report = report.model_copy(update={"status": "ready", "checks": ["four_typed_blocks", "source_quotes"]})
-    except (ValueError, OSError, QwenError) as error:
+    except (ValueError, OSError, LLMError) as error:
         agents.log('extraction_failed', traceback=traceback.format_exc())
         report = report.model_copy(update={"status": "failed", "errors": [str(error).replace(settings.api_key, "[REDACTED]")]})
     report = report.model_copy(update={"llm_calls": list(agents.calls)})

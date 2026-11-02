@@ -13,7 +13,7 @@ from .context import (catalog_view, compact, experiment_index, idea_history_view
                       operation_view, select_experiments)
 from .contracts import Assembly, Block, Hypothesis, Idea, Ideas, Pipeline, Proposal
 from .plans import AutoMLPlan, ToolCall
-from .qwen import QwenError
+from .llm import LLMError
 from .storage import fingerprint, save
 
 
@@ -80,7 +80,7 @@ class Search:
             self.used_ideas[fingerprint(idea.model_dump(exclude={'expected_effect'}))] = record['id']
 
         # Cheap independent reference families complement the configurable AutoML trials.
-        # Qwen still chooses their features/settings; unsupported task families skip these probes.
+        # LLM still chooses their features/settings; unsupported task families skip these probes.
         if kind in {'regression', 'classification'} and self.agents.deadline - time.monotonic() > 90:
             for name in ('ExtraTrees', 'regularized linear'):
                 if len(self.queue) >= remaining:
@@ -103,7 +103,7 @@ class Search:
                             shared=self.agents, node_id=node_id)
         try:
             plan = await client.configure_automl(context, engine)
-        except QwenError as error:
+        except LLMError as error:
             # A broken planning reply must not silently remove the reserved adapter trial.
             self.notify(f'{node_id}: AutoML configuration failed; using {engine} defaults: {error}')
             self.agents.log('automl_configuration_fallback', node_id=node_id, engine=engine, error=str(error))
