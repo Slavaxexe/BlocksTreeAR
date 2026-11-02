@@ -1,4 +1,4 @@
-"""Platform entry: python solution.py path/to/task.md [--max-experiments 10]."""
+"""Run an ML task: python solution.py path/to/task.md [--max-experiments 10]."""
 
 import sys
 from agent.__main__ import main as cli

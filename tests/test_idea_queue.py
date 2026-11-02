@@ -100,11 +100,11 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('node_001', search.parents)
 
     async def test_baker_contract_failure_allows_a_fresh_request(self):
-        from agent.qwen import QwenError
+        from agent.llm import LLMError
         with tempfile.TemporaryDirectory() as temporary:
             search = self.make_search(temporary)
             async def fail():
-                raise QwenError('Invalid parent in model response')
+                raise LLMError('Invalid parent in model response')
             for _ in range(3):
                 task = search.baker = asyncio.create_task(fail())
                 await asyncio.gather(task, return_exceptions=True)
@@ -326,12 +326,12 @@ class AutoMLQueueTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_auto_configuration_failure_preserves_the_reserved_trial(self):
         from agent.plans import AutoMLPlan
-        from agent.qwen import QwenError
+        from agent.llm import LLMError
         with tempfile.TemporaryDirectory() as temporary:
             shared = {'requirements': {'problem': {'task_type':'regression'}, 'output':{}},
                       'data_research': {'feature_candidates':[]}}
             search = self.make_search(temporary, shared)
-            with patch.object(JSONAgents, 'configure_automl', side_effect=QwenError('Bad reply')):
+            with patch.object(JSONAgents, 'configure_automl', side_effect=LLMError('Bad reply')):
                 proposal = await search.dedicated_automl_plan(idea(), 'autogluon', {}, 'node_001')
             self.assertEqual(proposal.assembly.blocks[0].operation.parameters['engine'], 'autogluon')
             self.assertFalse(proposal.assembly.blocks[0].operation.parameters['ensemble'])

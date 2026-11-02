@@ -22,7 +22,7 @@ from .context import (execution_contract, history_view, model_feedback, preparat
                       requirements, research_profile_view)
 from .contracts import Assembly, Block, Delta, Extraction, Finish, Hypothesis, NodeDelta, Pipeline, Preparation, Proposal, Start
 from .data import check_code, file_hash, installed_libraries, inventory, within
-from .qwen import QwenError
+from .llm import LLMError
 from .search import Search
 from .research import Research
 from .storage import atomic_bytes, load, save

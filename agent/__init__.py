@@ -1,1 +1,1 @@
-"""Connection starter for the hackathon's Qwen endpoint."""
+"""BlocksTreeAR: model-guided research and experiment pipelines."""

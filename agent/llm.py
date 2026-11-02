@@ -1,4 +1,4 @@
-"""Small adapter for the OpenAI-compatible interface used by the baseline."""
+"""Client for OpenAI-compatible chat completions."""
 
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
@@ -12,11 +12,11 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from .config import Settings
 
 
-class QwenError(RuntimeError):
+class LLMError(RuntimeError):
     """A printable error without raw provider responses or credentials."""
 
 
-class QwenTemporaryError(QwenError):
+class LLMTemporaryError(LLMError):
     """A connection, server or rate-limit failure that may be retried within run limits."""
 
 
@@ -67,11 +67,11 @@ class Answer:
     usage: dict | None
 
 
-def ask_qwen(
+def ask_llm(
     settings: Settings,
     prompt: str,
     *,
-    system_prompt: str = "Ты помощник команды ML-хакатона. Отвечай кратко и по существу.",
+    system_prompt: str = "Ты помощник по машинному обучению. Отвечай кратко и по существу.",
     http_client: httpx.Client | None = None,
 ) -> Answer:
     settings.validate()
@@ -85,7 +85,9 @@ def ask_qwen(
             max_retries=0,
             http_client=http_client,
         ) as client:
-            kwargs = {'max_tokens': settings.max_tokens} if settings.max_tokens is not None else {}
+            kwargs = settings.reasoning_options()
+            if settings.max_tokens is not None:
+                kwargs['max_tokens'] = settings.max_tokens
             response = client.chat.completions.create(
                 model=settings.model,
                 messages=[
@@ -95,20 +97,20 @@ def ask_qwen(
                 **kwargs,
             )
     except APITimeoutError:
-        raise QwenError("Qwen не ответил до истечения таймаута. Повторный запрос автоматически не отправлялся.") from None
+        raise LLMError("LLM не ответил до истечения таймаута. Повторный запрос автоматически не отправлялся.") from None
     except APIConnectionError:
-        raise QwenError("Не удалось подключиться к Qwen. Проверьте адрес API и сеть.") from None
+        raise LLMError("Не удалось подключиться к LLM. Проверьте адрес API и сеть.") from None
     except APIStatusError as error:
         hints = {
             401: "Проверьте ключ и срок его действия.",
-            403: "Проверьте доступ команды к этому API.",
+            403: "Проверьте доступ к этому API.",
             404: "Проверьте base URL и API-имя модели.",
-            429: "Достигнут лимит запросов или бюджет команды.",
+            429: "Достигнут лимит запросов или бюджет API.",
         }
         hint = hints.get(error.status_code, "Проверьте совместимость API и состояние сервиса.")
-        raise QwenError(f"Qwen API вернул HTTP {error.status_code}. {hint}") from None
+        raise LLMError(f"LLM API вернул HTTP {error.status_code}. {hint}") from None
     if not response.choices or not response.choices[0].message.content:
-        raise QwenError("API не вернул текст ответа. Проверьте формат ответа и лимит генерации.")
+        raise LLMError("API не вернул текст ответа. Проверьте формат ответа и лимит генерации.")
     return Answer(
         text=response.choices[0].message.content,
         model=response.model,

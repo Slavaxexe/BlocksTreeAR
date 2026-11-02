@@ -136,7 +136,7 @@ def collect_folders(root: Path, folders: list[Path], prefix: str) -> list[dict]:
 
 HTML = r'''<!doctype html>
 <html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Alfa · Извлечение и эксперименты</title><link rel="icon" href="data:,">
+<title>BlocksTreeAR · Эксперименты</title><link rel="icon" href="data:,">
 <style>
 :root{color-scheme:light dark;--bg:light-dark(#f6f7fa,#11141a);--paper:light-dark(#fff,#1a1f28);--ink:light-dark(#202638,#e2e7ef);--muted:light-dark(#647084,#a3aec0);--line:light-dark(#dce1eb,#353d4d);--purple:light-dark(#6947c4,#bea7ff);--purple-bg:light-dark(#f2edff,#2c2444);--teal:light-dark(#087c72,#75d7c1);--teal-bg:light-dark(#eaf7f2,#17362f);--red:light-dark(#b34343,#f4a2a2);--red-bg:light-dark(#fff0ef,#3d272a);--amber:light-dark(#95650b,#e5bf74)}
 
@@ -241,7 +241,7 @@ nav{flex-wrap:wrap}
 <header><div><h1>Поиск ML-решений</h1><small>Поиск моделей · исследование данных подключается отдельно</small></div><nav aria-label="Разделы"><button id="extraction-tab" aria-selected="true">Извлечение</button><button id="architecture-tab" aria-selected="false">Схема</button><button id="tree-tab" aria-selected="false">Эксперименты</button><button id="research-tab" aria-selected="false">Анализ данных</button></nav></header>
 <div class="topline"><label id="run-picker" hidden>Запуск <select id="runs" aria-label="Запуск"></select></label><span id="connection" role="status"></span></div>
 <main>
-<section id="architecture-panel" class="panel" hidden><p class="muted">Исследование данных по умолчанию отключено. Схема показывает полный путь при --research-parallel 2: исследования структуры до фиксации split и фоновые проверки во время поиска моделей.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>Qwen</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Дерево моделей и параллельное дерево исследования данных"></svg></div><p class="footnote">Лимит 8 обращений Qwen общий для всех ролей. Каждому процессу выделяется один CPU-поток. Исследования используют отдельную часть общего API-бюджета. Split во время поиска не меняется.</p></section>
+<section id="architecture-panel" class="panel" hidden><p class="muted">Исследования структуры помогают выбрать split. Затем EDA продолжается параллельно с поиском моделей.</p><div class="legend"><span><i class="dot"></i>Python</span><span><i class="dot llm"></i>LLM</span><span><i class="dot cpu"></i>Обучение и оценка</span></div><div class="diagram-scroll"><svg id="architecture" class="architecture" role="img" aria-label="Дерево моделей и параллельное дерево исследования данных"></svg></div><p class="footnote">Лимит 8 обращений LLM общий для всех ролей. Каждому процессу выделяется один CPU-поток. Исследования используют отдельную часть общего API-бюджета. Split во время поиска не меняется.</p></section>
 <section id="tree-panel" class="panel" hidden><div id="empty" hidden></div><div id="experiment"><div id="summary" class="summary"></div><div id="ideas-overview" class="assembly-overview" hidden></div><p id="tree-legend" class="legend"></p><div id="assembly-overview" class="assembly-overview" hidden></div><div class="tree-shell"><div class="tree-container"><svg id="tree" class="tree" role="img" aria-label="Основные предки и источники модулей"></svg></div><aside id="detail" class="detail" aria-label="Детали выбранной ноды"></aside></div></div><p id="tree-note" class="footnote"></p></section>
 </main><script id="initial-data" type="application/json">__DATA__</script>
 <script>
@@ -268,10 +268,10 @@ function architecture(){
  const c=$('architecture'); marker(c); c.setAttribute('viewBox','0 0 1050 1250');
  const stages=[
   ['01 Задание',['Условие, словарь, данные'],''],
-  ['02 Извлечение · Qwen',['Четыре запроса → требования'],'llm'],
+  ['02 Извлечение · LLM',['Четыре запроса → требования'],'llm'],
   ['03 Загрузка и профиль',['Распределения, пропуски, дубликаты'],'cpu'],
   ['04 Первые 2 исследования',['Вопрос → код → измерения → вывод'],'llm'],
-  ['05 Фиксация split',['Qwen учитывает результаты исследований'],'cpu'],
+  ['05 Фиксация split',['LLM учитывает результаты исследований'],'cpu'],
   ['06 Baker → планировщики',['Идеи с актуальным контекстом данных'],'llm'],
   ['07 Шесть нод моделей',['Улучшения + модельные альтернативы'],''],
   ['08 Исполнение и анализ',['Метрики, ошибки, лучший submission'],'cpu']];
@@ -320,14 +320,14 @@ function render() {
   if (!r.nodes.some(n => n.id === selected)) selected = r.nodes.find(n => n.id === r.best?.node_id)?.id ?? r.nodes[0]?.id;
   const mode = modeOf(r), metric = r.preparation?.metric?.name ?? r.task?.metric?.name ?? 'Не записана';
   const info = [
-    ['Источник гипотез', mode === 'offline' ? 'Фиксированная очередь' : mode === 'qwen' ? 'Qwen API' : 'Режим не записан'],
+    ['Источник гипотез', mode === 'offline' ? 'Фиксированная очередь' : mode === 'qwen' ? 'LLM API' : 'Режим не записан'],
     ['Основная метрика', metric], ['Лучший score', fmt(r.best?.value)],
     ['Запуск', r.report?.status ? extractionStatus(r) : 'report.json ещё не записан'],
     ['Остановка', stops[r.report?.stop_reason]??'Ещё не остановлен'], ['Нод всего', r.nodes.length],
     ['Нод одновременно', (r.report?.running_nodes?.length??0)+' / '+(r.report?.max_parallel_nodes??'—')],
     ['Анализ данных', (r.report?.researching_nodes?.length??0)+' / '+(r.report?.max_parallel_research??'—')],
     ['Контекст данных', 'v'+(r.report?.research_revision??0)+' · '+(r.report?.research_insights??0)+' выводов'],
-    ['Агентов Qwen', (r.report?.active_agents?.length??0)+' / '+(r.report?.max_parallel_agents??'—')],
+    ['Агентов LLM', (r.report?.active_agents?.length??0)+' / '+(r.report?.max_parallel_agents??'—')],
     ['Улучшения', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='improve').length??0],
     ['Модельные альтернативы', r.report?.running_nodes?.filter(id=>r.nodes.find(n=>n.id===id)?.start.purpose==='explore').length??0],
     ['Идей в очереди', r.report?.queued_ideas?.length??0],
@@ -441,7 +441,7 @@ function drawExtraction(r) {
     r.extraction ? 'extraction.json сохранён' : 'Итоговый JSON ещё нет'], r.extraction?'completed':report?.status==='failed'?'failed':'pending');
   edge(c, 'M 607 195 V 280'); edge(c, 'M 607 390 V 410');
   const p = r.preparation, n = r.nodes.find(n=>n.id==='node_000'), f = n?.finish;
-  card('preparation', 500, 280, 215, 'Подготовка · Qwen + Python', [
+  card('preparation', 500, 280, 215, 'Подготовка · LLM + Python', [
     'preparation.json', p?.status??'Файл ещё не записан', p?.metric?.name??''],
     p?.status==='blocked'?'failed':p?.status==='ready'?'completed':p?.status==='partial'?'partial':'pending');
   card('node_000', 500, 410, 215, 'node_000 · Baseline', [
@@ -463,7 +463,7 @@ function drawExtractionDetail(r) {
   if (key === 'result' || key === 'preparation' || key === 'delta') {
     d.append(element('p', '', key==='result' ? 'extraction.json объединяет ответы с evidence. report.json хранит этап, ошибки и попытки API.'
       : key==='delta' ? 'Python сравнил планы и измеренные score. Baker получает эту историю для следующих идей.'
-      : 'Qwen предложил чтение, split и scorer в prepare.py. Python измерил профиль и сохранил общие условия экспериментов.'));
+      : 'LLM предложил чтение, split и scorer в prepare.py. Python измерил профиль и сохранил общие условия экспериментов.'));
     if (key === 'delta') {
       const button = element('button', '', 'Открыть дерево экспериментов'); button.onclick = () => showTab('tree'); d.append(button);
     }
@@ -483,7 +483,7 @@ function drawExtractionDetail(r) {
     d.append(tabs, element('pre', '', typeof value==='string'?value:value?JSON.stringify(value, null, 2):'Файл ещё не записан.'));
   } else {
     const block = r.blocks[key], facts = element('div', 'facts');
-    d.append(element('p', '', block ? 'Принятый ответ Qwen: поля, типы и цитаты прошли проверку.' : 'Файл не сохранён. Принятого ответа этого extractor’а пока нет.'));
+    d.append(element('p', '', block ? 'Принятый ответ LLM: поля, типы и цитаты прошли проверку.' : 'Файл не сохранён. Принятого ответа этого extractor’а пока нет.'));
     for (const [field, value] of Object.entries(block ?? {}).filter(([field]) => field !== 'evidence')) {
       const row = element('div', 'comparison'); row.append(element('b', 'mono', field),
         element('p', '', value === null ? 'Не указано в условии (null)' : typeof value==='object' ? JSON.stringify(value) : String(value)));

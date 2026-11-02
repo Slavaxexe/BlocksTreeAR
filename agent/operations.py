@@ -1,4 +1,4 @@
-"""Trusted experiment operations. Qwen selects configurations, never Python source."""
+"""Trusted experiment operations. LLM selects configurations, never Python source."""
 from importlib import import_module
 import inspect
 import time

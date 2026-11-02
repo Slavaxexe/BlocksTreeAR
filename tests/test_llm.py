@@ -1,4 +1,4 @@
-"""Offline tests: no organizer token, network calls, or paid requests."""
+"""Offline tests for model configuration and HTTP requests."""
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
@@ -13,7 +13,7 @@ import httpx
 
 from agent.__main__ import main
 from agent.config import ConfigurationError, Settings
-from agent.qwen import QwenError, ask_qwen
+from agent.llm import LLMError, ask_llm
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -31,6 +31,20 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(dict(os.environ), original)
             self.assertNotIn("test-secret", repr(config))
             self.assertNotIn("test-secret", json.dumps(config.public_status()))
+
+    def test_generic_settings_and_legacy_environment_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '.env'
+            path.write_text('LLM_TIMEOUT_SECONDS=400\nLLM_MAX_TOKENS=100\n', encoding='utf-8')
+            settings = Settings.from_env(path, {'QWEN_TIMEOUT_SECONDS': '25',
+                'LLM_MAX_TOKENS': '200', 'QWEN_MAX_TOKENS': '300',
+                'LLM_API_PROFILE': 'qwen', 'LLM_TOOLS_ENABLED': 'false'})
+            self.assertEqual((settings.timeout_seconds, settings.max_tokens), (25, 200))
+            self.assertEqual(settings.api_profile, 'qwen')
+            self.assertFalse(settings.tools_enabled)
+            defaults = Settings.from_env(Path(directory) / 'missing', {})
+            self.assertEqual(defaults.api_profile, 'standard')
+            self.assertEqual(defaults.reasoning_options(True), {})
 
     def test_missing_endpoint_is_rejected_instead_of_using_default_openai_host(self):
         with self.assertRaisesRegex(ConfigurationError, "OPENAI_BASE_URL"):
@@ -54,7 +68,7 @@ class ConfigurationTests(unittest.TestCase):
                 Settings("test-secret", "https://qwen.example/v1", "qwen-model", timeout, tokens).validate()
 
 
-class QwenTests(unittest.TestCase):
+class LLMTests(unittest.TestCase):
     def setUp(self):
         self.settings = Settings("test-secret", "https://qwen.example/v1", "qwen-model", 5, 128)
 
@@ -94,7 +108,7 @@ class QwenTests(unittest.TestCase):
                 "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
             })
 
-        answer = ask_qwen(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+        answer = ask_llm(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
         self.assertEqual(len(seen), 1)
         self.assertEqual(answer.text, "готов")
         self.assertEqual(answer.usage["total_tokens"], 4)
@@ -108,8 +122,8 @@ class QwenTests(unittest.TestCase):
                 return httpx.Response(code, json={"error": {"message": "test-secret", "type": "test"}})
 
             with self.subTest(status=code):
-                with self.assertRaises(QwenError) as caught:
-                    ask_qwen(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+                with self.assertRaises(LLMError) as caught:
+                    ask_llm(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
                 self.assertIn(str(code), str(caught.exception))
                 self.assertNotIn("test-secret", str(caught.exception))
                 self.assertEqual(len(seen), 1)
@@ -118,8 +132,8 @@ class QwenTests(unittest.TestCase):
         def handler(request):
             raise httpx.ReadTimeout("test-secret", request=request)
 
-        with self.assertRaises(QwenError) as caught:
-            ask_qwen(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+        with self.assertRaises(LLMError) as caught:
+            ask_llm(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
         self.assertIn("таймаута", str(caught.exception))
         self.assertNotIn("test-secret", str(caught.exception))
 
@@ -128,14 +142,14 @@ class QwenTests(unittest.TestCase):
             return httpx.Response(200, json={"id": "chat-test", "object": "chat.completion",
                 "created": 0, "model": "qwen-model", "choices": []})
 
-        with self.assertRaises(QwenError):
-            ask_qwen(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+        with self.assertRaises(LLMError):
+            ask_llm(self.settings, "hello", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
 
     def test_check_config_is_offline_and_hides_the_key(self):
         out = io.StringIO()
         config = Settings("test-secret", "", "qwen-model")
         with patch("agent.__main__.Settings.from_env", return_value=config), \
-             patch("agent.__main__.ask_qwen") as ask, redirect_stdout(out):
+             patch("agent.__main__.ask_llm") as ask, redirect_stdout(out):
             result = main(["check-config"])
         self.assertEqual(result, 2)
         self.assertFalse(json.loads(out.getvalue())["ready"])
@@ -145,12 +159,48 @@ class QwenTests(unittest.TestCase):
     def test_cli_handles_provider_failure_without_traceback_or_secret(self):
         err = io.StringIO()
         with patch("agent.__main__.Settings.from_env", return_value=self.settings), \
-             patch("agent.__main__.ask_qwen", side_effect=QwenError("HTTP 401 test-secret")), \
+             patch("agent.__main__.ask_llm", side_effect=LLMError("HTTP 401 test-secret")), \
              redirect_stderr(err):
             result = main(["ping"])
         self.assertEqual(result, 2)
         self.assertIn("HTTP 401", err.getvalue())
         self.assertNotIn("test-secret", err.getvalue())
+
+
+class ModelRequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_standard_and_qwen_profiles_and_optional_tools(self):
+        import time
+        from openai import AsyncOpenAI
+        from agent.agents import JSONAgents
+        from agent.contracts import Analysis
+
+        for profile, tools in [('standard', False), ('standard', True), ('qwen', True)]:
+            with self.subTest(profile=profile, tools=tools):
+                requests = []
+                def handler(request):
+                    body = json.loads(request.content)
+                    requests.append(body)
+                    if profile == 'standard':
+                        self.assertLessEqual(set(body), {'model', 'messages', 'tools', 'tool_choice', 'max_tokens'})
+                    return httpx.Response(200, json={'id': 'mock', 'object': 'chat.completion',
+                        'created': 0, 'model': 'chosen-model', 'choices': [{'index': 0,
+                        'message': {'role': 'assistant', 'content': '{"summary":"Measured result","findings":[],"next_ideas":[]}'},
+                        'finish_reason': 'stop'}]})
+                def client(**kwargs):
+                    return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+                settings = Settings('fake', 'https://model.example/v1', 'chosen-model', max_tokens=128,
+                                    api_profile=profile, tools_enabled=tools)
+                with patch('agent.agents.AsyncOpenAI', side_effect=client):
+                    result = await JSONAgents(settings, time.monotonic() + 10, 2).ask(
+                        Analysis, 'Review measured facts', 'analyzer', reference=True)
+                self.assertEqual(result.summary, 'Measured result')
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]['model'], 'chosen-model')
+                self.assertEqual(requests[0]['max_tokens'], 128)
+                self.assertEqual('tools' in requests[0], tools)
+                if profile == 'qwen':
+                    self.assertTrue(requests[0]['enable_thinking'])
+                    self.assertEqual(requests[0]['chat_template_kwargs']['reasoning_effort'], 'medium')
 
 
 class ReferenceRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -190,7 +240,7 @@ class ReferenceRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         result = await agents.ask(Program, 'original task', 'implementer', code=True, reference=True)
                         self.assertEqual(result.code, code)
                     else:
-                        with self.assertRaises(QwenError):
+                        with self.assertRaises(LLMError):
                             await agents.ask(Program, 'original task', 'implementer', code=True, reference=True)
                 expected_calls = 3 if succeeds else 5  # One tool reply and up to four invalid final replies.
                 self.assertEqual(len(requests), expected_calls)

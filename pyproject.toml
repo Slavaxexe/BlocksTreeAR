@@ -1,7 +1,7 @@
 [project]
-name = "alfa-hack-agent"
+name = "blockstreear"
 version = "0.1.0"
-description = "Schema-validated ML experiment agent for the Alfa hackathon"
+description = "Model-guided feature research and reusable ML experiment trees"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "httpx==0.28.1",
